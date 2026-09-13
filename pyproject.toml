@@ -1,0 +1,35 @@
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+]
+
+
+[tool.ruff.format]
+quote-style = "double"
+
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+
+
+[tool.mypy]
+python_version = "3.12"
+
+plugins = [
+    "mypy_django_plugin.main",
+]
+
+ignore_missing_imports = true
+
+
+[tool.django-stubs]
+django_settings_module = "config.settings.test"
