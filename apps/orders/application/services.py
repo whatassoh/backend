@@ -16,6 +16,13 @@ from apps.orders.domain.enums import (
     OrderItemResolutionStatus,
     OrderStatus,
 )
+from apps.orders.domain.events import (
+    OrderCancelled,
+    OrderConfirmed,
+    OrderCreated,
+    OrderFailed,
+    OrderRetryRequested,
+)
 from apps.orders.domain.exceptions import (
     InvalidCancellation,
     InvalidOrderState,
@@ -30,6 +37,7 @@ from apps.orders.domain.rules import (
 )
 from apps.orders.domain.services import generate_order_reference
 from apps.orders.infrastructure.models import Order, OrderItem
+from common.events import publish
 
 MAX_ORDER_REFERENCE_ATTEMPTS = 8
 
@@ -96,6 +104,10 @@ def _record_order_audit(
     )
 
 
+def _publish_after_commit(event: object) -> None:
+    transaction.on_commit(lambda: publish(event))
+
+
 def _item_metadata(item: OrderItem) -> dict[str, Any]:
     return {
         "order_item_id": str(item.id),
@@ -146,6 +158,13 @@ def create_order_draft(
                         "currency": order.currency,
                     },
                     correlation_id=correlation_id,
+                )
+                _publish_after_commit(
+                    OrderCreated(
+                        order_id=order.id,
+                        customer_id=order.customer_id,
+                        correlation_id=correlation_id,
+                    )
                 )
                 return order
         except IntegrityError:
@@ -405,6 +424,13 @@ def confirm_order(
             new_state=OrderStatus.CONFIRMED,
             correlation_id=correlation_id,
         )
+        _publish_after_commit(
+            OrderConfirmed(
+                order_id=locked_order.id,
+                customer_id=locked_order.customer_id,
+                correlation_id=correlation_id,
+            )
+        )
         return locked_order
 
 
@@ -450,6 +476,14 @@ def cancel_order(
                 "reason": reason,
             },
             correlation_id=correlation_id,
+        )
+        _publish_after_commit(
+            OrderCancelled(
+                order_id=locked_order.id,
+                customer_id=locked_order.customer_id,
+                cancellation_code=str(cancellation_code),
+                correlation_id=correlation_id,
+            )
         )
         return locked_order
 
@@ -501,6 +535,14 @@ def fail_order(
             },
             correlation_id=correlation_id,
         )
+        _publish_after_commit(
+            OrderFailed(
+                order_id=locked_order.id,
+                failure_code=str(failure_code),
+                failed_from_status=str(source_status),
+                correlation_id=correlation_id,
+            )
+        )
         return locked_order
 
 
@@ -528,6 +570,7 @@ def retry_failed_order(
                 locked_order.failed_at.isoformat() if locked_order.failed_at else None
             ),
         }
+        previous_failure_code = locked_order.failure_code
 
         locked_order.status = target_status
         locked_order.failed_at = None
@@ -553,6 +596,14 @@ def retry_failed_order(
             new_state=target_status,
             metadata=retry_metadata,
             correlation_id=correlation_id,
+        )
+        _publish_after_commit(
+            OrderRetryRequested(
+                order_id=locked_order.id,
+                failure_code=str(previous_failure_code),
+                retry_target_status=str(target_status),
+                correlation_id=correlation_id,
+            )
         )
         return locked_order
 

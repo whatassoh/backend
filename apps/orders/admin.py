@@ -24,7 +24,22 @@ class OrderAdmin(admin.ModelAdmin):
     list_filter = ["status", "created_at"]
     search_fields = ["reference", "customer__whatsapp_phone"]
     autocomplete_fields = ["customer"]
-    readonly_fields = ["id", "reference", "created_at", "updated_at"]
+    readonly_fields = [
+        "id",
+        "reference",
+        "status",
+        "confirmed_at",
+        "cancelled_at",
+        "completed_at",
+        "failed_at",
+        "cancellation_code",
+        "cancellation_reason",
+        "failure_code",
+        "failure_reason",
+        "failed_from_status",
+        "created_at",
+        "updated_at",
+    ]
 
 
 @admin.register(OrderItem)

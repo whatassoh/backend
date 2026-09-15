@@ -1091,3 +1091,1530 @@ Les histories sont retournes en ordre chronologique clair: `created_at`, puis `i
 - WhatsApp.
 - IA.
 - Paiement.
+
+## Lot 3.4 - Domain Events + Transactions
+
+### Inspection et conventions reutilisees
+
+- `common/events` existait mais etait vide.
+- Aucune abstraction EventBus existante n'etait implementee.
+- Celery est configure dans `config/celery.py`, mais aucun usage event-driven n'existait.
+- Aucun `transaction.on_commit()` existant n'a ete trouve dans le code metier.
+- Les services Orders possedent deja:
+  - `transaction.atomic()`;
+  - `select_for_update()`;
+  - AuditEvent dans la meme transaction metier.
+
+### Abstraction DomainEvent
+
+- Ajout de `common.events.domain.DomainEvent`.
+- Base dataclass immutable avec:
+  - `event_id` UUID;
+  - `occurred_at`;
+  - `correlation_id` nullable.
+- Les evenements transportent des IDs et des snapshots simples, jamais d'objet Django complet.
+- Les payloads sont facilement serialisables pour une future outbox ou Celery.
+
+### Dispatcher / registry
+
+- Ajout de `common.events.bus`.
+- API:
+  - `subscribe(event_type, handler)`;
+  - `unsubscribe(event_type, handler)`;
+  - `publish(event)`;
+  - `clear_subscribers()`;
+  - `subscribed(...)` comme context manager de test.
+- Registry in-process:
+  - mapping `EventClass -> handlers`.
+- `publish()` appelle les handlers synchronement.
+- En cas d'erreur handler:
+  - exception loggee avec `event_type`, `event_id`, handler;
+  - exception remontee;
+  - aucune mutation automatique de `Order`;
+  - jamais de passage automatique a `FAILED`.
+
+### Evenements Orders
+
+- Ajout de `apps.orders.domain.events`.
+- `OrderCreated`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `customer_id`;
+  - `correlation_id`.
+- `OrderConfirmed`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `customer_id`;
+  - `correlation_id`.
+- `OrderCancelled`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `customer_id`;
+  - `cancellation_code`;
+  - `correlation_id`.
+- `OrderFailed`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `failure_code`;
+  - `failed_from_status`;
+  - `correlation_id`.
+- `OrderRetryRequested`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `failure_code` precedent;
+  - `retry_target_status`;
+  - `correlation_id`.
+
+### Integration Orders
+
+- `create_order_draft` publie `OrderCreated` apres commit.
+- `confirm_order` publie `OrderConfirmed` apres commit uniquement si la confirmation est effective.
+- `cancel_order` publie `OrderCancelled` apres commit.
+- `fail_order` publie `OrderFailed` apres commit.
+- `retry_failed_order` publie `OrderRetryRequested` apres commit.
+- Les transitions operationnelles generiques ne publient pas encore de DomainEvent specifique.
+- Les modifications d'items ne publient pas encore de DomainEvent, car aucun autre domaine n'en a besoin dans ce lot.
+
+### Strategie transaction.on_commit
+
+- Les mutations Order/OrderItem et AuditEvent restent dans `transaction.atomic()`.
+- Les DomainEvents sont planifies via `transaction.on_commit()`.
+- Si la transaction rollback:
+  - mutation metier absente;
+  - AuditEvent absent;
+  - DomainEvent non publie.
+- Si le commit reussit:
+  - `publish(event)` est appele apres commit.
+
+### Idempotence
+
+- Les no-op idempotents ne publient pas de nouvel evenement.
+- Exemple:
+  - premier `confirm_order()` effectif -> `OrderConfirmed`;
+  - second `confirm_order()` sur `CONFIRMED` -> aucun nouvel event.
+- `OrderRetryRequested` capture `failure_code` avant nettoyage des champs `Order`.
+
+### Correlation ID
+
+- `correlation_id` est propage depuis les services Orders vers:
+  - AuditEvent;
+  - DomainEvent.
+- L'absence de correlation id est acceptee.
+
+### Tests ajoutes
+
+- Ajout de `apps/orders/tests/test_order_domain_events.py`.
+- Couverture:
+  - `OrderCreated` pas publie avant commit, publie apres commit;
+  - `OrderConfirmed` avec audit present et payload correct;
+  - rollback empeche Order, AuditEvent et DomainEvent;
+  - confirmation repetee ne publie pas deux fois;
+  - `OrderCancelled` seulement pour transition effective;
+  - `OrderFailed` payload failure code/source;
+  - `OrderRetryRequested` conserve le failure code precedent;
+  - echec handler apres commit ne transforme pas Order en `FAILED`;
+  - propagation `correlation_id`.
+
+### Validation
+
+- `.venv/bin/python manage.py check` passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`:
+  - aucune migration manquante;
+  - warning attendu car PostgreSQL local ne repond pas.
+- `.venv/bin/ruff check common/events apps/orders` passe.
+- `.venv/bin/pytest apps/orders/tests apps/audit/tests`:
+  - 54 tests collectes;
+  - 1 test sans DB passe;
+  - 53 tests DB bloques au setup;
+  - PostgreSQL/PostGIS ne repond pas sur `localhost:5432`.
+- Suite globale pertinente:
+  - 145 tests collectes;
+  - 1 test sans DB passe;
+  - 144 tests bloques au setup DB;
+  - meme cause PostgreSQL/PostGIS local inaccessible.
+
+### Limite MVP sans transactional outbox
+
+- `transaction.on_commit()` garantit que le DomainEvent n'est pas publie avant commit.
+- Il ne garantit pas une livraison durable si le processus meurt immediatement apres le commit et avant ou pendant la publication.
+- Evolution future recommandee:
+  - `OutboxEvent` persiste dans la meme transaction;
+  - worker/Celery dispatch;
+  - retries et deduplication durable par `event_id`.
+
+### Pret pour Lot 3.5 et futures phases
+
+- Orders ne depend pas du matching, WhatsApp, Delivery ou notifications.
+- Les handlers futurs pourront s'abonner a `OrderConfirmed`, `OrderFailed`, etc.
+- Les consumers pourront relire `Order` depuis la DB via `order_id`.
+- `event_id` et `correlation_id` preparent l'idempotence et le tracing inter-canaux.
+
+## Lot 3.5 - API Orders et validation finale Phase 3
+
+### Objectif
+
+Exposer les use cases Orders via DRF sans dupliquer la logique metier:
+
+HTTP request -> authentication -> serializer/input validation -> service applicatif -> serializer/output.
+
+La couche API ne modifie pas directement `Order.status`, les timestamps metier, les champs d'echec ou les champs d'annulation.
+
+### Fichiers crees/modifies
+
+- `apps/orders/api/serializers.py`
+- `apps/orders/api/views.py`
+- `apps/orders/api/urls.py`
+- `apps/orders/tests/test_orders_api.py`
+- `apps/orders/admin.py`
+- `config/api_urls.py`
+- `Implementation.md`
+
+### Architecture finale Orders
+
+- `apps.orders.infrastructure.models` contient `Order` et `OrderItem`.
+- `apps.orders.domain.enums` contient les statuts, codes d'annulation, codes d'echec et statuts de resolution.
+- `apps.orders.domain.rules` contient la matrice de transitions, les statuts editables, les sources d'echec autorisees et les cibles retry.
+- `apps.orders.application.services` contient les use cases transactionnels.
+- `apps.orders.application.selectors` contient les lectures optimisees.
+- `apps.orders.domain.events` contient les DomainEvents Orders.
+- `apps.orders.api` expose le canal REST.
+- `apps.audit` conserve l'historique append-only.
+- `common.events` publie les DomainEvents apres commit.
+
+### Modeles
+
+- `Order`:
+  - UUID interne;
+  - reference publique `ORD-YYMMDD-XXXX`;
+  - customer vers `settings.AUTH_USER_MODEL`;
+  - status;
+  - localisation PostGIS nullable;
+  - adresse/instructions de livraison;
+  - devise;
+  - timestamps de confirmation, annulation, completion et echec;
+  - codes/raisons d'annulation et d'echec;
+  - `failed_from_status`;
+  - timestamps techniques.
+- `OrderItem`:
+  - UUID interne;
+  - order;
+  - `requested_name` obligatoire;
+  - quantity decimal strictement positive;
+  - unit;
+  - notes;
+  - Product/ProductVariant optionnels;
+  - resolution_status;
+  - timestamps.
+
+### State Machine
+
+Matrice finale:
+
+- `DRAFT` -> `AWAITING_LOCATION`, `CONFIRMED`, `CANCELLED`
+- `AWAITING_LOCATION` -> `DRAFT`, `CONFIRMED`, `CANCELLED`
+- `CONFIRMED` -> `MATCHING_STORES`, `CANCELLED`
+- `MATCHING_STORES` -> `STORE_OFFERED`, `FAILED`, `CANCELLED`
+- `STORE_OFFERED` -> `STORE_ACCEPTED`, `MATCHING_STORES`, `FAILED`, `CANCELLED`
+- `STORE_ACCEPTED` -> `PREPARING`, `FAILED`, `CANCELLED`
+- `PREPARING` -> `READY_FOR_PICKUP`, `FAILED`, `CANCELLED`
+- `READY_FOR_PICKUP` -> `MATCHING_DRIVERS`, `FAILED`, `CANCELLED`
+- `MATCHING_DRIVERS` -> `DRIVER_ASSIGNED`, `FAILED`, `CANCELLED`
+- `DRIVER_ASSIGNED` -> `PICKED_UP`, `FAILED`, `CANCELLED`
+- `PICKED_UP` -> `IN_DELIVERY`, `FAILED`
+- `IN_DELIVERY` -> `DELIVERED`, `FAILED`
+- `DELIVERED` -> aucune transition normale
+- `CANCELLED` -> aucune transition normale
+- `FAILED` -> retry conditionnel uniquement via `retry_failed_order()`
+
+### Failure / Retry
+
+- `NO_STORE_AVAILABLE`
+  - sources autorisees: `MATCHING_STORES`, `STORE_OFFERED`;
+  - retryable: oui;
+  - target: `MATCHING_STORES`.
+- `NO_DRIVER_AVAILABLE`
+  - sources autorisees: `MATCHING_DRIVERS`;
+  - retryable: oui;
+  - target: `MATCHING_DRIVERS`.
+- `STORE_FULFILLMENT_FAILED`
+  - sources autorisees: `STORE_ACCEPTED`, `PREPARING`, `READY_FOR_PICKUP`;
+  - retryable: non.
+- `DELIVERY_FAILED`
+  - sources autorisees: `DRIVER_ASSIGNED`, `PICKED_UP`, `IN_DELIVERY`;
+  - retryable: non.
+- `OTHER`
+  - sources autorisees: etats operationnels de matching, preparation et livraison;
+  - retryable: non.
+
+### Services metier
+
+- Construction draft:
+  - `create_order_draft()`
+  - `add_order_item()`
+  - `update_order_item()`
+  - `remove_order_item()`
+  - `set_delivery_location()`
+  - `set_delivery_instructions()`
+- Transitions:
+  - `mark_awaiting_location()`
+  - `mark_draft()`
+  - `confirm_order()`
+  - `cancel_order()`
+  - `fail_order()`
+  - `retry_failed_order()`
+  - `start_store_matching()`
+  - `mark_store_offered()`
+  - `mark_store_accepted()`
+  - `mark_preparing()`
+  - `mark_ready_for_pickup()`
+  - `start_driver_matching()`
+  - `assign_driver()`
+  - `mark_picked_up()`
+  - `mark_in_delivery()`
+  - `mark_delivered()`
+
+### Audit Trail
+
+- Les services Orders ecrivent `AuditEvent` dans la meme transaction que le changement metier.
+- Les evenements d'audit couvrent:
+  - creation Order;
+  - ajout/update/suppression item;
+  - localisation/instructions;
+  - confirmation;
+  - annulation;
+  - echec;
+  - retry;
+  - transitions operationnelles generiques.
+- `AuditEvent` est append-only et readonly en admin.
+
+### Domain Events
+
+- `OrderCreated`
+- `OrderConfirmed`
+- `OrderCancelled`
+- `OrderFailed`
+- `OrderRetryRequested`
+
+Les DomainEvents sont planifies avec `transaction.on_commit()` et ne sont pas publies si la transaction rollback.
+
+### Endpoints API
+
+Tous les endpoints Orders exigent `IsAuthenticated`.
+
+- `POST /api/v1/orders/`
+  - permission: utilisateur authentifie;
+  - use case: `create_order_draft(customer=request.user)`;
+  - ignore tout `customer_id` fourni par le client.
+- `GET /api/v1/orders/`
+  - permission: utilisateur authentifie;
+  - use case: queryset scoping;
+  - client: ses commandes uniquement;
+  - staff: toutes les commandes;
+  - filtre: `status`.
+- `GET /api/v1/orders/{order_id}/`
+  - permission: proprietaire ou staff;
+  - retourne Order + items + produits resumes.
+- `GET /api/v1/orders/by-reference/{reference}/`
+  - permission: proprietaire ou staff;
+  - resolution par reference publique.
+- `GET /api/v1/orders/{order_id}/items/`
+  - permission: proprietaire ou staff;
+  - use case lecture: `get_order_items(order)`.
+- `POST /api/v1/orders/{order_id}/items/`
+  - permission: proprietaire ou staff;
+  - use case: `add_order_item()`.
+- `PATCH /api/v1/orders/{order_id}/items/{item_id}/`
+  - permission: proprietaire ou staff;
+  - use case: `update_order_item()`.
+- `DELETE /api/v1/orders/{order_id}/items/{item_id}/`
+  - permission: proprietaire ou staff;
+  - use case: `remove_order_item()`.
+- `PATCH /api/v1/orders/{order_id}/delivery-location/`
+  - permission: proprietaire ou staff;
+  - input: `latitude`, `longitude`, `address_label`;
+  - conversion: `Point(longitude, latitude, srid=4326)`;
+  - use case: `set_delivery_location()`.
+- `PATCH /api/v1/orders/{order_id}/delivery-instructions/`
+  - permission: proprietaire ou staff;
+  - use case: `set_delivery_instructions()`.
+- `POST /api/v1/orders/{order_id}/confirm/`
+  - permission: proprietaire ou staff;
+  - use case: `confirm_order()`.
+- `POST /api/v1/orders/{order_id}/cancel/`
+  - permission: proprietaire ou staff;
+  - input: `code`, `reason`;
+  - use case: `cancel_order()`.
+- `POST /api/v1/orders/{order_id}/retry/`
+  - permission: proprietaire ou staff;
+  - use case: `retry_failed_order()`;
+  - n'accepte pas de `target_status`.
+- `GET /api/v1/orders/{order_id}/history/`
+  - permission: proprietaire ou staff;
+  - use case: `get_order_audit_history(order)`;
+  - readonly.
+
+### Permissions
+
+- Les clients ne voient que leurs commandes.
+- Les acces cross-user retournent 404 par scoping de queryset.
+- Le customer est toujours derive de `request.user` a la creation.
+- Les champs sensibles sont readonly dans les serializers de sortie:
+  - reference;
+  - customer;
+  - status;
+  - timestamps metier;
+  - failure/cancellation fields.
+- Le staff Django peut consulter toutes les commandes via l'API.
+
+### Validation et frontiere de confiance
+
+- L'API Phase 3 expose `product_id`, `product_variant_id` et `resolution_status` sur les endpoints item pour supporter les orchestrateurs internes et tests d'integration.
+- Les invariants restent imposes par les services/modeles:
+  - `MATCHED` exige un Product;
+  - `UNMATCHED` refuse un Product;
+  - ProductVariant doit appartenir au Product;
+  - quantity strictement positive.
+- Pour une API client publique plus stricte, une phase ulterieure pourra separer serializer client et serializer interne afin d'eviter qu'un client declare arbitrairement une resolution IA.
+
+### Erreurs API
+
+Les exceptions metier Orders sont converties en erreurs DRF compatibles avec le handler global:
+
+- `OrderNotEditable` -> 409
+- `InvalidOrderTransition` -> 409
+- `OrderNotRetryable` -> 409
+- `InvalidFailureCode` -> 409
+- `InvalidOrderState` -> 409
+- `OrderNotConfirmable` -> 400
+- `InvalidCancellation` -> 400
+- validations serializer -> 400
+- objets hors scope -> 404
+
+### Transactions / locking
+
+- Les services critiques utilisent `transaction.atomic()`.
+- Les commandes/items modifies sont relus avec `select_for_update()`.
+- `Order + AuditEvent` commitent ensemble.
+- Les DomainEvents sont publies apres commit via `transaction.on_commit()`.
+- Une erreur technique de handler apres commit ne transforme pas automatiquement la commande en `FAILED`.
+
+### Idempotence
+
+- `confirm_order()` sur une commande deja `CONFIRMED` retourne la commande sans nouvel audit ni nouvel `OrderConfirmed`.
+- Les transitions operationnelles semantiques sont idempotentes quand la commande est deja dans le statut cible.
+- Les endpoints API respectent cette politique en deleguant aux services.
+- `retry_failed_order()` n'accepte jamais de cible fournie par l'appelant.
+
+### Indexes / performances
+
+- La liste/detail Orders utilisent `select_related("customer")` et `prefetch_related("items__product", "items__product_variant")`.
+- Les indexes Phase 3 couvrent les cas principaux:
+  - reference unique;
+  - customer;
+  - status;
+  - customer + status;
+  - created_at;
+  - index spatial sur `delivery_location`;
+  - audit par entity, actor, event_type, correlation_id et created_at.
+
+### Django Admin
+
+- `OrderAdmin`:
+  - recherche par reference et `customer__whatsapp_phone`;
+  - filtres status/created_at;
+  - inline `OrderItem`;
+  - champs sensibles readonly, notamment reference, status, timestamps metier, cancellation/failure fields.
+- `OrderItemAdmin`:
+  - recherche par reference commande, requested_name, Product et ProductVariant.
+- `AuditEventAdmin`:
+  - readonly;
+  - pas d'ajout, modification ou suppression standard.
+
+### Migrations
+
+- Aucune migration nouvelle pour le Lot 3.5.
+- `makemigrations --check --dry-run` ne detecte aucune migration manquante.
+
+### Tests ajoutes
+
+- `apps/orders/tests/test_orders_api.py`
+- Couverture:
+  - scenario API principal draft -> items -> location -> confirm;
+  - catalogue souple avec Product nullable;
+  - confirmation sans localisation;
+  - permissions cross-user;
+  - modification apres confirmation;
+  - cancellation;
+  - FAILED/retry retryable;
+  - FAILED/retry non retryable;
+  - idempotence confirmation;
+  - history readonly/scoped;
+  - audit et DomainEvents observes via API.
+
+### Validation executee
+
+- `.venv/bin/ruff check apps/orders config/api_urls.py`
+  - resultat: passe.
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning attendu: PostgreSQL local indisponible.
+- `.venv/bin/pytest apps/orders/tests apps/audit/tests`
+  - resultat: bloque au setup DB;
+  - cause: PostgreSQL/PostGIS ne repond pas sur `localhost:5432`.
+- Suite globale pertinente tentee:
+  - `apps/identity/tests apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests apps/audit/tests tests/integration`;
+  - meme blocage DB attendu/observe pendant le setup.
+
+### Limites volontaires Phase 3
+
+Non inclus:
+
+- WhatsApp webhook;
+- conversations;
+- parsing LLM;
+- StoreOffer;
+- DriverOffer;
+- matching boutiques;
+- matching drivers;
+- Delivery;
+- live tracking;
+- notifications Celery;
+- stock;
+- paiement;
+- transactional outbox durable.
+
+### Ce que les prochaines phases peuvent consommer
+
+- WhatsApp peut appeler les use cases Orders sans passer par REST.
+- L'IA peut produire des `OrderItem` structures avec catalogue souple.
+- Le futur Matching peut consommer `OrderConfirmed`.
+- Le futur Matching peut appeler `start_store_matching()` puis les transitions suivantes.
+- Les actions restent auditees.
+- Les reactions inter-domaines peuvent utiliser les DomainEvents.
+- Les workflows futurs peuvent propager `correlation_id` de webhook vers audit et events.
+
+## Phase 4 - Lot 4.1 Messaging Core & Channel Identity
+
+### Conventions reutilisees
+
+- Nouveau domaine modulaire `apps.messaging`, distinct de `conversations`.
+- Modeles persistants dans `apps/messaging/infrastructure/models.py`.
+- Reexport public via `apps/messaging/models.py`.
+- Enums Django `TextChoices` dans `apps/messaging/domain/enums.py`.
+- DTOs immutables avec `dataclass(frozen=True, kw_only=True)`, comme les DomainEvents.
+- UUID, `created_at`, `updated_at` via `common.models.BaseModel`.
+- Selectors et services dans `apps/messaging/application`.
+- Contraintes DB explicites avec `UniqueConstraint`, `CheckConstraint` et indexes nommes.
+
+### ChannelIdentity
+
+- `ChannelIdentity` represente le lien explicite entre un `User` metier et une identite externe.
+- Champs: `user`, `channel`, `external_user_id`, `external_username`, `phone_number`, `metadata`, `is_active`.
+- `external_user_id` est une chaine afin de supporter des identifiants non numeriques.
+- Un meme `User` peut avoir plusieurs canaux.
+- Une meme identite externe ne peut appartenir qu'a un seul `User` pour un canal donne.
+
+### Strategie whatsapp_phone
+
+- `User.whatsapp_phone` reste en place et continue d'etre le login central actuel.
+- Aucune relation existante vers `User`, notamment `Order.customer`, n'a ete modifiee.
+- La migration `apps/messaging/migrations/0002_backfill_whatsapp_channel_identities.py`
+  cree une `ChannelIdentity` `WHATSAPP` pour chaque `User` ayant un `whatsapp_phone`.
+- `phone_number` conserve la valeur normalisee existante, par exemple `+237699887766`.
+- `external_user_id` est derive en retirant le `+`, par exemple `237699887766`,
+  ce qui correspond au format attendu des plateformes de messagerie.
+- Le champ historique pourra etre retire dans une phase ulterieure seulement apres
+  migration des usages applicatifs/admin/API qui le referencent encore.
+
+### Messaging Core
+
+- `MessagingChannel`: `WHATSAPP`, `TELEGRAM`.
+- `MessageDirection`: `INBOUND`, `OUTBOUND`.
+- `MessageType`: `TEXT`, `LOCATION`, `IMAGE`, `DOCUMENT`, `AUDIO`, `VIDEO`,
+  `INTERACTIVE`, `UNKNOWN`.
+- `MessageStatus`: `RECEIVED`, `PROCESSING`, `PROCESSED`, `FAILED`, `SENT`, `IGNORED`.
+
+### DTOs normalises
+
+- `MessageLocation` transporte `latitude`, `longitude`, `name`, `address`.
+- Validation latitude `[-90, 90]` et longitude `[-180, 180]`.
+- `NormalizedInboundMessage` represente l'entree commune post-adapter.
+- `NormalizedOutboundMessage` represente la sortie commune pre-provider.
+- Aucun payload WhatsApp ou Telegram specifique n'est interprete dans ce lot.
+
+### MessageEvent
+
+- `MessageEvent` trace les echanges techniques/applicatifs avec les plateformes.
+- Il est volontairement separe de `AuditEvent`, qui reste l'historique metier.
+- Champs principaux: canal, direction, ids externes, type, statut, payload brut,
+  metadata, timestamps de reception/envoi/traitement.
+- `raw_payload` est conserve pour debug/investigation, sans devenir source de verite metier.
+
+### Idempotence et contraintes
+
+- `ChannelIdentity`: unique sur `(channel, external_user_id)`.
+- `MessageEvent`: unique conditionnel sur `(channel, external_message_id)` quand
+  `external_message_id` n'est pas nul.
+- `WHATSAPP / 123` et `TELEGRAM / 123` restent distincts.
+- Indexes principaux: recherche par user/canal, identite externe, message externe,
+  utilisateur externe, chat externe, statut et creation.
+
+### Provider contract
+
+- `MessagingProvider` definit un contrat abstrait `send(message)`.
+- `ProviderCapabilities` expose un jeu leger de capacites: text, location,
+  interactive, media.
+- Aucun provider WhatsApp ou Telegram reel n'est implemente dans ce lot.
+
+### Selectors et services
+
+- Selectors:
+  - `get_channel_identity`;
+  - `get_user_channel_identities`;
+  - `get_message_event`;
+  - `get_message_event_by_external_id`;
+  - `get_recent_message_events`.
+- Services:
+  - `resolve_user_from_channel_identity`;
+  - `create_channel_identity`;
+  - `get_or_create_channel_identity`;
+  - `record_inbound_message_event`;
+  - `record_outbound_message_event`.
+
+### Django Admin
+
+- `ChannelIdentityAdmin`: affichage user, canal, id externe, username, telephone,
+  actif, date de creation.
+- `MessageEventAdmin`: affichage canal, direction, id message externe, user externe,
+  type, statut, dates.
+- Filtres canal/direction/type/statut et recherche par ids externes.
+- `raw_payload` est readonly.
+
+### Tests ajoutes
+
+- `apps/messaging/tests/test_messaging.py`
+- Couverture:
+  - plusieurs canaux pour un meme `User`;
+  - unicite externe par canal;
+  - meme id externe autorise sur deux canaux differents;
+  - resolution channel identity -> user;
+  - DTO inbound text/location/unknown;
+  - validation `MessageLocation`;
+  - `MessageEvent` inbound/outbound;
+  - idempotence `(channel, external_message_id)`.
+
+### Validation executee
+
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning: connexion DB indisponible pendant la verification d'historique.
+- `.venv/bin/ruff check apps/messaging config/settings/base.py`
+  - resultat: passe.
+- `.venv/bin/pytest apps/identity/tests apps/messaging/tests -q`
+  - resultat partiel: 8 tests sans DB passent;
+  - 21 tests DB bloques au setup;
+  - cause observee: PostgreSQL ne repond pas sur `localhost:5432` depuis ce shell.
+- `pg_isready -h localhost -p 5432`
+  - resultat: `no response`.
+
+### Limites volontaires Phase 4.1
+
+Non inclus:
+
+- webhook WhatsApp;
+- Meta Cloud API;
+- Telegram Bot API;
+- webhook Telegram;
+- Conversation et ConversationMessage;
+- IA et parsing d'intention;
+- creation de commande depuis message;
+- matching;
+- notifications Celery;
+- commandes ou boutons specifiques aux plateformes.
+
+## Phase 4 - Lot 4.2 Conversation Core
+
+### Conventions reutilisees
+
+- Nouveau domaine modulaire `apps.conversations`, separe de `apps.messaging`.
+- Modeles persistants dans `apps/conversations/infrastructure/models.py`.
+- Reexport public via `apps/conversations/models.py`.
+- Enum Django `TextChoices` dans `apps/conversations/domain/enums.py`.
+- DTO applicatif immutable dans `apps/conversations/domain/dtos.py`.
+- Erreurs domaine dans `apps/conversations/domain/exceptions.py`.
+- Services/selectors dans `apps/conversations/application`.
+- UUID, `created_at`, `updated_at` via `common.models.BaseModel`.
+- Transactions Django et contraintes DB nommees pour l'idempotence/concurrence.
+
+### Modeles finaux
+
+- `Conversation`:
+  - `user`;
+  - `channel`;
+  - `channel_identity`;
+  - `external_chat_id`;
+  - `status`;
+  - `context`;
+  - `started_at`;
+  - `last_activity_at`;
+  - `closed_at`.
+- `ConversationMessage`:
+  - `conversation`;
+  - `message_event` nullable en `OneToOneField`;
+  - `direction`;
+  - `message_type`;
+  - `text`;
+  - `location`;
+  - `metadata`;
+  - `occurred_at`.
+- `ConversationStatus`: `ACTIVE`, `CLOSED`.
+
+### Relations Messaging / Conversation
+
+- `MessageEvent` reste la trace transport externe.
+- `ConversationMessage` est l'integration logique dans une conversation.
+- `ConversationMessage.message_event` est nullable et utilise `on_delete=SET_NULL`
+  pour preserver l'historique conversationnel si une trace technique est supprimee.
+- `Conversation.channel` est conserve comme snapshot/index operationnel.
+- Le service et le `save()` de `Conversation` alignent `channel` et `user` sur
+  `channel_identity`, afin d'eviter une divergence applicative.
+
+### Strategie de resolution
+
+- `get_or_create_active_conversation(channel_identity, external_chat_id)` cherche
+  une conversation `ACTIVE` pour l'identite et le chat.
+- Une conversation `CLOSED` n'est pas reutilisee.
+- Meme `User` sur WhatsApp et Telegram produit par defaut deux conversations
+  distinctes.
+- Meme identite Telegram avec deux `external_chat_id` differents produit deux
+  contextes conversationnels distincts.
+
+### Strategie utilisateurs inconnus
+
+- Pour WhatsApp, `ingest_inbound_message()` peut creer/resoudre le `User` via la
+  politique existante `get_or_create_user_by_whatsapp`, puis creer/resoudre la
+  `ChannelIdentity`.
+- Pour Telegram inconnu, le service leve `UnknownChannelIdentityError`, car le
+  modele `User` actuel requiert encore `whatsapp_phone`. Un workflow explicite de
+  creation/liaison Telegram est laisse a une phase ulterieure.
+- La contrainte `ChannelIdentity(channel, external_user_id)` reste la protection
+  finale contre les doublons.
+
+### Ingestion inbound
+
+- `ingest_inbound_message(normalized_message, message_event)`:
+  - resout ou cree l'identite selon la politique ci-dessus;
+  - resout le `User`;
+  - trouve ou cree la `Conversation` active;
+  - cree un `ConversationMessage`;
+  - met a jour `last_activity_at`;
+  - retourne `InboundMessageContext`.
+
+### Idempotence et concurrence
+
+- `ConversationMessage.message_event` est un `OneToOneField`: un meme
+  `MessageEvent` ne peut produire qu'un seul message conversationnel.
+- En cas de retraitement, `ingest_inbound_message()` retourne le message existant
+  sans mettre a jour `last_activity_at`.
+- Une seule conversation active est autorisee par `channel_identity` et
+  `external_chat_id`.
+- Une contrainte dediee couvre aussi le cas `external_chat_id IS NULL`.
+- Le resolver utilise `transaction.atomic()`, `select_for_update()` sur les lignes
+  trouvees, et rattrape `IntegrityError` pour les courses de creation.
+
+### Context management
+
+- Helpers centralises:
+  - `get_conversation_context`;
+  - `update_conversation_context`;
+  - `set_context_value`;
+  - `remove_context_value`;
+  - `clear_conversation_context`.
+- `context` reste un stockage conversationnel temporaire et n'est pas une source
+  de verite metier Orders/Catalog/Delivery.
+
+### Outbound et fermeture
+
+- `record_outbound_message()` enregistre le message bot/systeme dans la conversation
+  sans provider reel.
+- `close_conversation()` verrouille la ligne, passe le status a `CLOSED` et renseigne
+  `closed_at`.
+- Aucun evenement Audit n'est cree automatiquement afin d'eviter le bruit non metier.
+
+### Selectors
+
+- `get_conversation`;
+- `get_active_conversation`;
+- `get_user_conversations`;
+- `get_conversation_messages`;
+- `get_conversation_with_messages`.
+
+### Admin
+
+- `ConversationAdmin`: id, user, channel, channel identity, status, external chat,
+  timestamps.
+- `ConversationMessageAdmin`: conversation, direction, type, apercu texte,
+  `occurred_at`.
+- Context/location/metadata sont affiches prudemment en readonly quand pertinent.
+
+### Migrations
+
+- `apps/conversations/migrations/0001_initial.py` cree `Conversation` et
+  `ConversationMessage`, avec indexes et contraintes.
+- `apps.conversations` est ajoute a `LOCAL_APPS`.
+
+### Tests ajoutes
+
+- `apps/conversations/tests/test_conversations.py`
+- Couverture:
+  - premier inbound cree une conversation active;
+  - deuxieme inbound meme identite/chat reutilise la conversation;
+  - conversation fermee puis nouveau resolver cree une nouvelle conversation;
+  - historique inbound/outbound/inbound ordonne;
+  - deux canaux pour le meme user restent independants;
+  - `external_chat_id` separe les contextes;
+  - idempotence par `MessageEvent`;
+  - `last_activity_at` ne bouge pas sur duplicate;
+  - context set/update/remove/clear;
+  - identite WhatsApp inconnue cree user + identity;
+  - identite Telegram inconnue refusee explicitement;
+  - unicite active protege la creation concurrente.
+
+### Validation executee
+
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning: connexion DB indisponible pendant la verification d'historique.
+- `.venv/bin/ruff check apps/conversations apps/messaging config/settings/base.py`
+  - resultat: passe.
+- `.venv/bin/pytest apps/messaging/tests apps/conversations/tests -q`
+  - resultat partiel: 8 tests sans DB passent;
+  - 20 tests DB bloques au setup;
+  - cause observee: PostgreSQL ne repond pas sur `localhost:5432` depuis ce shell.
+- Suites Phase 2/3 pertinentes:
+  - `apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests apps/audit/tests tests/integration`;
+  - resultat: 1 test sans DB passe, 138 tests DB bloques au setup;
+  - meme cause PostgreSQL locale inaccessible depuis ce shell.
+
+### Limites volontaires Phase 4.2
+
+Non inclus:
+
+- OpenAI/LLM;
+- extraction d'intention;
+- parsing de commande;
+- creation Order depuis Conversation;
+- webhook WhatsApp ou Telegram;
+- providers reels;
+- matching;
+- Delivery;
+- prompts;
+- reponse automatique intelligente.
+
+## Phase 4 - Lot 4.3 WhatsApp Adapter
+
+### Documentation Meta verifiee
+
+- Graph API changelog: version latest `v26.0`, introduite le 29 juillet 2026.
+- WhatsApp Cloud API messages endpoint:
+  `POST https://graph.facebook.com/{version}/{phone-number-id}/messages`.
+- Webhook verification Meta:
+  `hub.mode=subscribe`, `hub.verify_token`, `hub.challenge`.
+- Webhook security:
+  signature `X-Hub-Signature-256` calculee en HMAC-SHA256 sur le raw body avec
+  l'App Secret.
+- Messages utilises: `text` et `location`.
+- Status updates reconnus: `sent`, `delivered`, `read`, `failed`.
+
+### Configuration
+
+- `WHATSAPP_ENABLED`, defaut `False`.
+- `WHATSAPP_ACCESS_TOKEN`.
+- `WHATSAPP_PHONE_NUMBER_ID`.
+- `WHATSAPP_BUSINESS_ACCOUNT_ID`.
+- `WHATSAPP_VERIFY_TOKEN`.
+- `WHATSAPP_APP_SECRET`.
+- `WHATSAPP_REQUEST_TIMEOUT`, defaut `10.0`.
+- `META_GRAPH_API_VERSION`, defaut `v26.0`.
+- `.env.example` contient uniquement des placeholders.
+- Si WhatsApp est desactive, Django demarre sans credentials Meta.
+- Si WhatsApp est active ou si le provider est appele explicitement, une
+  `WhatsAppConfigurationError` signale les variables obligatoires manquantes.
+
+### Structure
+
+- Nouveau module `apps.whatsapp`.
+- `apps.whatsapp` depend de `apps.messaging` et `apps.conversations`.
+- `apps.messaging` ne depend pas de WhatsApp.
+- Sous-modules:
+  - `adapters/inbound.py`;
+  - `adapters/outbound.py`;
+  - `adapters/statuses.py`;
+  - `api/views.py`;
+  - `api/urls.py`;
+  - `application/services.py`;
+  - `providers/cloud_api.py`;
+  - `conf.py`;
+  - `security.py`;
+  - `exceptions.py`.
+
+### Webhook
+
+- Route racine ajoutee:
+  - `GET /webhooks/whatsapp/`;
+  - `POST /webhooks/whatsapp/`.
+- `GET` valide le verify token et retourne uniquement le challenge en cas de
+  succes.
+- `POST` valide la signature avant parsing JSON ou traitement.
+- Les throttles DRF globaux sont desactives sur cette view pour eviter une
+  dependance Redis avant validation Meta.
+
+### Security
+
+- Validation HMAC-SHA256 dans `apps/whatsapp/security.py`.
+- Utilise le raw body et `WHATSAPP_APP_SECRET`.
+- Comparaison constante avec `hmac.compare_digest`.
+- Les tokens/secrets ne sont pas loggues.
+
+### Inbound
+
+- `parse_whatsapp_webhook(payload)` retourne une liste de `NormalizedInboundMessage`.
+- Un webhook peut contenir plusieurs `entry/change/message`.
+- Types:
+  - `text` -> `MessageType.TEXT` avec `text.body`;
+  - `location` -> `MessageType.LOCATION` avec `MessageLocation`;
+  - `image`, `document`, `audio`, `video`, `interactive` sont reconnus;
+  - le reste devient `MessageType.UNKNOWN`.
+- Les donnees Meta specifiques restent dans `metadata["whatsapp"]` ou
+  `raw_payload`.
+
+### Status updates
+
+- Les `statuses` WhatsApp ne creent pas de `ConversationMessage`.
+- Ils mettent a jour le `MessageEvent` correspondant quand il existe.
+- Mapping minimal:
+  - `sent` -> `SENT`;
+  - `delivered` -> `PROCESSED`;
+  - `read` -> `PROCESSED`;
+  - `failed` -> `FAILED`.
+- Aucun status WhatsApp n'est confondu avec `Order.status`.
+
+### Ingestion
+
+- `process_whatsapp_webhook(payload)`:
+  - parse les messages entrants;
+  - cree/recupere `MessageEvent` idempotent;
+  - saute les doublons deja attaches a une conversation;
+  - appelle `ingest_inbound_message`;
+  - marque le `MessageEvent` `PROCESSED`;
+  - applique les status updates separement.
+- La transaction englobe `MessageEvent`, `ConversationMessage` et
+  `Conversation.last_activity_at`.
+
+### Outbound
+
+- `WhatsAppProvider` implemente `MessagingProvider`.
+- Methodes:
+  - `send(message)`;
+  - `send_text(recipient_external_id, text)`;
+  - `send_location(recipient_external_id, location)`.
+- Payload text:
+  - `messaging_product=whatsapp`;
+  - `recipient_type=individual`;
+  - `to`;
+  - `type=text`;
+  - `text.body`.
+- Payload location:
+  - `type=location`;
+  - `location.latitude`;
+  - `location.longitude`;
+  - `location.name/address` si presents.
+- Apres acceptation Meta, un `MessageEvent OUTBOUND` est enregistre avec le
+  `wamid` retourne quand disponible.
+- Le client HTTP est centralise dans `providers/cloud_api.py` avec timeout explicite.
+
+### Provider errors
+
+- `WhatsAppConfigurationError`.
+- `WhatsAppAPIError`.
+- `WhatsAppAuthenticationError` pour 401/403, non retryable.
+- `WhatsAppRateLimitError` pour 429, retryable.
+- 5xx et timeouts sont retryable.
+- Payload/reponse invalide leve `WhatsAppInvalidPayloadError`.
+- Aucune erreur WhatsApp ne modifie le domaine Orders.
+
+### Logging / Observability
+
+- Logs structurés via le logging standard existant:
+  - channel;
+  - direction;
+  - external_message_id;
+  - message_type;
+  - result.
+- Pas de nouveau systeme d'observabilite.
+- Pas de logs de token, app secret ou verify token.
+
+### Idempotence
+
+- L'idempotence repose sur `MessageEvent(channel, external_message_id)`.
+- Un duplicate webhook `wamid.X` ne cree ni deux `MessageEvent`, ni deux
+  `ConversationMessage`, ni deux `Conversation`.
+- Redis n'est pas source de verite.
+
+### Migrations
+
+- Aucune migration specifique WhatsApp.
+- Les modeles persistants utilises restent `MessageEvent`, `ChannelIdentity`,
+  `Conversation`, `ConversationMessage`.
+
+### Tests ajoutes
+
+- `apps/whatsapp/tests/test_whatsapp.py`.
+- Couverture:
+  - configuration active/desactivee;
+  - webhook GET succes, mauvais token, params manquants;
+  - signature valide/invalide;
+  - payload invalide;
+  - parsing text/location/unsupported/multiple events;
+  - status updates sans ConversationMessage;
+  - integration webhook -> MessageEvent -> ChannelIdentity -> Conversation;
+  - duplicate webhook;
+  - send_text;
+  - send_location;
+  - erreurs 401/403/429/5xx/400;
+  - timeout retryable.
+
+### Validation executee
+
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning: connexion DB indisponible pendant la verification d'historique.
+- `.venv/bin/ruff check apps/whatsapp config/settings/base.py config/urls.py`
+  - resultat: passe.
+- Tests WhatsApp sans DB:
+  - 15 passent.
+- `.venv/bin/pytest apps/whatsapp/tests -q`
+  - resultat partiel: 15 passent;
+  - 5 tests DB bloques au setup;
+  - cause observee: PostgreSQL ne repond pas sur `localhost:5432`.
+- `.venv/bin/pytest apps/messaging/tests apps/conversations/tests apps/whatsapp/tests -q`
+  - resultat partiel: 20 passent;
+  - 25 tests DB bloques au setup;
+  - meme cause PostgreSQL.
+- Suites Phase 2/3 pertinentes:
+  - `apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests apps/audit/tests tests/integration`;
+  - resultat: 1 test sans DB passe, 138 tests DB bloques au setup;
+  - meme cause PostgreSQL.
+- `pg_isready -h localhost -p 5432`
+  - resultat: `no response`.
+
+### Limites volontaires Phase 4.3
+
+Non inclus:
+
+- Telegram adapter;
+- Telegram webhook;
+- OpenAI/LLM;
+- orchestration conversationnelle;
+- parsing d'intention;
+- creation automatique Order;
+- matching Stores/Drivers;
+- Delivery/live tracking;
+- paiement;
+- stock;
+- moteur complet de templates WhatsApp;
+- telechargement media complet;
+- endpoints publics d'envoi manuel.
+
+## Phase 4 - Lot 4.4 Telegram Adapter
+
+### Documentation Telegram verifiee
+
+- Documentation officielle Bot API: `https://core.telegram.org/bots/api`.
+- Version courante observee: Bot API 10.3, annoncee le 24 aout 2026.
+- Objets utilises: `Update`, `Message`, `User`, `Chat`, `CallbackQuery`.
+- Webhook: endpoint HTTPS recevant les updates, securise avec le header
+  `X-Telegram-Bot-Api-Secret-Token`.
+- Methodes sortantes: `sendMessage`, `sendLocation`, `setWebhook`,
+  `deleteWebhook`, `getWebhookInfo`.
+
+### Configuration
+
+- `TELEGRAM_ENABLED`, defaut `False`.
+- `TELEGRAM_BOT_TOKEN`.
+- `TELEGRAM_WEBHOOK_SECRET`.
+- `TELEGRAM_WEBHOOK_URL`.
+- `TELEGRAM_API_BASE_URL`, defaut `https://api.telegram.org`.
+- `TELEGRAM_REQUEST_TIMEOUT`, defaut `10.0`.
+- `.env.example` contient uniquement des placeholders.
+- Si Telegram est desactive, Django demarre sans credentials Telegram.
+- Si Telegram est active ou si le provider est instancie, les credentials
+  obligatoires manquants declenchent `TelegramConfigurationError`.
+
+### Structure
+
+- Nouveau module `apps.telegram`.
+- `apps.telegram` depend de `apps.messaging` et `apps.conversations`.
+- `apps.messaging` ne depend pas de Telegram.
+- Sous-modules:
+  - `adapters/inbound.py`;
+  - `adapters/outbound.py`;
+  - `api/views.py`;
+  - `api/urls.py`;
+  - `application/services.py`;
+  - `providers/bot_api.py`;
+  - `conf.py`;
+  - `security.py`;
+  - `exceptions.py`;
+  - `management/commands`.
+
+### Webhook et securite
+
+- Route ajoutee: `POST /webhooks/telegram/`.
+- Pas de GET verification Meta artificielle.
+- Le secret est valide avant parsing applicatif avec comparaison constante.
+- Les throttles DRF globaux sont desactives sur la view webhook pour eviter une
+  dependance Redis avant validation du secret.
+- Le token Bot API et le secret webhook ne sont jamais loggues.
+
+### Strategie d'identifiants
+
+- `external_user_id` = `message.from.id` converti en string.
+- `external_chat_id` = `message.chat.id` converti en string.
+- `external_message_id` = `telegram:{chat_id}:{message_id}`.
+- Cette strategie evite les collisions car `message_id` Telegram est propre au
+  chat et non global.
+- Pour `callback_query`, l'identifiant est construit avec `update_id` et l'id du
+  callback.
+- Le username Telegram reste une donnee descriptive, jamais l'identifiant stable.
+
+### Inbound
+
+- `parse_telegram_update(payload)` retourne une liste de
+  `NormalizedInboundMessage`.
+- Types:
+  - `Message.text` -> `MessageType.TEXT`;
+  - `Message.location` -> `MessageType.LOCATION` avec `MessageLocation`;
+  - `/start` est reconnu comme commande via metadata, mais reste un texte;
+  - `photo`, `document`, `audio`, `voice`, `video`, `video_note`, `sticker`
+    sont mappes quand possible;
+  - autres updates non conversationnels -> ignores sans crash;
+  - `callback_query` -> `MessageType.INTERACTIVE` minimal.
+- Aucune conversion directe vers Order ou Catalog.
+
+### ChannelIdentity
+
+- Resolution via le mecanisme central `channel + external_user_id`.
+- Politique retenue pour Telegram: l'identite doit exister explicitement.
+- Aucun User n'est cree silencieusement pour Telegram, car le modele User actuel
+  reste centre sur `whatsapp_phone`.
+- Aucune fusion automatique WhatsApp/Telegram depuis username ou contact.
+
+### Conversation integration
+
+- `process_telegram_webhook(payload)`:
+  - parse l'update;
+  - cree ou recupere le `MessageEvent` idempotent;
+  - saute les doublons deja lies a un `ConversationMessage`;
+  - appelle `ingest_inbound_message`;
+  - marque le `MessageEvent` `PROCESSED`.
+- La transaction englobe `MessageEvent`, `ConversationMessage` et
+  `Conversation.last_activity_at`.
+
+### Outbound
+
+- `TelegramProvider` implemente `MessagingProvider`.
+- Methodes:
+  - `send(message)`;
+  - `send_text(chat_id, text)`;
+  - `send_location(chat_id, location)`;
+  - `set_webhook()`;
+  - `delete_webhook()`;
+  - `get_webhook_info()`.
+- Telegram envoie vers un chat: l'API expose donc explicitement `chat_id`.
+- Apres succes Bot API, un `MessageEvent OUTBOUND` est enregistre avec
+  `telegram:{chat_id}:{message_id}` quand la reponse le permet.
+
+### Provider errors et secrets
+
+- `TelegramConfigurationError`.
+- `TelegramAPIError`.
+- `TelegramAuthenticationError` pour 401/403, non retryable.
+- `TelegramRateLimitError` pour 429, retryable, avec `retry_after`.
+- 5xx et timeouts sont retryable.
+- Les erreurs `ok=false` de Telegram sont categorisees.
+- Les exceptions reseau ne chainent pas d'objet contenant l'URL Bot API avec le
+  token.
+- `sanitize_telegram_url()` masque le token si une URL doit etre manipulee.
+
+### Idempotence
+
+- L'idempotence repose sur `MessageEvent(channel, external_message_id)`.
+- Un duplicate webhook Telegram ne cree ni second `MessageEvent`, ni second
+  `ConversationMessage`.
+- Redis n'est pas source de verite.
+
+### Management commands
+
+- `python manage.py telegram_set_webhook`.
+- `python manage.py telegram_delete_webhook`.
+- `python manage.py telegram_webhook_info`.
+- Ces commandes respectent la configuration active et ne sortent pas le token.
+
+### Migrations
+
+- Aucune migration specifique Telegram.
+- Les modeles persistants utilises restent ceux des lots 4.1 et 4.2.
+
+### Tests ajoutes
+
+- `apps/telegram/tests/test_telegram.py`.
+- Couverture:
+  - configuration active/desactivee;
+  - secret webhook valide/invalide;
+  - payload invalide;
+  - update sans message;
+  - texte;
+  - localisation;
+  - commande `/start`;
+  - media non supporte;
+  - callback query;
+  - strategie anti-collision `telegram:{chat_id}:{message_id}`;
+  - idempotence webhook;
+  - integration MessageEvent -> ChannelIdentity -> Conversation;
+  - provider `send_text` et `send_location`;
+  - erreurs timeout, 401/403, 429 avec `retry_after`, 5xx, `ok=false`;
+  - sanitization du token.
+
+### Limites volontaires Phase 4.4
+
+Non inclus:
+
+- IA/OpenAI;
+- parsing d'intention;
+- creation automatique Order;
+- matching;
+- Delivery/live tracking;
+- paiement;
+- stock;
+- linking automatique WhatsApp/Telegram;
+- telechargement complet des medias Telegram;
+- polling production;
+- framework complet de commandes Telegram;
+- synchronisation de conversations entre canaux.
+
+## Phase 4 - Lot 4.5 Channel Orchestration & Configuration
+
+### Architecture ProviderRegistry
+
+- Le point central de resolution est `apps.messaging.application.registry`.
+- `get_provider(channel)` retourne une implementation `MessagingProvider`.
+- `is_channel_enabled(channel)` et `get_enabled_channels()` centralisent les
+  flags d'activation.
+- Les providers concrets sont importes paresseusement dans le registry, afin que
+  les modules metier ne dependent pas de WhatsApp ou Telegram.
+- Aucun singleton mutable n'est utilise.
+
+### Providers disponibles
+
+- `MessagingChannel.WHATSAPP` -> `WhatsAppProvider`.
+- `MessagingChannel.TELEGRAM` -> `TelegramProvider`.
+- Les deux providers implementent maintenant `send(NormalizedOutboundMessage)`
+  et retournent un `ProviderSendResult`.
+
+### Enabled / disabled
+
+- Les quatre configurations sont supportees:
+  - WhatsApp ON, Telegram OFF;
+  - WhatsApp OFF, Telegram ON;
+  - WhatsApp ON, Telegram ON;
+  - WhatsApp OFF, Telegram OFF.
+- Un canal desactive leve `MessagingChannelDisabled` via `get_provider`.
+- Django demarre sans credentials pour les providers desactives.
+- Les credentials ne sont valides qu'a l'instanciation/utilisation du provider.
+
+### MessagingService
+
+- Facade commune dans `apps.messaging.application.orchestration`.
+- Fonctions:
+  - `send(message)`;
+  - `send_text(...)`;
+  - `send_location(...)`;
+  - `send_text_to_identity(...)`;
+  - `send_conversation_text(...)`;
+  - `send_conversation_location(...)`.
+- Les callers metier peuvent envoyer vers une conversation sans connaitre
+  WhatsAppProvider ou TelegramProvider.
+
+### Routing outbound
+
+- Pour une conversation, le canal vient exclusivement de `Conversation.channel`.
+- Le destinataire sortant est `Conversation.external_chat_id` quand present,
+  sinon `Conversation.channel_identity.external_user_id`.
+- Cela preserve Telegram, ou `User.id` et `Chat.id` peuvent diverger.
+- Aucune diffusion automatique multi-canal n'est faite.
+
+### Capabilities
+
+- `ProviderCapabilities` reste l'abstraction commune legere:
+  - `text`;
+  - `location`;
+  - `interactive`;
+  - `media`.
+- `supports(channel, capability)` expose le diagnostic centralise.
+- Une capacite manquante leve `UnsupportedMessagingCapability`.
+
+### ProviderSendResult
+
+- Nouveau DTO normalise:
+  - `channel`;
+  - `external_message_id`;
+  - `status`;
+  - `provider_metadata`;
+  - `message_event`.
+- Le Conversation Core ne consomme plus directement les JSON Meta/Telegram.
+
+### Strategie MessageEvent / ConversationMessage
+
+- Frontiere retenue:
+  - provider = appel reseau fournisseur + creation d'un seul `MessageEvent OUTBOUND`;
+  - orchestration = choix du provider + creation d'un seul `ConversationMessage OUTBOUND`.
+- En cas de succes `send_conversation_text`, le `ConversationMessage` reference le
+  `MessageEvent` retourne par `ProviderSendResult`.
+- En cas d'echec provider avant acceptation fournisseur, aucun
+  `ConversationMessage` n'est cree.
+- Les erreurs de transport restent dans Messaging et ne touchent pas `Order.status`.
+
+### Error normalization
+
+- Taxonomie commune:
+  - `MessagingError`;
+  - `MessagingConfigurationError`;
+  - `MessagingChannelDisabled`;
+  - `MessagingAuthenticationError`;
+  - `MessagingRateLimitError`;
+  - `MessagingTemporaryError`;
+  - `MessagingPermanentError`;
+  - `UnsupportedMessagingCapability`.
+- Les erreurs WhatsApp/Telegram sont converties dans cette taxonomie par
+  `normalize_provider_error`.
+- `retry_after` Telegram est conserve sur les rate limits normalises.
+
+### Correlation ID
+
+- `send_conversation_text` et `send_conversation_location` acceptent
+  `correlation_id`.
+- Le `correlation_id` est propage dans `NormalizedOutboundMessage.metadata`, puis
+  dans `MessageEvent.metadata` et `ConversationMessage.metadata`.
+
+### Health / readiness
+
+- `/health/` expose maintenant un diagnostic local non secret:
+  - `messaging.whatsapp.enabled`;
+  - `messaging.whatsapp.configured`;
+  - `messaging.telegram.enabled`;
+  - `messaging.telegram.configured`.
+- Aucun appel externe Meta/Telegram n'est effectue pendant la healthcheck.
+
+### Fichiers ajoutes/modifies
+
+- `apps/messaging/application/registry.py`.
+- `apps/messaging/application/orchestration.py`.
+- `apps/messaging/domain/exceptions.py`.
+- `apps/messaging/domain/dtos.py`.
+- `apps/messaging/domain/providers.py`.
+- `apps/messaging/tests/test_orchestration.py`.
+- `apps/whatsapp/providers/cloud_api.py`.
+- `apps/whatsapp/tests/test_whatsapp.py`.
+- `apps/telegram/providers/bot_api.py`.
+- `apps/telegram/tests/test_telegram.py`.
+- `common/health/views.py`.
+- `Implementation.md`.
+
+### Migrations
+
+- Aucune migration Lot 4.5.
+- Les modeles existants suffisent.
+
+### Validation executee
+
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning: connexion DB indisponible pendant la verification d'historique.
+- `.venv/bin/ruff check apps/messaging apps/whatsapp apps/telegram common/health/views.py`
+  - resultat: passe.
+- `.venv/bin/pytest apps/messaging/tests apps/conversations/tests apps/whatsapp/tests apps/telegram/tests -m 'not django_db' -q`
+  - resultat: 46 passent, 33 deselectionnes.
+- `.venv/bin/pytest apps/messaging/tests apps/conversations/tests apps/whatsapp/tests apps/telegram/tests -q --tb=short --maxfail=1`
+  - resultat: bloque au setup DB avant le premier test DB;
+  - cause observee: PostgreSQL ne repond pas sur `localhost:5432`.
+- `.venv/bin/pytest apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests apps/audit/tests tests/integration -m 'not django_db' -q`
+  - resultat: 1 passe, 138 deselectionnes.
+- `.venv/bin/pytest apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests apps/audit/tests tests/integration -q --tb=short --maxfail=1`
+  - resultat: bloque au setup DB;
+  - meme cause PostgreSQL.
+- `pg_isready -h localhost -p 5432`
+  - resultat: `no response`.
+
+### Limites volontaires Phase 4.5
+
+Non inclus:
+
+- IA/OpenAI;
+- parsing d'intention;
+- creation Order;
+- matching;
+- Delivery;
+- fallback notification multi-canal;
+- broadcast;
+- preferred channel;
+- Celery retry complet;
+- nouveaux providers;
+- endpoint public d'envoi manuel.
+
+## Phase 4 - Validation finale infrastructure multicanale
+
+### Audit architectural
+
+- `apps.messaging` contient les primitives communes: channels, DTOs,
+  `ChannelIdentity`, `MessageEvent`, provider contract, registry et orchestration.
+- Les imports WhatsApp/Telegram dans Messaging sont limites au registry central,
+  sous forme d'imports paresseux de factories.
+- `apps.conversations` ne connait pas `WhatsAppProvider` ou `TelegramProvider`.
+- Les adapters WhatsApp/Telegram ne contiennent pas de logique Orders, Catalog,
+  Matching, Delivery ou IA.
+- `apps.orders` n'a pas ete modifie et ne depend pas des providers.
+
+### Corrections apportees
+
+- Les webhooks WhatsApp/Telegram retourent maintenant `503` si le canal est
+  desactive ou mal configure, au lieu de laisser fuiter une exception config.
+- Les parsers WhatsApp/Telegram convertissent les locations/timestamps/IDs
+  invalides en erreurs provider structurees.
+- Les callbacks Telegram incomplets sont refuses proprement.
+- L'admin rend les IDs externes et evenements historiques readonly apres creation.
+
+### Tests E2E ajoutes
+
+- Nouveau fichier `tests/integration/test_phase4_multichannel.py`.
+- Couverture:
+  - webhook WhatsApp signe -> `MessageEvent` -> `ChannelIdentity` -> `Conversation`
+    -> `ConversationMessage`;
+  - webhook Telegram avec secret -> meme abstraction interne;
+  - meme `User` avec WhatsApp + Telegram -> deux conversations independantes;
+  - pas de contamination de `context`;
+  - pas de fusion automatique avec username similaire;
+  - duplicate webhook -> une seule trace conversationnelle;
+  - meme `external_message_id` autorise sur deux canaux differents;
+  - conversation fermee -> nouveau message cree une nouvelle active;
+  - location entrante -> `ConversationMessage.location` sans creation Order;
+  - outbound conversationnel -> bon provider mocke et une seule ecriture.
+
+### Securite et secrets
+
+- Webhook WhatsApp: HMAC `X-Hub-Signature-256` sur raw body.
+- Webhook Telegram: `X-Telegram-Bot-Api-Secret-Token`.
+- Aucun token/access secret n'est loggue par les services.
+- Les URL Telegram contenant le bot token sont sanitizables et les exceptions
+  reseau ne chainent pas d'objet contenant l'URL sensible.
+- `raw_payload` conserve les messages provider, pas les credentials.
+
+### Idempotence et concurrence
+
+- `ChannelIdentity`: unicite DB `(channel, external_user_id)`.
+- `MessageEvent`: unicite DB conditionnelle `(channel, external_message_id)`.
+- `ConversationMessage.message_event`: `OneToOneField`.
+- `Conversation`: unicite DB d'une conversation `ACTIVE` par
+  `channel_identity + external_chat_id`, avec contrainte dediee pour `NULL`.
+- Les services utilisent `transaction.atomic()`, contraintes DB et rattrapage
+  d'`IntegrityError`; la DB reste la protection finale en concurrence.
+
+### Performance et indexes
+
+- Indexes confirmes:
+  - `ChannelIdentity(user, channel)`;
+  - `ChannelIdentity(channel, external_user_id)`;
+  - `MessageEvent(channel, external_message_id)`;
+  - `MessageEvent(external_user_id)`;
+  - `MessageEvent(external_chat_id)`;
+  - `MessageEvent(status)`;
+  - `MessageEvent(created_at)`;
+  - `Conversation(channel_identity, external_chat_id, status)`;
+  - `Conversation(user, status)`;
+  - `Conversation(channel, status)`;
+  - `Conversation(last_activity_at)`;
+  - `ConversationMessage(conversation, occurred_at)`.
+- Les selectors utilisent `select_related`/`prefetch_related` quand pertinent.
+
+### Documentation
+
+- `README.md` documente maintenant:
+  - configuration Telegram Bot API;
+  - BotFather;
+  - `setWebhook`;
+  - modes WhatsApp/Telegram ON/OFF;
+  - facade `send_conversation_text`.
+- `.env.example` contient les placeholders WhatsApp et Telegram.
+- `Implementation.md` contient les rapports 4.1 a 4.5 et cette validation finale.
+
+### Validation executee
+
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning: connexion DB indisponible pendant la verification d'historique.
+- `.venv/bin/ruff check apps/messaging apps/conversations apps/whatsapp apps/telegram tests/integration common/health/views.py`
+  - resultat: passe.
+- `.venv/bin/pytest apps/messaging/tests apps/conversations/tests apps/whatsapp/tests apps/telegram/tests tests/integration/test_phase4_multichannel.py -m 'not django_db' -q`
+  - resultat: 55 passent, 43 deselectionnes.
+- Suites DB Phase 4, Phase 3 et Phase 2 tentees avec `--maxfail=1`.
+  - resultat: bloquees au setup Django avant test applicatif;
+  - cause observee: PostgreSQL ne repond pas sur `localhost:5432`.
+- `pg_isready -h localhost -p 5432`
+  - resultat: `no response`.
+
+### Primitives disponibles pour la future IA
+
+- La future couche IA pourra recevoir:
+  - `Conversation`;
+  - `NormalizedInboundMessage`;
+  - `ConversationMessage`;
+  - `Conversation.context`.
+- Elle pourra repondre via:
+  - `send_conversation_text(conversation=..., text=...)`;
+  - `send_conversation_location(conversation=..., location=...)`.
+- Elle n'aura pas besoin de connaitre WhatsApp, Telegram, Meta payloads,
+  Telegram updates, tokens ou endpoints providers.
+
+### Limites conservees
+
+Non inclus:
+
+- OpenAI/LLM;
+- extraction d'intention;
+- Order parser;
+- creation automatique Order depuis message;
+- matching;
+- Delivery/live tracking;
+- paiement;
+- stock;
+- fallback notification multi-canal avance;
+- broadcast;
+- preferred channel;
+- Celery retry complet.
