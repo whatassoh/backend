@@ -1091,3 +1091,511 @@ Les histories sont retournes en ordre chronologique clair: `created_at`, puis `i
 - WhatsApp.
 - IA.
 - Paiement.
+
+## Lot 3.4 - Domain Events + Transactions
+
+### Inspection et conventions reutilisees
+
+- `common/events` existait mais etait vide.
+- Aucune abstraction EventBus existante n'etait implementee.
+- Celery est configure dans `config/celery.py`, mais aucun usage event-driven n'existait.
+- Aucun `transaction.on_commit()` existant n'a ete trouve dans le code metier.
+- Les services Orders possedent deja:
+  - `transaction.atomic()`;
+  - `select_for_update()`;
+  - AuditEvent dans la meme transaction metier.
+
+### Abstraction DomainEvent
+
+- Ajout de `common.events.domain.DomainEvent`.
+- Base dataclass immutable avec:
+  - `event_id` UUID;
+  - `occurred_at`;
+  - `correlation_id` nullable.
+- Les evenements transportent des IDs et des snapshots simples, jamais d'objet Django complet.
+- Les payloads sont facilement serialisables pour une future outbox ou Celery.
+
+### Dispatcher / registry
+
+- Ajout de `common.events.bus`.
+- API:
+  - `subscribe(event_type, handler)`;
+  - `unsubscribe(event_type, handler)`;
+  - `publish(event)`;
+  - `clear_subscribers()`;
+  - `subscribed(...)` comme context manager de test.
+- Registry in-process:
+  - mapping `EventClass -> handlers`.
+- `publish()` appelle les handlers synchronement.
+- En cas d'erreur handler:
+  - exception loggee avec `event_type`, `event_id`, handler;
+  - exception remontee;
+  - aucune mutation automatique de `Order`;
+  - jamais de passage automatique a `FAILED`.
+
+### Evenements Orders
+
+- Ajout de `apps.orders.domain.events`.
+- `OrderCreated`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `customer_id`;
+  - `correlation_id`.
+- `OrderConfirmed`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `customer_id`;
+  - `correlation_id`.
+- `OrderCancelled`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `customer_id`;
+  - `cancellation_code`;
+  - `correlation_id`.
+- `OrderFailed`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `failure_code`;
+  - `failed_from_status`;
+  - `correlation_id`.
+- `OrderRetryRequested`:
+  - `event_id`;
+  - `occurred_at`;
+  - `order_id`;
+  - `failure_code` precedent;
+  - `retry_target_status`;
+  - `correlation_id`.
+
+### Integration Orders
+
+- `create_order_draft` publie `OrderCreated` apres commit.
+- `confirm_order` publie `OrderConfirmed` apres commit uniquement si la confirmation est effective.
+- `cancel_order` publie `OrderCancelled` apres commit.
+- `fail_order` publie `OrderFailed` apres commit.
+- `retry_failed_order` publie `OrderRetryRequested` apres commit.
+- Les transitions operationnelles generiques ne publient pas encore de DomainEvent specifique.
+- Les modifications d'items ne publient pas encore de DomainEvent, car aucun autre domaine n'en a besoin dans ce lot.
+
+### Strategie transaction.on_commit
+
+- Les mutations Order/OrderItem et AuditEvent restent dans `transaction.atomic()`.
+- Les DomainEvents sont planifies via `transaction.on_commit()`.
+- Si la transaction rollback:
+  - mutation metier absente;
+  - AuditEvent absent;
+  - DomainEvent non publie.
+- Si le commit reussit:
+  - `publish(event)` est appele apres commit.
+
+### Idempotence
+
+- Les no-op idempotents ne publient pas de nouvel evenement.
+- Exemple:
+  - premier `confirm_order()` effectif -> `OrderConfirmed`;
+  - second `confirm_order()` sur `CONFIRMED` -> aucun nouvel event.
+- `OrderRetryRequested` capture `failure_code` avant nettoyage des champs `Order`.
+
+### Correlation ID
+
+- `correlation_id` est propage depuis les services Orders vers:
+  - AuditEvent;
+  - DomainEvent.
+- L'absence de correlation id est acceptee.
+
+### Tests ajoutes
+
+- Ajout de `apps/orders/tests/test_order_domain_events.py`.
+- Couverture:
+  - `OrderCreated` pas publie avant commit, publie apres commit;
+  - `OrderConfirmed` avec audit present et payload correct;
+  - rollback empeche Order, AuditEvent et DomainEvent;
+  - confirmation repetee ne publie pas deux fois;
+  - `OrderCancelled` seulement pour transition effective;
+  - `OrderFailed` payload failure code/source;
+  - `OrderRetryRequested` conserve le failure code precedent;
+  - echec handler apres commit ne transforme pas Order en `FAILED`;
+  - propagation `correlation_id`.
+
+### Validation
+
+- `.venv/bin/python manage.py check` passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`:
+  - aucune migration manquante;
+  - warning attendu car PostgreSQL local ne repond pas.
+- `.venv/bin/ruff check common/events apps/orders` passe.
+- `.venv/bin/pytest apps/orders/tests apps/audit/tests`:
+  - 54 tests collectes;
+  - 1 test sans DB passe;
+  - 53 tests DB bloques au setup;
+  - PostgreSQL/PostGIS ne repond pas sur `localhost:5432`.
+- Suite globale pertinente:
+  - 145 tests collectes;
+  - 1 test sans DB passe;
+  - 144 tests bloques au setup DB;
+  - meme cause PostgreSQL/PostGIS local inaccessible.
+
+### Limite MVP sans transactional outbox
+
+- `transaction.on_commit()` garantit que le DomainEvent n'est pas publie avant commit.
+- Il ne garantit pas une livraison durable si le processus meurt immediatement apres le commit et avant ou pendant la publication.
+- Evolution future recommandee:
+  - `OutboxEvent` persiste dans la meme transaction;
+  - worker/Celery dispatch;
+  - retries et deduplication durable par `event_id`.
+
+### Pret pour Lot 3.5 et futures phases
+
+- Orders ne depend pas du matching, WhatsApp, Delivery ou notifications.
+- Les handlers futurs pourront s'abonner a `OrderConfirmed`, `OrderFailed`, etc.
+- Les consumers pourront relire `Order` depuis la DB via `order_id`.
+- `event_id` et `correlation_id` preparent l'idempotence et le tracing inter-canaux.
+
+## Lot 3.5 - API Orders et validation finale Phase 3
+
+### Objectif
+
+Exposer les use cases Orders via DRF sans dupliquer la logique metier:
+
+HTTP request -> authentication -> serializer/input validation -> service applicatif -> serializer/output.
+
+La couche API ne modifie pas directement `Order.status`, les timestamps metier, les champs d'echec ou les champs d'annulation.
+
+### Fichiers crees/modifies
+
+- `apps/orders/api/serializers.py`
+- `apps/orders/api/views.py`
+- `apps/orders/api/urls.py`
+- `apps/orders/tests/test_orders_api.py`
+- `apps/orders/admin.py`
+- `config/api_urls.py`
+- `Implementation.md`
+
+### Architecture finale Orders
+
+- `apps.orders.infrastructure.models` contient `Order` et `OrderItem`.
+- `apps.orders.domain.enums` contient les statuts, codes d'annulation, codes d'echec et statuts de resolution.
+- `apps.orders.domain.rules` contient la matrice de transitions, les statuts editables, les sources d'echec autorisees et les cibles retry.
+- `apps.orders.application.services` contient les use cases transactionnels.
+- `apps.orders.application.selectors` contient les lectures optimisees.
+- `apps.orders.domain.events` contient les DomainEvents Orders.
+- `apps.orders.api` expose le canal REST.
+- `apps.audit` conserve l'historique append-only.
+- `common.events` publie les DomainEvents apres commit.
+
+### Modeles
+
+- `Order`:
+  - UUID interne;
+  - reference publique `ORD-YYMMDD-XXXX`;
+  - customer vers `settings.AUTH_USER_MODEL`;
+  - status;
+  - localisation PostGIS nullable;
+  - adresse/instructions de livraison;
+  - devise;
+  - timestamps de confirmation, annulation, completion et echec;
+  - codes/raisons d'annulation et d'echec;
+  - `failed_from_status`;
+  - timestamps techniques.
+- `OrderItem`:
+  - UUID interne;
+  - order;
+  - `requested_name` obligatoire;
+  - quantity decimal strictement positive;
+  - unit;
+  - notes;
+  - Product/ProductVariant optionnels;
+  - resolution_status;
+  - timestamps.
+
+### State Machine
+
+Matrice finale:
+
+- `DRAFT` -> `AWAITING_LOCATION`, `CONFIRMED`, `CANCELLED`
+- `AWAITING_LOCATION` -> `DRAFT`, `CONFIRMED`, `CANCELLED`
+- `CONFIRMED` -> `MATCHING_STORES`, `CANCELLED`
+- `MATCHING_STORES` -> `STORE_OFFERED`, `FAILED`, `CANCELLED`
+- `STORE_OFFERED` -> `STORE_ACCEPTED`, `MATCHING_STORES`, `FAILED`, `CANCELLED`
+- `STORE_ACCEPTED` -> `PREPARING`, `FAILED`, `CANCELLED`
+- `PREPARING` -> `READY_FOR_PICKUP`, `FAILED`, `CANCELLED`
+- `READY_FOR_PICKUP` -> `MATCHING_DRIVERS`, `FAILED`, `CANCELLED`
+- `MATCHING_DRIVERS` -> `DRIVER_ASSIGNED`, `FAILED`, `CANCELLED`
+- `DRIVER_ASSIGNED` -> `PICKED_UP`, `FAILED`, `CANCELLED`
+- `PICKED_UP` -> `IN_DELIVERY`, `FAILED`
+- `IN_DELIVERY` -> `DELIVERED`, `FAILED`
+- `DELIVERED` -> aucune transition normale
+- `CANCELLED` -> aucune transition normale
+- `FAILED` -> retry conditionnel uniquement via `retry_failed_order()`
+
+### Failure / Retry
+
+- `NO_STORE_AVAILABLE`
+  - sources autorisees: `MATCHING_STORES`, `STORE_OFFERED`;
+  - retryable: oui;
+  - target: `MATCHING_STORES`.
+- `NO_DRIVER_AVAILABLE`
+  - sources autorisees: `MATCHING_DRIVERS`;
+  - retryable: oui;
+  - target: `MATCHING_DRIVERS`.
+- `STORE_FULFILLMENT_FAILED`
+  - sources autorisees: `STORE_ACCEPTED`, `PREPARING`, `READY_FOR_PICKUP`;
+  - retryable: non.
+- `DELIVERY_FAILED`
+  - sources autorisees: `DRIVER_ASSIGNED`, `PICKED_UP`, `IN_DELIVERY`;
+  - retryable: non.
+- `OTHER`
+  - sources autorisees: etats operationnels de matching, preparation et livraison;
+  - retryable: non.
+
+### Services metier
+
+- Construction draft:
+  - `create_order_draft()`
+  - `add_order_item()`
+  - `update_order_item()`
+  - `remove_order_item()`
+  - `set_delivery_location()`
+  - `set_delivery_instructions()`
+- Transitions:
+  - `mark_awaiting_location()`
+  - `mark_draft()`
+  - `confirm_order()`
+  - `cancel_order()`
+  - `fail_order()`
+  - `retry_failed_order()`
+  - `start_store_matching()`
+  - `mark_store_offered()`
+  - `mark_store_accepted()`
+  - `mark_preparing()`
+  - `mark_ready_for_pickup()`
+  - `start_driver_matching()`
+  - `assign_driver()`
+  - `mark_picked_up()`
+  - `mark_in_delivery()`
+  - `mark_delivered()`
+
+### Audit Trail
+
+- Les services Orders ecrivent `AuditEvent` dans la meme transaction que le changement metier.
+- Les evenements d'audit couvrent:
+  - creation Order;
+  - ajout/update/suppression item;
+  - localisation/instructions;
+  - confirmation;
+  - annulation;
+  - echec;
+  - retry;
+  - transitions operationnelles generiques.
+- `AuditEvent` est append-only et readonly en admin.
+
+### Domain Events
+
+- `OrderCreated`
+- `OrderConfirmed`
+- `OrderCancelled`
+- `OrderFailed`
+- `OrderRetryRequested`
+
+Les DomainEvents sont planifies avec `transaction.on_commit()` et ne sont pas publies si la transaction rollback.
+
+### Endpoints API
+
+Tous les endpoints Orders exigent `IsAuthenticated`.
+
+- `POST /api/v1/orders/`
+  - permission: utilisateur authentifie;
+  - use case: `create_order_draft(customer=request.user)`;
+  - ignore tout `customer_id` fourni par le client.
+- `GET /api/v1/orders/`
+  - permission: utilisateur authentifie;
+  - use case: queryset scoping;
+  - client: ses commandes uniquement;
+  - staff: toutes les commandes;
+  - filtre: `status`.
+- `GET /api/v1/orders/{order_id}/`
+  - permission: proprietaire ou staff;
+  - retourne Order + items + produits resumes.
+- `GET /api/v1/orders/by-reference/{reference}/`
+  - permission: proprietaire ou staff;
+  - resolution par reference publique.
+- `GET /api/v1/orders/{order_id}/items/`
+  - permission: proprietaire ou staff;
+  - use case lecture: `get_order_items(order)`.
+- `POST /api/v1/orders/{order_id}/items/`
+  - permission: proprietaire ou staff;
+  - use case: `add_order_item()`.
+- `PATCH /api/v1/orders/{order_id}/items/{item_id}/`
+  - permission: proprietaire ou staff;
+  - use case: `update_order_item()`.
+- `DELETE /api/v1/orders/{order_id}/items/{item_id}/`
+  - permission: proprietaire ou staff;
+  - use case: `remove_order_item()`.
+- `PATCH /api/v1/orders/{order_id}/delivery-location/`
+  - permission: proprietaire ou staff;
+  - input: `latitude`, `longitude`, `address_label`;
+  - conversion: `Point(longitude, latitude, srid=4326)`;
+  - use case: `set_delivery_location()`.
+- `PATCH /api/v1/orders/{order_id}/delivery-instructions/`
+  - permission: proprietaire ou staff;
+  - use case: `set_delivery_instructions()`.
+- `POST /api/v1/orders/{order_id}/confirm/`
+  - permission: proprietaire ou staff;
+  - use case: `confirm_order()`.
+- `POST /api/v1/orders/{order_id}/cancel/`
+  - permission: proprietaire ou staff;
+  - input: `code`, `reason`;
+  - use case: `cancel_order()`.
+- `POST /api/v1/orders/{order_id}/retry/`
+  - permission: proprietaire ou staff;
+  - use case: `retry_failed_order()`;
+  - n'accepte pas de `target_status`.
+- `GET /api/v1/orders/{order_id}/history/`
+  - permission: proprietaire ou staff;
+  - use case: `get_order_audit_history(order)`;
+  - readonly.
+
+### Permissions
+
+- Les clients ne voient que leurs commandes.
+- Les acces cross-user retournent 404 par scoping de queryset.
+- Le customer est toujours derive de `request.user` a la creation.
+- Les champs sensibles sont readonly dans les serializers de sortie:
+  - reference;
+  - customer;
+  - status;
+  - timestamps metier;
+  - failure/cancellation fields.
+- Le staff Django peut consulter toutes les commandes via l'API.
+
+### Validation et frontiere de confiance
+
+- L'API Phase 3 expose `product_id`, `product_variant_id` et `resolution_status` sur les endpoints item pour supporter les orchestrateurs internes et tests d'integration.
+- Les invariants restent imposes par les services/modeles:
+  - `MATCHED` exige un Product;
+  - `UNMATCHED` refuse un Product;
+  - ProductVariant doit appartenir au Product;
+  - quantity strictement positive.
+- Pour une API client publique plus stricte, une phase ulterieure pourra separer serializer client et serializer interne afin d'eviter qu'un client declare arbitrairement une resolution IA.
+
+### Erreurs API
+
+Les exceptions metier Orders sont converties en erreurs DRF compatibles avec le handler global:
+
+- `OrderNotEditable` -> 409
+- `InvalidOrderTransition` -> 409
+- `OrderNotRetryable` -> 409
+- `InvalidFailureCode` -> 409
+- `InvalidOrderState` -> 409
+- `OrderNotConfirmable` -> 400
+- `InvalidCancellation` -> 400
+- validations serializer -> 400
+- objets hors scope -> 404
+
+### Transactions / locking
+
+- Les services critiques utilisent `transaction.atomic()`.
+- Les commandes/items modifies sont relus avec `select_for_update()`.
+- `Order + AuditEvent` commitent ensemble.
+- Les DomainEvents sont publies apres commit via `transaction.on_commit()`.
+- Une erreur technique de handler apres commit ne transforme pas automatiquement la commande en `FAILED`.
+
+### Idempotence
+
+- `confirm_order()` sur une commande deja `CONFIRMED` retourne la commande sans nouvel audit ni nouvel `OrderConfirmed`.
+- Les transitions operationnelles semantiques sont idempotentes quand la commande est deja dans le statut cible.
+- Les endpoints API respectent cette politique en deleguant aux services.
+- `retry_failed_order()` n'accepte jamais de cible fournie par l'appelant.
+
+### Indexes / performances
+
+- La liste/detail Orders utilisent `select_related("customer")` et `prefetch_related("items__product", "items__product_variant")`.
+- Les indexes Phase 3 couvrent les cas principaux:
+  - reference unique;
+  - customer;
+  - status;
+  - customer + status;
+  - created_at;
+  - index spatial sur `delivery_location`;
+  - audit par entity, actor, event_type, correlation_id et created_at.
+
+### Django Admin
+
+- `OrderAdmin`:
+  - recherche par reference et `customer__whatsapp_phone`;
+  - filtres status/created_at;
+  - inline `OrderItem`;
+  - champs sensibles readonly, notamment reference, status, timestamps metier, cancellation/failure fields.
+- `OrderItemAdmin`:
+  - recherche par reference commande, requested_name, Product et ProductVariant.
+- `AuditEventAdmin`:
+  - readonly;
+  - pas d'ajout, modification ou suppression standard.
+
+### Migrations
+
+- Aucune migration nouvelle pour le Lot 3.5.
+- `makemigrations --check --dry-run` ne detecte aucune migration manquante.
+
+### Tests ajoutes
+
+- `apps/orders/tests/test_orders_api.py`
+- Couverture:
+  - scenario API principal draft -> items -> location -> confirm;
+  - catalogue souple avec Product nullable;
+  - confirmation sans localisation;
+  - permissions cross-user;
+  - modification apres confirmation;
+  - cancellation;
+  - FAILED/retry retryable;
+  - FAILED/retry non retryable;
+  - idempotence confirmation;
+  - history readonly/scoped;
+  - audit et DomainEvents observes via API.
+
+### Validation executee
+
+- `.venv/bin/ruff check apps/orders config/api_urls.py`
+  - resultat: passe.
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning attendu: PostgreSQL local indisponible.
+- `.venv/bin/pytest apps/orders/tests apps/audit/tests`
+  - resultat: bloque au setup DB;
+  - cause: PostgreSQL/PostGIS ne repond pas sur `localhost:5432`.
+- Suite globale pertinente tentee:
+  - `apps/identity/tests apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests apps/audit/tests tests/integration`;
+  - meme blocage DB attendu/observe pendant le setup.
+
+### Limites volontaires Phase 3
+
+Non inclus:
+
+- WhatsApp webhook;
+- conversations;
+- parsing LLM;
+- StoreOffer;
+- DriverOffer;
+- matching boutiques;
+- matching drivers;
+- Delivery;
+- live tracking;
+- notifications Celery;
+- stock;
+- paiement;
+- transactional outbox durable.
+
+### Ce que les prochaines phases peuvent consommer
+
+- WhatsApp peut appeler les use cases Orders sans passer par REST.
+- L'IA peut produire des `OrderItem` structures avec catalogue souple.
+- Le futur Matching peut consommer `OrderConfirmed`.
+- Le futur Matching peut appeler `start_store_matching()` puis les transitions suivantes.
+- Les actions restent auditees.
+- Les reactions inter-domaines peuvent utiliser les DomainEvents.
+- Les workflows futurs peuvent propager `correlation_id` de webhook vers audit et events.
