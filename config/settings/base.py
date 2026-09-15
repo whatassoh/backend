@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import environ
-
 import structlog
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -53,7 +52,12 @@ THIRD_PARTY_APPS = [
     "django_celery_beat",
 ]
 
-LOCAL_APPS = []
+LOCAL_APPS = [
+    "apps.identity",
+    "apps.stores",
+    "apps.drivers",
+    "apps.catalog",
+]
 
 INSTALLED_APPS = [
     *DJANGO_APPS,
@@ -149,6 +153,8 @@ PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.PBKDF2PasswordHasher",
     "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
 ]
+
+AUTH_USER_MODEL = "identity.User"
 
 
 # ---------------------------------------------------------------------
