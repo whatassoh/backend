@@ -17,13 +17,12 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import include, path
-from common.health.views import health_check
-
 from drf_spectacular.views import (
     SpectacularAPIView,
     SpectacularSwaggerView,
 )
 
+from common.health.views import health_check
 
 urlpatterns = [
     path(
@@ -34,6 +33,14 @@ urlpatterns = [
         "health/",
         health_check,
         name="health",
+    ),
+    path(
+        "",
+        include("apps.whatsapp.api.urls"),
+    ),
+    path(
+        "",
+        include("apps.telegram.api.urls"),
     ),
     # API métier
     path(

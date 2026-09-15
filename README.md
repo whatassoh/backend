@@ -200,6 +200,7 @@ Exemple :
 
 ```text
 /webhooks/whatsapp/
+/webhooks/telegram/
 ```
 
 Les endpoints d'infrastructure sont également séparés :
@@ -218,7 +219,100 @@ La documentation API est exposée via :
 
 ---
 
-## 3. Structure générale du projet
+## 3. Configuration Telegram Bot API
+
+Le bot Telegram est cree manuellement via BotFather. Le backend consomme
+ensuite le token et recoit les updates en webhook.
+
+Etapes:
+
+1. Creer le bot avec BotFather et recuperer le token.
+2. Configurer les variables d'environnement:
+
+```text
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=<telegram-bot-token>
+TELEGRAM_WEBHOOK_SECRET=<telegram-webhook-secret>
+TELEGRAM_WEBHOOK_URL=https://example.com/webhooks/telegram/
+TELEGRAM_API_BASE_URL=https://api.telegram.org
+```
+
+3. Exposer le backend sur une URL HTTPS joignable par Telegram.
+4. Configurer le webhook:
+
+```bash
+python manage.py telegram_set_webhook
+```
+
+Commandes utiles:
+
+```bash
+python manage.py telegram_webhook_info
+python manage.py telegram_delete_webhook
+python manage.py telegram_delete_webhook --drop-pending-updates
+```
+
+Ne jamais commiter de token BotFather ou de secret webhook. Si
+`TELEGRAM_ENABLED=false`, Django demarre sans credentials Telegram.
+
+---
+
+## 4. Configuration multicanale
+
+Les canaux de messagerie sont actives independamment. Les quatre modes suivants
+sont valides:
+
+```text
+WHATSAPP_ENABLED=true
+TELEGRAM_ENABLED=false
+
+WHATSAPP_ENABLED=false
+TELEGRAM_ENABLED=true
+
+WHATSAPP_ENABLED=true
+TELEGRAM_ENABLED=true
+
+WHATSAPP_ENABLED=false
+TELEGRAM_ENABLED=false
+```
+
+Variables principales:
+
+```text
+WHATSAPP_ENABLED=false
+WHATSAPP_ACCESS_TOKEN=
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_BUSINESS_ACCOUNT_ID=
+WHATSAPP_VERIFY_TOKEN=
+WHATSAPP_APP_SECRET=
+WHATSAPP_REQUEST_TIMEOUT=10
+META_GRAPH_API_VERSION=v26.0
+
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+TELEGRAM_WEBHOOK_URL=
+TELEGRAM_API_BASE_URL=https://api.telegram.org
+TELEGRAM_REQUEST_TIMEOUT=10
+```
+
+Le code applicatif commun utilise le registry et la facade messaging:
+
+```python
+from apps.messaging.application.orchestration import send_conversation_text
+
+send_conversation_text(
+    conversation=conversation,
+    text="Comment puis-je vous aider ?",
+)
+```
+
+Le canal vient de `Conversation.channel`. L'appelant n'a pas besoin de connaitre
+`WhatsAppProvider` ou `TelegramProvider`.
+
+---
+
+## 5. Structure générale du projet
 
 ```text
 backend/
@@ -269,7 +363,7 @@ backend/
 
 ---
 
-## 4. Dossier `config/`
+## 6. Dossier `config/`
 
 Le dossier `config/` contient la configuration globale du projet.
 
@@ -347,7 +441,7 @@ Elle permet notamment :
 
 ---
 
-## 5. Dossier `apps/`
+## 7. Dossier `apps/`
 
 Le dossier `apps/` contient les différents domaines métier.
 
@@ -390,7 +484,7 @@ apps/
 
 ---
 
-## 6. Structure interne d'une application métier
+## 8. Structure interne d'une application métier
 
 Chaque domaine suit autant que possible cette organisation :
 
@@ -554,7 +648,7 @@ Le service métier décide ensuite si la transition est réellement autorisée.
 
 ---
 
-## 7. Dossier `common/`
+## 9. Dossier `common/`
 
 Le dossier `common/` contient les éléments partagés entre plusieurs domaines.
 
@@ -576,7 +670,7 @@ Il ne doit pas devenir un dossier dans lequel placer arbitrairement tout le code
 
 ---
 
-## 8. Routing
+## 10. Routing
 
 Toutes les APIs métier utilisent le préfixe :
 
@@ -632,7 +726,7 @@ Les webhooks ne sont pas mélangés aux APIs métier :
 
 ---
 
-## 9. Pagination
+## 11. Pagination
 
 La pagination globale utilise actuellement une pagination par numéro de page.
 
@@ -659,7 +753,7 @@ Les endpoints nécessitant une autre stratégie pourront utiliser une pagination
 
 ---
 
-## 10. Gestion des erreurs
+## 12. Gestion des erreurs
 
 Les erreurs API doivent utiliser une structure cohérente.
 
@@ -700,7 +794,7 @@ Les codes doivent permettre au frontend et aux intégrations de comprendre la ca
 
 ---
 
-## 11. Authentification et sécurité
+## 13. Authentification et sécurité
 
 Le projet utilise une approche restrictive par défaut.
 
@@ -731,7 +825,7 @@ Tracking           → Token temporaire signé
 
 ---
 
-## 12. Idempotence
+## 14. Idempotence
 
 Les systèmes externes peuvent envoyer plusieurs fois le même événement.
 
@@ -756,7 +850,7 @@ Un retry technique ne doit pas rejouer arbitrairement une transaction métier d�
 
 ---
 
-## 13. Concurrence
+## 15. Concurrence
 
 Certaines opérations doivent être protégées contre les accès simultanés.
 
@@ -789,7 +883,7 @@ Redis ou Celery ne décident jamais seuls du résultat final.
 
 ---
 
-## 14. Géolocalisation
+## 16. Géolocalisation
 
 Whatassoh distingue les données géographiques persistantes des données géographiques temps réel.
 
@@ -837,7 +931,7 @@ Affectation
 
 ---
 
-## 15. Celery et traitements asynchrones
+## 17. Celery et traitements asynchrones
 
 Les tâches asynchrones utilisent Celery.
 
@@ -881,7 +975,7 @@ apps/deliveries/tasks.py
 
 ---
 
-## 16. Observabilité
+## 18. Observabilité
 
 Chaque requête HTTP reçoit un `correlation_id`.
 
@@ -937,7 +1031,7 @@ result
 
 ---
 
-## 17. Environnements
+## 19. Environnements
 
 Le projet prévoit quatre environnements principaux :
 
@@ -977,7 +1071,7 @@ Environnement destiné aux utilisateurs réels avec :
 
 ---
 
-## 18. Variables d'environnement
+## 20. Variables d'environnement
 
 Créer un fichier :
 
@@ -1020,7 +1114,7 @@ SENTRY_DSN=
 
 ---
 
-## 19. Installation locale
+## 21. Installation locale
 
 ### Créer l'environnement virtuel
 
@@ -1042,7 +1136,7 @@ python -m pip install --upgrade pip
 
 ---
 
-## 20. Infrastructure locale
+## 22. Infrastructure locale
 
 L'infrastructure locale utilise Docker Compose.
 
@@ -1079,7 +1173,7 @@ PONG
 
 ---
 
-## 21. Base de données
+## 23. Base de données
 
 Appliquer les migrations :
 
@@ -1108,7 +1202,7 @@ SELECT PostGIS_Version();
 
 ---
 
-## 22. Lancer Django
+## 24. Lancer Django
 
 ```bash
 python manage.py runserver
@@ -1136,7 +1230,7 @@ Réponse attendue :
 
 ---
 
-## 23. Documentation API
+## 25. Documentation API
 
 ### OpenAPI Schema
 
@@ -1152,7 +1246,7 @@ Réponse attendue :
 
 ---
 
-## 24. Lancer Celery
+## 26. Lancer Celery
 
 Dans un autre terminal :
 
@@ -1178,7 +1272,7 @@ Une tâche absente de cette liste n'est pas enregistrée par le worker.
 
 ---
 
-## 25. Lancer Celery Beat
+## 27. Lancer Celery Beat
 
 ```bash
 celery -A config beat --loglevel=info
@@ -1195,7 +1289,7 @@ métriques opérationnelles
 
 ---
 
-## 26. Tests
+## 28. Tests
 
 Les tests utilisent `pytest`.
 
@@ -1230,7 +1324,7 @@ apps/orders/tests/
 
 ---
 
-## 27. Qualité du code
+## 29. Qualité du code
 
 Le projet utilise **Ruff** pour le linting et le formatage.
 
@@ -1266,7 +1360,7 @@ mypy .
 
 ---
 
-## 28. Commandes de validation
+## 30. Commandes de validation
 
 Avant de considérer une modification comme prête :
 
@@ -1294,7 +1388,7 @@ python manage.py makemigrations --check --dry-run
 
 ---
 
-## 29. Règles de développement
+## 31. Règles de développement
 
 ### Règle 1 — Les vues HTTP ne portent pas le métier
 
@@ -1400,7 +1494,7 @@ Un retry Celery ou WhatsApp doit pouvoir être effectué sans créer de doublons
 
 ---
 
-## 30. Machine à états des commandes
+## 32. Machine à états des commandes
 
 La commande possède un état explicite.
 
@@ -1447,7 +1541,7 @@ Le domaine `orders` reste responsable de la validation des transitions.
 
 ---
 
-## 31. Architecture IA
+## 33. Architecture IA
 
 La couche IA est isolée du métier.
 
@@ -1493,7 +1587,7 @@ Django valide toujours la réponse avant son utilisation.
 
 ---
 
-## 32. Intégration WhatsApp
+## 34. Intégration WhatsApp
 
 Flux entrant :
 
@@ -1526,7 +1620,7 @@ Il ne doit pas contenir :
 
 ---
 
-## 33. Matching
+## 35. Matching
 
 ### Matching boutique
 
@@ -1572,7 +1666,7 @@ DRIVER_ASSIGNED
 
 ---
 
-## 34. Tracking
+## 36. Tracking
 
 Le tracking live ne dépend pas directement de WhatsApp.
 
@@ -1605,7 +1699,7 @@ Les tokens de tracking doivent :
 
 ---
 
-## 35. Philosophie du projet
+## 37. Philosophie du projet
 
 Whatassoh est volontairement construit comme un **MVP fonctionnel mais non jetable**.
 

@@ -9,6 +9,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
+    WHATSAPP_ENABLED=(bool, False),
+    WHATSAPP_REQUEST_TIMEOUT=(float, 10.0),
+    TELEGRAM_ENABLED=(bool, False),
+    TELEGRAM_REQUEST_TIMEOUT=(float, 10.0),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -59,6 +63,10 @@ LOCAL_APPS = [
     "apps.catalog",
     "apps.orders",
     "apps.audit",
+    "apps.messaging",
+    "apps.conversations",
+    "apps.whatsapp",
+    "apps.telegram",
 ]
 
 INSTALLED_APPS = [
@@ -231,6 +239,32 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": ("drf_spectacular.openapi.AutoSchema"),
     "EXCEPTION_HANDLER": ("common.exceptions.handler.api_exception_handler"),
 }
+
+
+# ---------------------------------------------------------------------
+# WhatsApp Cloud API
+# ---------------------------------------------------------------------
+
+WHATSAPP_ENABLED = env.bool("WHATSAPP_ENABLED", default=False)
+WHATSAPP_ACCESS_TOKEN = env("WHATSAPP_ACCESS_TOKEN", default="")
+WHATSAPP_PHONE_NUMBER_ID = env("WHATSAPP_PHONE_NUMBER_ID", default="")
+WHATSAPP_BUSINESS_ACCOUNT_ID = env("WHATSAPP_BUSINESS_ACCOUNT_ID", default="")
+WHATSAPP_VERIFY_TOKEN = env("WHATSAPP_VERIFY_TOKEN", default="")
+WHATSAPP_APP_SECRET = env("WHATSAPP_APP_SECRET", default="")
+WHATSAPP_REQUEST_TIMEOUT = env.float("WHATSAPP_REQUEST_TIMEOUT", default=10.0)
+META_GRAPH_API_VERSION = env("META_GRAPH_API_VERSION", default="v26.0")
+
+
+# ---------------------------------------------------------------------
+# Telegram Bot API
+# ---------------------------------------------------------------------
+
+TELEGRAM_ENABLED = env.bool("TELEGRAM_ENABLED", default=False)
+TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", default="")
+TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET", default="")
+TELEGRAM_WEBHOOK_URL = env("TELEGRAM_WEBHOOK_URL", default="")
+TELEGRAM_API_BASE_URL = env("TELEGRAM_API_BASE_URL", default="https://api.telegram.org")
+TELEGRAM_REQUEST_TIMEOUT = env.float("TELEGRAM_REQUEST_TIMEOUT", default=10.0)
 
 
 # ---------------------------------------------------------------------
