@@ -484,3 +484,610 @@
 - Catalog expose `Category`, `Product`, `ProductVariant`, `ProductAlias`.
 - Store Catalog expose `StoreProduct`, disponibilité souple, prix optionnel et devise.
 - Les futurs lots Orders + Audit pourront référencer ces entités sans introduire de stock dans Phase 2.
+
+## Lot 3.1 - Order Core
+
+### Conventions reutilisees
+
+- `common.models.BaseModel` pour les UUID et timestamps.
+- Organisation modulaire existante:
+  - `domain/enums.py`;
+  - `domain/rules.py`;
+  - `domain/services.py`;
+  - `application/services.py`;
+  - `application/selectors.py`;
+  - `infrastructure/models.py`.
+- Enums Django via `models.TextChoices`.
+- GeoDjango via `PointField(geography=True, srid=4326)`.
+- User central via `settings.AUTH_USER_MODEL`.
+- Unite de quantite reutilisee depuis `catalog.ProductUnit`.
+- Validations applicatives dans `domain/rules.py`, appelees par les services et les modeles.
+
+### Modeles
+
+- Ajout de l'app `apps.orders`.
+- Ajout de `Order`:
+  - `reference`;
+  - `customer`;
+  - `status`;
+  - `delivery_location`;
+  - `delivery_address_label`;
+  - `delivery_instructions`;
+  - `currency`;
+  - timestamps de confirmation, annulation, completion et echec;
+  - champs structures d'annulation;
+  - champs structures d'echec.
+- Ajout de `OrderItem`:
+  - `order`;
+  - `requested_name`;
+  - `quantity`;
+  - `unit`;
+  - `notes`;
+  - `product` optionnel;
+  - `product_variant` optionnel;
+  - `resolution_status`.
+
+### Enums
+
+- `OrderStatus`:
+  - `DRAFT`;
+  - `AWAITING_LOCATION`;
+  - `CONFIRMED`;
+  - `MATCHING_STORES`;
+  - `STORE_OFFERED`;
+  - `STORE_ACCEPTED`;
+  - `PREPARING`;
+  - `READY_FOR_PICKUP`;
+  - `MATCHING_DRIVERS`;
+  - `DRIVER_ASSIGNED`;
+  - `PICKED_UP`;
+  - `IN_DELIVERY`;
+  - `DELIVERED`;
+  - `CANCELLED`;
+  - `FAILED`.
+- `OrderItemResolutionStatus`:
+  - `MATCHED`;
+  - `UNMATCHED`;
+  - `AMBIGUOUS`.
+- `OrderCancellationCode`:
+  - `CUSTOMER_REQUEST`;
+  - `STORE_REQUEST`;
+  - `ADMIN_REQUEST`;
+  - `OTHER`.
+- `OrderFailureCode`:
+  - `NO_STORE_AVAILABLE`;
+  - `NO_DRIVER_AVAILABLE`;
+  - `STORE_FULFILLMENT_FAILED`;
+  - `DELIVERY_FAILED`;
+  - `OTHER`.
+
+### Contraintes et indexes
+
+- `Order.reference` unique, valide au format `ORD-YYMMDD-XXXX`.
+- `Order.status` limite aux valeurs de `OrderStatus`.
+- Codes d'annulation, codes d'echec et `failed_from_status` valides ou `NULL`.
+- `OrderItem.quantity > 0`.
+- `OrderItem.unit` limite aux valeurs de `ProductUnit`.
+- `OrderItem.resolution_status` limite aux valeurs de `OrderItemResolutionStatus`.
+- `MATCHED` implique `product IS NOT NULL`.
+- `UNMATCHED` implique `product IS NULL`.
+- `product_variant IS NOT NULL` implique `product IS NOT NULL`.
+- Validation applicative supplementaire:
+  - `product_variant.product_id == product.id`.
+- Indexes:
+  - `Order.customer`;
+  - `Order.status`;
+  - `(Order.customer, Order.status)`;
+  - `Order.created_at`;
+  - `OrderItem.order`;
+  - `OrderItem.product`;
+  - `OrderItem.resolution_status`.
+- `delivery_location` conserve l'index spatial implicite de `PointField`.
+
+### Reference Order
+
+- Format public: `ORD-YYMMDD-XXXX`.
+- Suffixe genere avec `secrets.choice`.
+- Alphabet sans caracteres ambigus `O`, `0`, `I`, `1`.
+- Collision geree par tentatives bornees:
+  - generation;
+  - tentative d'insertion;
+  - retry sur `IntegrityError`;
+  - contrainte unique DB comme protection finale.
+
+### Services
+
+- `create_order_draft`.
+- `add_order_item`.
+- `update_order_item`.
+- `remove_order_item`.
+- `set_delivery_location`.
+- `set_delivery_instructions`.
+
+Les services de modification autorisent seulement `DRAFT` et `AWAITING_LOCATION` pour eviter d'ouvrir une modification arbitraire sur des commandes terminees ou arretees avant la machine a etats du Lot 3.2.
+
+### Selectors
+
+- `get_order_by_id`.
+- `get_order_by_reference`.
+- `get_customer_orders`.
+- `get_order_items`.
+- `get_order_with_items`.
+
+Les selectors utilisent `select_related` et `prefetch_related` pour preparer les futures lectures API sans N+1 evident.
+
+### Admin
+
+- Ajout de `OrderAdmin`.
+- Ajout de `OrderItemAdmin`.
+- Inline `OrderItem` dans `OrderAdmin`.
+- Recherche par `reference` et `customer__whatsapp_phone`.
+- `reference`, `id`, `created_at` et `updated_at` en readonly.
+
+### Migrations
+
+- Ajout de `apps/orders/migrations/0001_initial.py`.
+- Ajout de `apps.orders` dans `LOCAL_APPS`.
+
+### Choix on_delete
+
+- `Order.customer`: `PROTECT` pour preserver l'historique transactionnel.
+- `OrderItem.order`: `CASCADE`, car les lignes appartiennent a l'aggregate Order.
+- `OrderItem.product`: `PROTECT` pour ne pas casser l'historique d'une commande resolue.
+- `OrderItem.product_variant`: `PROTECT` pour la meme raison.
+
+### Tests ajoutes
+
+- `apps/orders/tests/test_orders.py`.
+- Couverture:
+  - creation draft;
+  - reference et collision simulee;
+  - unicite DB de `reference`;
+  - devise par defaut;
+  - `delivery_location` nullable et persistance `Point(longitude, latitude)`;
+  - catalogue souple avec item `UNMATCHED`;
+  - item `MATCHED` avec produit;
+  - item `MATCHED` avec variante;
+  - rejet variante/produit incoherents;
+  - invariants `MATCHED`, `UNMATCHED`, `AMBIGUOUS`;
+  - quantite strictement positive;
+  - `requested_name` obligatoire;
+  - plusieurs commandes par user;
+  - plusieurs items par commande;
+  - selectors;
+  - protection de suppression customer.
+
+### Validation
+
+- `.venv/bin/python manage.py check` passe.
+- `.venv/bin/ruff check apps/orders config/settings/base.py` passe.
+- `.venv/bin/pytest apps/orders/tests` a ete lance:
+  - 15 tests collectes;
+  - 1 test pur reference passe;
+  - 14 tests DB bloques au setup;
+  - PostgreSQL/PostGIS ne repond pas sur `localhost:5432`;
+  - aucune assertion metier DB Orders n'a encore ete atteinte.
+
+### Reporte volontairement au Lot 3.2+
+
+- Machine complete de transitions.
+- Retry des echecs recuperables.
+- `AuditEvent`.
+- Domain Events.
+- `StoreOffer`.
+- `DriverOffer`.
+- `Delivery`.
+- Matching boutique ou chauffeur.
+- WhatsApp.
+- IA.
+- Celery lie aux commandes.
+- Paiement et calcul de prix.
+
+## Lot 3.2 - Order State Machine
+
+### Implémenté
+
+- Ajout d'une machine a etats explicite pour `Order`.
+- Ajout des exceptions metier:
+  - `InvalidOrderTransition`;
+  - `OrderNotEditable`;
+  - `OrderNotConfirmable`;
+  - `OrderNotRetryable`;
+  - `InvalidFailureCode`;
+  - `InvalidCancellation`;
+  - `InvalidOrderState`.
+- Ajout des services de transitions:
+  - `mark_awaiting_location`;
+  - `mark_draft`;
+  - `confirm_order`;
+  - `cancel_order`;
+  - `fail_order`;
+  - `retry_failed_order`;
+  - `start_store_matching`;
+  - `mark_store_offered`;
+  - `mark_store_accepted`;
+  - `mark_preparing`;
+  - `mark_ready_for_pickup`;
+  - `start_driver_matching`;
+  - `assign_driver`;
+  - `mark_picked_up`;
+  - `mark_in_delivery`;
+  - `mark_delivered`.
+
+### Matrice finale des transitions
+
+- `DRAFT` -> `AWAITING_LOCATION`, `CONFIRMED`, `CANCELLED`.
+- `AWAITING_LOCATION` -> `DRAFT`, `CONFIRMED`, `CANCELLED`.
+- `CONFIRMED` -> `MATCHING_STORES`, `CANCELLED`.
+- `MATCHING_STORES` -> `STORE_OFFERED`, `FAILED`, `CANCELLED`.
+- `STORE_OFFERED` -> `STORE_ACCEPTED`, `MATCHING_STORES`, `FAILED`, `CANCELLED`.
+- `STORE_ACCEPTED` -> `PREPARING`, `FAILED`, `CANCELLED`.
+- `PREPARING` -> `READY_FOR_PICKUP`, `FAILED`, `CANCELLED`.
+- `READY_FOR_PICKUP` -> `MATCHING_DRIVERS`, `FAILED`, `CANCELLED`.
+- `MATCHING_DRIVERS` -> `DRIVER_ASSIGNED`, `FAILED`, `CANCELLED`.
+- `DRIVER_ASSIGNED` -> `PICKED_UP`, `FAILED`, `CANCELLED`.
+- `PICKED_UP` -> `IN_DELIVERY`, `FAILED`.
+- `IN_DELIVERY` -> `DELIVERED`, `FAILED`.
+- `DELIVERED` -> aucune transition normale.
+- `CANCELLED` -> aucune transition normale.
+- `FAILED` -> aucune transition normale; reprise uniquement via `retry_failed_order`.
+
+### Confirmation
+
+- `confirm_order` accepte `DRAFT` et `AWAITING_LOCATION`.
+- Preconditions:
+  - au moins un item;
+  - `delivery_location` renseignee;
+  - items valides selon les invariants OrderItem;
+  - quantites strictement positives.
+- Les items `UNMATCHED` restent confirmables pour respecter le catalogue souple.
+- Les items `AMBIGUOUS` sont aussi acceptes dans ce MVP: l'intention textuelle reste exploitable par les boutiques, sans inventer de `Product`.
+- `confirmed_at` est renseigne a la premiere confirmation et n'est pas ecrase par un appel idempotent.
+
+### Politique d'edition
+
+- `DRAFT`: contenu modifiable.
+- `AWAITING_LOCATION`: contenu modifiable.
+- `CONFIRMED` et suivants: les services CRUD standards refusent:
+  - ajout d'item;
+  - modification d'item;
+  - suppression d'item;
+  - changement de localisation de livraison;
+  - changement d'instructions de livraison.
+
+Une modification post-confirmation devra passer plus tard par un workflow explicite.
+
+### Politique CANCELLED
+
+- `cancel_order` exige un `cancellation_code`.
+- `cancelled_at`, `cancellation_code` et `cancellation_reason` sont renseignes.
+- Annulation autorisee jusqu'a `DRIVER_ASSIGNED` inclus selon la matrice.
+- Annulation refusee depuis `PICKED_UP`, `IN_DELIVERY`, `DELIVERED`, `FAILED` et `CANCELLED`.
+- `CANCELLED` est terminal pour la commande actuelle.
+
+### Politique FAILED / Retry
+
+- `fail_order` memorise:
+  - `failed_from_status`;
+  - `failure_code`;
+  - `failure_reason`;
+  - `failed_at`;
+  - puis met `status=FAILED`.
+- Une erreur technique ne doit pas appeler `fail_order`; `FAILED` reste un echec metier/operationnel.
+- `retry_failed_order` ne prend pas de `target_status` fourni par l'appelant.
+- Lors d'un retry accepte, les champs d'echec actif sont nettoyes:
+  - `failed_at`;
+  - `failure_code`;
+  - `failure_reason`;
+  - `failed_from_status`.
+- L'historique permanent sera couvert par AuditEvent au Lot 3.3.
+
+Politique par `FailureCode`:
+
+- `NO_STORE_AVAILABLE`:
+  - sources: `MATCHING_STORES`, `STORE_OFFERED`;
+  - retryable: oui;
+  - cible: `MATCHING_STORES`.
+- `NO_DRIVER_AVAILABLE`:
+  - sources: `MATCHING_DRIVERS`;
+  - retryable: oui;
+  - cible: `MATCHING_DRIVERS`.
+- `STORE_FULFILLMENT_FAILED`:
+  - sources: `STORE_ACCEPTED`, `PREPARING`, `READY_FOR_PICKUP`;
+  - retryable: non pour l'instant.
+- `DELIVERY_FAILED`:
+  - sources: `DRIVER_ASSIGNED`, `PICKED_UP`, `IN_DELIVERY`;
+  - retryable: non.
+- `OTHER`:
+  - sources: etats operationnels non terminaux apres confirmation;
+  - retryable: non par defaut.
+
+### Transactions et locking
+
+- Les transitions critiques utilisent `transaction.atomic()`.
+- Les services relisent `Order` via `select_for_update()` avant de valider la transition.
+- La validation ne s'appuie donc pas sur une instance Python potentiellement stale.
+- Les services CRUD d'items relisent aussi l'order ou l'item sous lock avant mutation.
+
+### Politique d'idempotence
+
+- `confirm_order` sur `CONFIRMED`: no-op idempotent.
+- `mark_delivered` sur `DELIVERED`: no-op idempotent.
+- Les transitions semantiques vers leur propre etat courant sont no-op.
+- Les transitions depuis `DELIVERED`, `CANCELLED` ou `FAILED` vers des etats normaux restent refusees.
+- `cancel_order` n'est pas idempotent sur `CANCELLED`: une nouvelle annulation est refusee.
+- `fail_order` n'est pas idempotent sur `FAILED`: la reprise doit passer par `retry_failed_order`.
+
+### Tests ajoutes
+
+- Extension de `apps/orders/tests/test_orders.py`.
+- Couverture ajoutee:
+  - confirmation avec items et localisation;
+  - refus de confirmation sans item ou sans localisation;
+  - compatibilite `UNMATCHED` et `AMBIGUOUS`;
+  - idempotence de confirmation;
+  - `AWAITING_LOCATION` et retour `DRAFT`;
+  - blocage des editions apres confirmation;
+  - scenario complet du Definition of Done;
+  - progression normale jusqu'a `DELIVERED`;
+  - transitions incoherentes refusees;
+  - annulation et champs associes;
+  - refus d'annulation tardive;
+  - `FAILED` + retry pour store matching;
+  - `FAILED` + retry pour driver matching;
+  - `DELIVERY_FAILED` non retryable;
+  - coherence failure code / source status;
+  - rejet de retry hors `FAILED`;
+  - decision sur instance stale relue sous lock.
+
+### Validation
+
+- `.venv/bin/python manage.py check` passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`:
+  - aucune migration detectee;
+  - warning attendu car PostgreSQL local ne repond pas.
+- `.venv/bin/ruff check apps/orders` passe.
+- `.venv/bin/pytest apps/orders/tests`:
+  - 36 tests collectes;
+  - 1 test sans DB passe;
+  - 35 tests DB bloques au setup;
+  - PostgreSQL/PostGIS ne repond pas sur `localhost:5432`.
+- `.venv/bin/pytest apps/identity/tests apps/stores/tests apps/drivers/tests apps/catalog/tests apps/orders/tests tests/integration`:
+  - 127 tests collectes;
+  - 1 test sans DB passe;
+  - 126 tests bloques au setup DB;
+  - meme cause PostgreSQL/PostGIS local inaccessible.
+
+### Reporte volontairement aux Lots 3.3 et 3.4+
+
+- `AuditEvent`.
+- Historique permanent des echecs et transitions.
+- Domain Events.
+- Publication d'evenements.
+- Effets secondaires WhatsApp, matching, offres, livraison et Celery.
+
+## Lot 3.3 - Audit Trail
+
+### Inspection et conventions reutilisees
+
+- Aucune app `audit` existante n'etait presente.
+- `common.models.BaseModel` est reutilise pour UUID, `created_at` et `updated_at`.
+- `common.middleware.CorrelationIdMiddleware` existe deja:
+  - lit `X-Correlation-ID`;
+  - genere un UUID si absent;
+  - expose `request.correlation_id`.
+- L'audit expose donc un champ `correlation_id` et les services acceptent ce parametre sans ajouter de middleware supplementaire.
+- Les services Orders existants utilisent deja `transaction.atomic()` et `select_for_update()`, l'audit est ecrit dans ces memes transactions.
+
+### Modele AuditEvent
+
+- Ajout de l'app transversale `apps.audit`.
+- Ajout de `AuditEvent`:
+  - `id` UUID;
+  - `actor` nullable vers `settings.AUTH_USER_MODEL`;
+  - `actor_type`;
+  - `entity_type`;
+  - `entity_id`;
+  - `event_type`;
+  - `previous_state` nullable;
+  - `new_state` nullable;
+  - `metadata` JSONField;
+  - `correlation_id` nullable;
+  - `created_at`;
+  - `updated_at`.
+
+### ActorTypes
+
+- `USER`: action declenchee par un utilisateur authentifie.
+- `SYSTEM`: action automatique ou systeme, `actor` peut etre `NULL`.
+- `ADMIN`: action administrative, avec `actor` possible vers le user admin.
+
+`actor` utilise `on_delete=SET_NULL` pour conserver l'historique si un utilisateur est supprime.
+
+### Entity strategy
+
+- Pas de `GenericForeignKey` pour le MVP.
+- Strategie simple:
+  - `entity_type = "ORDER"`;
+  - `entity_id = <UUID>`.
+- Enums preparees:
+  - `ORDER`;
+  - `STORE_OFFER`;
+  - `DRIVER_OFFER`;
+  - `DELIVERY`.
+
+### EventTypes
+
+- `ORDER_CREATED`.
+- `ORDER_ITEM_ADDED`.
+- `ORDER_ITEM_UPDATED`.
+- `ORDER_ITEM_REMOVED`.
+- `ORDER_DELIVERY_LOCATION_UPDATED`.
+- `ORDER_DELIVERY_INSTRUCTIONS_UPDATED`.
+- `ORDER_CONFIRMED`.
+- `ORDER_CANCELLED`.
+- `ORDER_FAILED`.
+- `ORDER_RETRY_REQUESTED`.
+- `ORDER_STATUS_CHANGED`.
+
+Convention retenue:
+
+- evenement semantique quand une operation metier existe;
+- `ORDER_STATUS_CHANGED` pour les transitions operationnelles sans evenement plus specifique dans ce lot;
+- pas de double emission systematique pour eviter le bruit.
+
+### Metadata
+
+- `metadata` est un `JSONField(default=dict)`.
+- Les metadonnees contiennent des snapshots minimaux utiles:
+  - ids;
+  - noms demandes;
+  - quantites serialisees en string;
+  - unite;
+  - statut de resolution;
+  - codes/reasons d'annulation ou d'echec;
+  - coordonnees de livraison sous forme longitude/latitude.
+- Aucun objet Django entier n'est serialize.
+- Aucun token, secret ou payload externe complet n'est stocke.
+
+### Correlation ID
+
+- Champ `correlation_id` nullable sur `AuditEvent`.
+- Les services Orders acceptent `correlation_id`.
+- Les futurs canaux REST/WhatsApp pourront passer `request.correlation_id` depuis le middleware existant.
+
+### Service audit
+
+- Ajout de `record_audit_event(...)`.
+- Les appels directs a `AuditEvent.objects.create(...)` ne sont pas disperses dans Orders.
+- Si l'ecriture d'audit echoue, l'exception remonte et la transaction metier rollback.
+
+### Integration Orders
+
+- `create_order_draft` -> `ORDER_CREATED`.
+- `add_order_item` -> `ORDER_ITEM_ADDED`.
+- `update_order_item` -> `ORDER_ITEM_UPDATED`.
+- `remove_order_item` -> `ORDER_ITEM_REMOVED`.
+- `set_delivery_location` -> `ORDER_DELIVERY_LOCATION_UPDATED`.
+- `set_delivery_instructions` -> `ORDER_DELIVERY_INSTRUCTIONS_UPDATED`.
+- `confirm_order` -> `ORDER_CONFIRMED`.
+- `cancel_order` -> `ORDER_CANCELLED`.
+- `fail_order` -> `ORDER_FAILED`.
+- `retry_failed_order` -> `ORDER_RETRY_REQUESTED`.
+- Transitions operationnelles -> `ORDER_STATUS_CHANGED`.
+
+Pour `retry_failed_order`, le contexte d'echec est capture avant nettoyage des champs actifs de `Order`.
+
+### Garantie transactionnelle
+
+- AuditEvent est cree dans la meme transaction DB que la mutation Order/OrderItem.
+- Pas de `transaction.on_commit()` pour l'audit.
+- Si la transaction rollback:
+  - la mutation metier rollback;
+  - l'audit rollback aussi.
+- Si AuditEvent echoue, l'operation metier critique echoue aussi afin d'eviter un etat sans trace.
+
+### Immutabilite
+
+- `AuditEvent.save()` refuse les updates.
+- `AuditEvent.delete()` refuse les suppressions.
+- `AuditEventQuerySet.delete()` refuse les suppressions en masse.
+- `AuditEventAdmin` est readonly:
+  - pas d'ajout manuel;
+  - pas de modification;
+  - pas de suppression.
+
+### Indexes
+
+- `(entity_type, entity_id, created_at)`.
+- `actor`.
+- `event_type`.
+- `created_at`.
+- `correlation_id`.
+
+Le cas principal `get_order_audit_history(order)` est donc optimise par entity + ordre chronologique.
+
+### Selectors
+
+- `get_entity_audit_history(entity_type, entity_id)`.
+- `get_order_audit_history(order)`.
+- `get_audit_events_by_correlation_id(correlation_id)`.
+- `get_actor_audit_history(actor)`.
+
+Les histories sont retournes en ordre chronologique clair: `created_at`, puis `id`.
+
+### Admin
+
+- Ajout de `AuditEventAdmin`.
+- Affichage:
+  - `created_at`;
+  - `event_type`;
+  - `entity_type`;
+  - `entity_id`;
+  - `actor_type`;
+  - `actor`;
+  - `previous_state`;
+  - `new_state`;
+  - `correlation_id`.
+- Filtres:
+  - `event_type`;
+  - `entity_type`;
+  - `actor_type`;
+  - `created_at`.
+- Recherche:
+  - `entity_id`;
+  - `correlation_id`;
+  - `actor__whatsapp_phone`.
+
+### Migrations
+
+- Ajout de `apps/audit/migrations/0001_initial.py`.
+- Ajout de `apps.audit` dans `LOCAL_APPS`.
+
+### Tests ajoutes
+
+- `apps/audit/tests/test_audit.py`.
+- Couverture:
+  - creation Order -> `ORDER_CREATED`;
+  - add/update/remove item;
+  - confirmation et previous/new state;
+  - cancellation avec actor admin et metadata;
+  - failed + retry avec preservation du contexte d'echec;
+  - actor system nullable;
+  - correlation id selector;
+  - immutabilite instance et queryset;
+  - rollback Order + Audit;
+  - echec audit rollback la mutation metier.
+
+### Validation
+
+- `.venv/bin/python manage.py check` passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`:
+  - aucune migration manquante;
+  - warning attendu car PostgreSQL local ne repond pas.
+- `.venv/bin/ruff check apps/audit apps/orders config/settings/base.py` passe.
+- `.venv/bin/pytest apps/audit/tests apps/orders/tests`:
+  - 46 tests collectes;
+  - 1 test sans DB passe;
+  - 45 tests DB bloques au setup;
+  - PostgreSQL/PostGIS ne repond pas sur `localhost:5432`.
+- Suite globale pertinente:
+  - 137 tests collectes;
+  - 1 test sans DB passe;
+  - 136 tests bloques au setup DB;
+  - meme cause PostgreSQL/PostGIS local inaccessible.
+
+### Reporte volontairement au Lot 3.4+
+
+- Domain Event Bus.
+- Domain Events tels que `OrderConfirmed`, `OrderFailed`, etc.
+- Publication post-commit.
+- Transactional outbox.
+- Celery dispatch.
+- StoreOffer.
+- DriverOffer.
+- Delivery.
+- Matching.
+- WhatsApp.
+- IA.
+- Paiement.

@@ -57,6 +57,8 @@ LOCAL_APPS = [
     "apps.stores",
     "apps.drivers",
     "apps.catalog",
+    "apps.orders",
+    "apps.audit",
 ]
 
 INSTALLED_APPS = [
