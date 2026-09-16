@@ -2,6 +2,14 @@ from typing import Any
 
 from apps.messaging.domain.dtos import MessageLocation, NormalizedOutboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
+from apps.whatsapp.domain.dtos import (
+    WhatsAppInteractiveMessage,
+    WhatsAppTemplateMessage,
+)
+from apps.whatsapp.domain.templates import (
+    get_template_definition,
+    validate_template_parameters,
+)
 
 
 def build_text_payload(
@@ -42,6 +50,102 @@ def build_location_payload(
     if location.address:
         payload["location"]["address"] = location.address
     return payload
+
+
+def build_interactive_reply_buttons_payload(
+    message: WhatsAppInteractiveMessage,
+) -> dict[str, Any]:
+    if not 1 <= len(message.buttons) <= 3:
+        raise ValueError("WhatsApp reply buttons require between 1 and 3 buttons.")
+
+    interactive: dict[str, Any] = {
+        "type": "button",
+        "body": {"text": message.body},
+        "action": {
+            "buttons": [
+                {
+                    "type": "reply",
+                    "reply": {
+                        "id": button.action_id,
+                        "title": button.label,
+                    },
+                }
+                for button in message.buttons
+            ]
+        },
+    }
+    if message.header_text:
+        interactive["header"] = {"type": "text", "text": message.header_text}
+    if message.footer_text:
+        interactive["footer"] = {"text": message.footer_text}
+
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": message.recipient_external_id,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+
+
+def build_template_payload(message: WhatsAppTemplateMessage) -> dict[str, Any]:
+    definition = get_template_definition(
+        message.template_key,
+        language_code=message.language_code,
+    )
+    validate_template_parameters(
+        definition,
+        body_parameters=message.body_parameters,
+        header_parameters=message.header_parameters,
+        button_parameters=message.button_parameters,
+    )
+    components = []
+    if definition.header_parameters:
+        components.append(
+            {
+                "type": "header",
+                "parameters": [
+                    {"type": "text", "text": message.header_parameters[name]}
+                    for name in definition.header_parameters
+                ],
+            }
+        )
+    if definition.body_parameters:
+        components.append(
+            {
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": message.body_parameters[name]}
+                    for name in definition.body_parameters
+                ],
+            }
+        )
+    if definition.button_parameters:
+        components.append(
+            {
+                "type": "button",
+                "sub_type": "quick_reply",
+                "index": "0",
+                "parameters": [
+                    {"type": "payload", "payload": message.button_parameters[name]}
+                    for name in definition.button_parameters
+                ],
+            }
+        )
+
+    template: dict[str, Any] = {
+        "name": definition.meta_name,
+        "language": {"code": definition.language_code},
+    }
+    if components:
+        template["components"] = components
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": message.recipient_external_id,
+        "type": "template",
+        "template": template,
+    }
 
 
 def outbound_message_to_payload(message: NormalizedOutboundMessage) -> dict[str, Any]:

@@ -9,7 +9,7 @@ from apps.messaging.domain.dtos import (
     NormalizedOutboundMessage,
     ProviderSendResult,
 )
-from apps.messaging.domain.enums import MessageStatus, MessageType
+from apps.messaging.domain.enums import MessageStatus, MessageType, MessagingChannel
 from apps.messaging.domain.exceptions import (
     MessagingAuthenticationError,
     MessagingConfigurationError,
@@ -87,6 +87,17 @@ def send_conversation_text(
     metadata: dict[str, Any] | None = None,
     correlation_id: str | None = None,
 ) -> ProviderSendResult:
+    if conversation.channel == MessagingChannel.WHATSAPP:
+        from apps.whatsapp.domain.enums import WhatsAppOutboundDecision
+        from apps.whatsapp.domain.exceptions import WhatsAppTemplateRequired
+        from apps.whatsapp.domain.outbound_policy import WhatsAppOutboundPolicy
+
+        if (
+            WhatsAppOutboundPolicy().decide(conversation)
+            == WhatsAppOutboundDecision.TEMPLATE_REQUIRED
+        ):
+            raise WhatsAppTemplateRequired("WhatsApp service window is closed.")
+
     message = _conversation_outbound_message(
         conversation=conversation,
         message_type=MessageType.TEXT,

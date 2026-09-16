@@ -19,6 +19,7 @@ class MessageType(models.TextChoices):
     AUDIO = "AUDIO", "Audio"
     VIDEO = "VIDEO", "Video"
     INTERACTIVE = "INTERACTIVE", "Interactive"
+    TEMPLATE = "TEMPLATE", "Template"
     UNKNOWN = "UNKNOWN", "Unknown"
 
 
