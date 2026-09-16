@@ -312,7 +312,63 @@ Le canal vient de `Conversation.channel`. L'appelant n'a pas besoin de connaitre
 
 ---
 
-## 5. Structure générale du projet
+## 5. WhatsApp Service Window, Templates et Interactif
+
+WhatsApp impose une fenetre de service de 24 heures basee sur le dernier message
+entrant de l'utilisateur. Dans cette fenetre, Whatassoh peut envoyer des messages
+free-form: texte, localisation et messages interactifs. Hors fenetre, les
+messages proactifs doivent utiliser un template WhatsApp approuve lorsque Meta
+l'exige.
+
+Le backend applique cette decision de maniere deterministe. L'IA ne choisit pas
+si la fenetre est ouverte et ne choisit pas le template.
+
+### Templates MVP
+
+Les templates doivent exister et etre approuves dans le WhatsApp Manager de
+l'environnement Meta correspondant. Le code ne cree pas les templates chez Meta.
+
+```text
+WHATSAPP_TEMPLATE_LANGUAGE_CODE=fr
+WHATSAPP_TEMPLATE_ORDER_UPDATE=whatassoh_order_update
+WHATSAPP_TEMPLATE_ORDER_ACTION_REQUIRED=whatassoh_order_action_required
+WHATSAPP_TEMPLATE_OPERATIONAL_ACTION_REQUIRED=whatassoh_operational_action_required
+```
+
+Keys internes:
+
+```text
+ORDER_UPDATE
+ORDER_ACTION_REQUIRED
+OPERATIONAL_ACTION_REQUIRED
+```
+
+Le code applicatif utilise la key interne; le registry WhatsApp resout ensuite le
+nom Meta configure.
+
+### Messages interactifs
+
+Les reply buttons dynamiques sont disponibles uniquement lorsque la fenetre de
+service le permet. Chaque bouton possede:
+
+```text
+action_id = order.confirm
+label = Confirmer
+```
+
+Le futur orchestrateur doit utiliser `action_id`, jamais le label affiche, et
+doit toujours verifier les permissions et l'etat metier avant toute action.
+
+### Reengagement
+
+Pour relancer une conversation hors fenetre, utiliser un template explicite, par
+exemple `ORDER_ACTION_REQUIRED`. Lorsque l'utilisateur repond ou clique, le
+nouvel inbound WhatsApp est enregistre normalement et la fenetre de service est
+recalculee depuis cette interaction utilisateur.
+
+---
+
+## 6. Structure générale du projet
 
 ```text
 backend/
@@ -363,7 +419,7 @@ backend/
 
 ---
 
-## 6. Dossier `config/`
+## 7. Dossier `config/`
 
 Le dossier `config/` contient la configuration globale du projet.
 
@@ -441,7 +497,7 @@ Elle permet notamment :
 
 ---
 
-## 7. Dossier `apps/`
+## 8. Dossier `apps/`
 
 Le dossier `apps/` contient les différents domaines métier.
 
@@ -484,7 +540,7 @@ apps/
 
 ---
 
-## 8. Structure interne d'une application métier
+## 9. Structure interne d'une application métier
 
 Chaque domaine suit autant que possible cette organisation :
 
@@ -648,7 +704,7 @@ Le service métier décide ensuite si la transition est réellement autorisée.
 
 ---
 
-## 9. Dossier `common/`
+## 10. Dossier `common/`
 
 Le dossier `common/` contient les éléments partagés entre plusieurs domaines.
 
@@ -670,7 +726,7 @@ Il ne doit pas devenir un dossier dans lequel placer arbitrairement tout le code
 
 ---
 
-## 10. Routing
+## 11. Routing
 
 Toutes les APIs métier utilisent le préfixe :
 
@@ -726,7 +782,7 @@ Les webhooks ne sont pas mélangés aux APIs métier :
 
 ---
 
-## 11. Pagination
+## 12. Pagination
 
 La pagination globale utilise actuellement une pagination par numéro de page.
 
@@ -753,7 +809,7 @@ Les endpoints nécessitant une autre stratégie pourront utiliser une pagination
 
 ---
 
-## 12. Gestion des erreurs
+## 13. Gestion des erreurs
 
 Les erreurs API doivent utiliser une structure cohérente.
 
@@ -794,7 +850,7 @@ Les codes doivent permettre au frontend et aux intégrations de comprendre la ca
 
 ---
 
-## 13. Authentification et sécurité
+## 14. Authentification et sécurité
 
 Le projet utilise une approche restrictive par défaut.
 
@@ -825,7 +881,7 @@ Tracking           → Token temporaire signé
 
 ---
 
-## 14. Idempotence
+## 15. Idempotence
 
 Les systèmes externes peuvent envoyer plusieurs fois le même événement.
 
@@ -850,7 +906,7 @@ Un retry technique ne doit pas rejouer arbitrairement une transaction métier d�
 
 ---
 
-## 15. Concurrence
+## 16. Concurrence
 
 Certaines opérations doivent être protégées contre les accès simultanés.
 
@@ -883,7 +939,7 @@ Redis ou Celery ne décident jamais seuls du résultat final.
 
 ---
 
-## 16. Géolocalisation
+## 17. Géolocalisation
 
 Whatassoh distingue les données géographiques persistantes des données géographiques temps réel.
 
@@ -931,7 +987,7 @@ Affectation
 
 ---
 
-## 17. Celery et traitements asynchrones
+## 18. Celery et traitements asynchrones
 
 Les tâches asynchrones utilisent Celery.
 
@@ -975,7 +1031,7 @@ apps/deliveries/tasks.py
 
 ---
 
-## 18. Observabilité
+## 19. Observabilité
 
 Chaque requête HTTP reçoit un `correlation_id`.
 
@@ -1031,7 +1087,7 @@ result
 
 ---
 
-## 19. Environnements
+## 20. Environnements
 
 Le projet prévoit quatre environnements principaux :
 
@@ -1071,7 +1127,7 @@ Environnement destiné aux utilisateurs réels avec :
 
 ---
 
-## 20. Variables d'environnement
+## 21. Variables d'environnement
 
 Créer un fichier :
 
@@ -1114,7 +1170,7 @@ SENTRY_DSN=
 
 ---
 
-## 21. Installation locale
+## 22. Installation locale
 
 ### Créer l'environnement virtuel
 
@@ -1136,7 +1192,7 @@ python -m pip install --upgrade pip
 
 ---
 
-## 22. Infrastructure locale
+## 23. Infrastructure locale
 
 L'infrastructure locale utilise Docker Compose.
 
@@ -1173,7 +1229,7 @@ PONG
 
 ---
 
-## 23. Base de données
+## 24. Base de données
 
 Appliquer les migrations :
 
@@ -1202,7 +1258,7 @@ SELECT PostGIS_Version();
 
 ---
 
-## 24. Lancer Django
+## 25. Lancer Django
 
 ```bash
 python manage.py runserver
@@ -1230,7 +1286,7 @@ Réponse attendue :
 
 ---
 
-## 25. Documentation API
+## 26. Documentation API
 
 ### OpenAPI Schema
 
@@ -1246,7 +1302,7 @@ Réponse attendue :
 
 ---
 
-## 26. Lancer Celery
+## 27. Lancer Celery
 
 Dans un autre terminal :
 
@@ -1272,7 +1328,7 @@ Une tâche absente de cette liste n'est pas enregistrée par le worker.
 
 ---
 
-## 27. Lancer Celery Beat
+## 28. Lancer Celery Beat
 
 ```bash
 celery -A config beat --loglevel=info
@@ -1289,7 +1345,7 @@ métriques opérationnelles
 
 ---
 
-## 28. Tests
+## 29. Tests
 
 Les tests utilisent `pytest`.
 
@@ -1324,7 +1380,7 @@ apps/orders/tests/
 
 ---
 
-## 29. Qualité du code
+## 30. Qualité du code
 
 Le projet utilise **Ruff** pour le linting et le formatage.
 
@@ -1360,7 +1416,7 @@ mypy .
 
 ---
 
-## 30. Commandes de validation
+## 31. Commandes de validation
 
 Avant de considérer une modification comme prête :
 
@@ -1388,7 +1444,7 @@ python manage.py makemigrations --check --dry-run
 
 ---
 
-## 31. Règles de développement
+## 32. Règles de développement
 
 ### Règle 1 — Les vues HTTP ne portent pas le métier
 
@@ -1494,7 +1550,7 @@ Un retry Celery ou WhatsApp doit pouvoir être effectué sans créer de doublons
 
 ---
 
-## 32. Machine à états des commandes
+## 33. Machine à états des commandes
 
 La commande possède un état explicite.
 
@@ -1541,7 +1597,7 @@ Le domaine `orders` reste responsable de la validation des transitions.
 
 ---
 
-## 33. Architecture IA
+## 34. Architecture IA
 
 La couche IA est isolée du métier.
 
@@ -1587,7 +1643,7 @@ Django valide toujours la réponse avant son utilisation.
 
 ---
 
-## 34. Intégration WhatsApp
+## 35. Intégration WhatsApp
 
 Flux entrant :
 
@@ -1620,7 +1676,7 @@ Il ne doit pas contenir :
 
 ---
 
-## 35. Matching
+## 36. Matching
 
 ### Matching boutique
 
@@ -1666,7 +1722,7 @@ DRIVER_ASSIGNED
 
 ---
 
-## 36. Tracking
+## 37. Tracking
 
 Le tracking live ne dépend pas directement de WhatsApp.
 
@@ -1699,7 +1755,7 @@ Les tokens de tracking doivent :
 
 ---
 
-## 37. Philosophie du projet
+## 38. Philosophie du projet
 
 Whatassoh est volontairement construit comme un **MVP fonctionnel mais non jetable**.
 

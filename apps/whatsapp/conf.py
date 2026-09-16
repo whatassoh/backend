@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 from django.conf import settings
 
+from apps.whatsapp.domain.enums import WhatsAppTemplateKey
+from apps.whatsapp.domain.templates import TemplateDefinition
 from apps.whatsapp.exceptions import WhatsAppConfigurationError
 
 
@@ -15,9 +17,12 @@ class WhatsAppSettings:
     app_secret: str
     graph_api_version: str
     request_timeout: float
+    template_language_code: str
+    templates: dict[WhatsAppTemplateKey, TemplateDefinition]
 
 
 def get_whatsapp_settings(*, require_enabled: bool = False) -> WhatsAppSettings:
+    template_language_code = settings.WHATSAPP_TEMPLATE_LANGUAGE_CODE
     config = WhatsAppSettings(
         enabled=settings.WHATSAPP_ENABLED,
         access_token=settings.WHATSAPP_ACCESS_TOKEN,
@@ -27,6 +32,33 @@ def get_whatsapp_settings(*, require_enabled: bool = False) -> WhatsAppSettings:
         app_secret=settings.WHATSAPP_APP_SECRET,
         graph_api_version=settings.META_GRAPH_API_VERSION,
         request_timeout=settings.WHATSAPP_REQUEST_TIMEOUT,
+        template_language_code=template_language_code,
+        templates={
+            WhatsAppTemplateKey.ORDER_UPDATE: TemplateDefinition(
+                key=WhatsAppTemplateKey.ORDER_UPDATE,
+                meta_name=settings.WHATSAPP_TEMPLATE_ORDER_UPDATE,
+                language_code=template_language_code,
+                body_parameters=("customer_name", "order_reference", "update_text"),
+                category="UTILITY",
+                use_case="order_update",
+            ),
+            WhatsAppTemplateKey.ORDER_ACTION_REQUIRED: TemplateDefinition(
+                key=WhatsAppTemplateKey.ORDER_ACTION_REQUIRED,
+                meta_name=settings.WHATSAPP_TEMPLATE_ORDER_ACTION_REQUIRED,
+                language_code=template_language_code,
+                body_parameters=("customer_name", "order_reference"),
+                category="UTILITY",
+                use_case="order_action_required",
+            ),
+            WhatsAppTemplateKey.OPERATIONAL_ACTION_REQUIRED: TemplateDefinition(
+                key=WhatsAppTemplateKey.OPERATIONAL_ACTION_REQUIRED,
+                meta_name=settings.WHATSAPP_TEMPLATE_OPERATIONAL_ACTION_REQUIRED,
+                language_code=template_language_code,
+                body_parameters=("recipient_name",),
+                category="UTILITY",
+                use_case="operational_action_required",
+            ),
+        },
     )
 
     if require_enabled and not config.enabled:
