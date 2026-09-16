@@ -2618,3 +2618,220 @@ Non inclus:
 - broadcast;
 - preferred channel;
 - Celery retry complet.
+
+## Phase 4 - Lot 4.7 WhatsApp Interactive Messaging, Templates & 24h Service Window
+
+### Regles WhatsApp verifiees
+
+- Documentation/reference utilisee:
+  - WhatsApp Business Policy: fenetre client 24h et templates approuves hors
+    fenetre;
+  - Meta Postman WhatsApp Cloud API collection: `/messages`, `type=template`,
+    `type=interactive`;
+  - WhatsApp Business Platform features: templates, categories et messages
+    interactifs.
+- Regles retenues:
+  - free-form autorise dans les 24h suivant le dernier message utilisateur;
+  - hors fenetre, un message proactif doit utiliser un template approuve;
+  - les reply buttons dynamiques sont des messages interactifs;
+  - les callbacks bouton exposent un ID machine distinct du label;
+  - l'interaction utilisateur reouvre/recalcule la fenetre via un nouvel inbound;
+  - aucun LLM ne decide de la fenetre, du template ou du callback metier.
+
+### Service Window Policy
+
+- `WhatsAppServiceWindowPolicy` vit dans
+  `apps.whatsapp.domain.service_window`.
+- Source du timestamp:
+  - dernier `ConversationMessage` inbound de la conversation WhatsApp;
+  - jamais le dernier outbound;
+  - jamais `Conversation.last_activity_at`, car il inclut l'outbound.
+- Boundary:
+  - `now < last_inbound_at + 24h` -> open;
+  - a expiration exacte -> closed.
+- La source de verite reste PostgreSQL; pas de cache Redis requis.
+
+### Outbound Policy
+
+- `WhatsAppOutboundPolicy.decide(conversation)` retourne:
+  - `FREE_FORM_ALLOWED`;
+  - `TEMPLATE_REQUIRED`.
+- `send_conversation_text()` bloque maintenant les conversations WhatsApp hors
+  fenetre avec `WhatsAppTemplateRequired`.
+- `send_whatsapp_text_with_template_fallback()` choisit deterministiquement:
+  - fenetre ouverte -> free-form;
+  - fenetre fermee -> template explicite fourni par le caller.
+- Aucun texte libre n'est automatiquement injecte dans un template generique.
+
+### Templates MVP
+
+- `WhatsAppTemplateKey`:
+  - `ORDER_UPDATE`;
+  - `ORDER_ACTION_REQUIRED`;
+  - `OPERATIONAL_ACTION_REQUIRED`.
+- Configuration:
+  - `WHATSAPP_TEMPLATE_LANGUAGE_CODE`;
+  - `WHATSAPP_TEMPLATE_ORDER_UPDATE`;
+  - `WHATSAPP_TEMPLATE_ORDER_ACTION_REQUIRED`;
+  - `WHATSAPP_TEMPLATE_OPERATIONAL_ACTION_REQUIRED`.
+- Langue par defaut MVP: `fr`.
+- Les templates doivent etre crees/approuves dans Meta WhatsApp Manager.
+- Le code reference uniquement les keys internes.
+
+### Template Registry
+
+- `TemplateDefinition` decrit:
+  - key;
+  - nom Meta;
+  - language;
+  - category/use case;
+  - parametres attendus.
+- `get_template_definition()` lit la configuration courante.
+- `validate_template_parameters()` detecte avant HTTP:
+  - parametres manquants;
+  - parametres en trop;
+  - types evidemment invalides;
+  - langue non configuree;
+  - template non configure.
+
+### send_template
+
+- `WhatsAppProvider.send_template(WhatsAppTemplateMessage)`:
+  - valide le template;
+  - construit le payload Meta `type=template`;
+  - reutilise `_post_message`, auth, timeout et erreurs existants;
+  - enregistre un `MessageEvent OUTBOUND` avec `MessageType.TEMPLATE`;
+  - retourne `ProviderSendResult`.
+
+### Interactive Messages
+
+- `WhatsAppInteractiveMessage` et `WhatsAppReplyButton` restent specifiques au
+  module WhatsApp.
+- Support MVP:
+  - reply buttons;
+  - 1 a 3 boutons;
+  - `action_id` stable;
+  - label affiche separe.
+- Parser inbound:
+  - `button_reply` -> `MessageType.INTERACTIVE`;
+  - `metadata.whatsapp.action_id`;
+  - aucun appel Orders;
+  - aucun LLM necessaire pour comprendre l'action structuree.
+
+### Reengagement
+
+- Hors fenetre, utiliser explicitement un template comme
+  `ORDER_ACTION_REQUIRED`.
+- L'envoi du template ne simule pas une fenetre ouverte.
+- Seul un nouvel inbound utilisateur rouvre/recalcule la fenetre.
+
+### MessageEvent / ConversationMessage
+
+- Template outbound:
+  - `MessageEvent.message_type=TEMPLATE`;
+  - metadata contient key, nom Meta, langue;
+  - `ConversationMessage.message_type=TEMPLATE`;
+  - texte conversationnel controle: representation `[template:<key>]`.
+- Interactif outbound:
+  - `MessageEvent.message_type=INTERACTIVE`;
+  - `ConversationMessage.message_type=INTERACTIVE`;
+  - metadata liste les actions.
+- Pas de duplication d'ecriture: provider cree l'event, service applicatif cree
+  le message conversationnel.
+
+### Error handling
+
+- Erreurs ajoutees:
+  - `WhatsAppTemplateRequired`;
+  - `WhatsAppTemplateConfigurationError`;
+  - `WhatsAppTemplateValidationError`;
+  - `WhatsAppInteractiveValidationError`.
+- Les erreurs HTTP Meta continuent d'utiliser:
+  - `WhatsAppAPIError`;
+  - `WhatsAppAuthenticationError`;
+  - `WhatsAppRateLimitError`.
+- Pas de fallback free-form si Meta refuse un template.
+
+### Security
+
+- Pas de token dans les logs.
+- Les parametres template sont valides et minimises.
+- `action_id` n'est pas une autorisation metier.
+- Le futur orchestrateur devra verifier user/order/permissions/status avant toute
+  action.
+
+### Configuration Meta necessaire
+
+- Creer/approuver les templates dans Meta WhatsApp Manager.
+- Configurer les noms approuves dans `.env`.
+- Le backend ne cree pas, ne soumet pas et n'approuve pas les templates.
+
+### Fichiers crees/modifies
+
+- `apps/whatsapp/domain/dtos.py`.
+- `apps/whatsapp/domain/enums.py`.
+- `apps/whatsapp/domain/exceptions.py`.
+- `apps/whatsapp/domain/templates.py`.
+- `apps/whatsapp/domain/service_window.py`.
+- `apps/whatsapp/domain/outbound_policy.py`.
+- `apps/whatsapp/application/outbound.py`.
+- `apps/whatsapp/adapters/outbound.py`.
+- `apps/whatsapp/adapters/inbound.py`.
+- `apps/whatsapp/providers/cloud_api.py`.
+- `apps/whatsapp/tests/test_whatsapp_interactive_templates.py`.
+- `apps/messaging/domain/enums.py`.
+- `apps/messaging/application/orchestration.py`.
+- `config/settings/base.py`.
+- `.env.example`.
+- `README.md`.
+
+### Migrations
+
+- `apps/messaging/migrations/0003_add_template_message_type.py`.
+- `apps/conversations/migrations/0002_add_template_message_type.py`.
+- Elles ajoutent `MessageType.TEMPLATE` aux choices/contraintes.
+
+### Validation executee
+
+- `.venv/bin/python manage.py check`
+  - resultat: passe.
+- `.venv/bin/python manage.py makemigrations --check --dry-run`
+  - resultat: aucune migration manquante;
+  - warning: connexion DB indisponible pendant la verification d'historique.
+- `.venv/bin/ruff check apps/whatsapp apps/messaging config/settings/base.py`
+  - resultat: passe.
+- `.venv/bin/pytest apps/whatsapp/tests/test_whatsapp_interactive_templates.py -m 'not django_db' -q`
+  - resultat: 10 passent, 8 deselectionnes.
+- `.venv/bin/pytest apps/messaging/tests apps/conversations/tests apps/whatsapp/tests apps/telegram/tests tests/integration/test_phase4_multichannel.py -m 'not django_db' -q`
+  - resultat: 65 passent, 51 deselectionnes.
+
+### Non-regressions
+
+- Telegram n'a pas recu de templates, service window ou logique Meta.
+- Messaging expose seulement `MessageType.TEMPLATE` pour la tracabilite.
+- Orders reste independant de WhatsApp.
+
+### Limites volontaires
+
+Non inclus:
+
+- IA/OpenAI;
+- confirmation Order depuis bouton;
+- mapping `order.confirm -> confirm_order`;
+- moteur complet de campagnes;
+- synchronisation/approval automatique de templates Meta;
+- clone WhatsApp Manager;
+- templates Telegram;
+- template par `OrderStatus`.
+
+### Readiness Phase 5
+
+- La future couche conversationnelle peut utiliser:
+  - `send_conversation_text(...)`;
+  - `send_whatsapp_interactive_reply_buttons(...)`;
+  - `send_whatsapp_template_to_conversation(...)`;
+  - `send_whatsapp_text_with_template_fallback(...)`.
+- Les boutons structures peuvent etre traites sans LLM via `action_id`.
+- La politique 24h/template est deterministe.
+- Telegram reste independant.
+- Orders reste independant de WhatsApp.

@@ -71,6 +71,8 @@ def _parse_message(
             raise WhatsAppInvalidPayloadError(
                 "WhatsApp location payload is invalid."
             ) from exc
+    elif raw_type == "interactive":
+        metadata = _interactive_metadata(message, metadata)
 
     return NormalizedInboundMessage(
         channel=MessagingChannel.WHATSAPP,
@@ -93,3 +95,30 @@ def _parse_timestamp(timestamp: str | None) -> datetime | None:
         return datetime.fromtimestamp(int(timestamp), tz=UTC)
     except (TypeError, ValueError, OSError) as exc:
         raise WhatsAppInvalidPayloadError("WhatsApp timestamp is invalid.") from exc
+
+
+def _interactive_metadata(
+    message: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    interactive = message.get("interactive") or {}
+    interaction_type = interactive.get("type")
+    enriched = {**metadata}
+    whatsapp_metadata = {**enriched.get("whatsapp", {})}
+    whatsapp_metadata["interaction_type"] = interaction_type
+
+    if interaction_type == "button_reply":
+        reply = interactive.get("button_reply") or {}
+        whatsapp_metadata["action_id"] = reply.get("id")
+        whatsapp_metadata["button_title"] = reply.get("title")
+    elif interaction_type == "list_reply":
+        reply = interactive.get("list_reply") or {}
+        whatsapp_metadata["action_id"] = reply.get("id")
+        whatsapp_metadata["list_title"] = reply.get("title")
+        whatsapp_metadata["list_description"] = reply.get("description")
+
+    if not whatsapp_metadata.get("action_id"):
+        raise WhatsAppInvalidPayloadError("WhatsApp interactive reply is invalid.")
+
+    enriched["whatsapp"] = whatsapp_metadata
+    return enriched
