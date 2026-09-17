@@ -1,0 +1,224 @@
+[1mPlanned operations:
+[0m[36;1mcontenttypes.0001_initial
+[0m    Create model ContentType
+    Alter unique_together for contenttype (1 constraint(s))
+[36;1mcontenttypes.0002_remove_content_type_name
+[0m    Change Meta options on contenttype
+    Alter field name on contenttype
+    Raw Python operation
+    Remove field name from contenttype
+[36;1mauth.0001_initial
+[0m    Create model Permission
+    Create model Group
+    Create model User
+[36;1mauth.0002_alter_permission_name_max_length
+[0m    Alter field name on permission
+[36;1mauth.0003_alter_user_email_max_length
+[0m    Alter field email on user
+[36;1mauth.0004_alter_user_username_opts
+[0m    Alter field username on user
+[36;1mauth.0005_alter_user_last_login_null
+[0m    Alter field last_login on user
+[36;1mauth.0006_require_contenttypes_0002
+[0m[36;1mauth.0007_alter_validators_add_error_messages
+[0m    Alter field username on user
+[36;1mauth.0008_alter_user_username_max_length
+[0m    Alter field username on user
+[36;1mauth.0009_alter_user_last_name_max_length
+[0m    Alter field last_name on user
+[36;1mauth.0010_alter_group_name_max_length
+[0m    Alter field name on group
+[36;1mauth.0011_update_proxy_permissions
+[0m    Raw Python operation -> Update the content_type of proxy mo…
+[36;1mauth.0012_alter_user_first_name_max_length
+[0m    Alter field first_name on user
+[36;1midentity.0001_initial
+[0m    Create model User
+    Create model UserRole
+    Create constraint identity_user_status_valid on model user
+    Create constraint identity_user_role_unique on model userrole
+    Create constraint identity_user_role_valid on model userrole
+[36;1madmin.0001_initial
+[0m    Create model LogEntry
+[36;1madmin.0002_logentry_remove_auto_add
+[0m    Alter field action_time on logentry
+[36;1madmin.0003_logentry_add_action_flag_choices
+[0m    Alter field action_flag on logentry
+[36;1maudit.0001_initial
+[0m    Create model AuditEvent
+[36;1mstores.0001_initial
+[0m    Create model Store
+    Create model StoreMembership
+[36;1mstores.0002_alter_storemembership_id
+[0m    Alter field id on storemembership
+[36;1mcatalog.0001_initial
+[0m    Create model Category
+    Create model Product
+    Create model ProductAlias
+    Create model ProductVariant
+    Create index catalog_category_slug_idx on field(s) slug of model category
+    Create index catalog_category_status_idx on field(s) status of model category
+    Create constraint catalog_category_status_valid on model category
+    Create constraint catalog_category_not_own_parent on model category
+    Create index catalog_product_name_idx on field(s) normalized_name of model product
+    Create index catalog_product_status_idx on field(s) status of model product
+    Create index catalog_product_cat_idx on field(s) category, status of model product
+    Create constraint catalog_product_status_valid on model product
+    Create constraint catalog_product_unit_valid on model product
+    Create constraint catalog_product_category_name_unique on model product
+    Create index catalog_alias_normalized_idx on field(s) normalized_alias of model productalias
+    Create constraint catalog_alias_product_alias_unique on model productalias
+    Create index catalog_variant_name_idx on field(s) product, normalized_name of model productvariant
+    Create index catalog_variant_status_idx on field(s) status of model productvariant
+    Create constraint catalog_variant_status_valid on model productvariant
+    Create constraint catalog_variant_product_name_unique on model productvariant
+[36;1mcatalog.0002_productalias_updated_at
+[0m    Add field updated_at to productalias
+[36;1mcatalog.0003_storeproduct
+[0m    Create model StoreProduct
+[36;1mmessaging.0001_initial
+[0m    Create model MessageEvent
+    Create model ChannelIdentity
+[36;1mmessaging.0002_backfill_whatsapp_channel_identities
+[0m    Raw Python operation
+[36;1mmessaging.0003_add_template_message_type
+[0m    Remove constraint msg_event_type_valid from model messageevent
+    Alter field message_type on messageevent
+    Create constraint msg_event_type_valid on model messageevent
+[36;1mconversations.0001_initial
+[0m    Create model Conversation
+    Create model ConversationMessage
+    Create index conv_identity_chat_status_idx on field(s) channel_identity, external_chat_id, status of model conversation
+    Create index conv_user_status_idx on field(s) user, status of model conversation
+    Create index conv_channel_status_idx on field(s) channel, status of model conversation
+    Create index conv_last_activity_idx on field(s) last_activity_at of model conversation
+    Create constraint conv_active_identity_chat_unique on model conversation
+    Create constraint conv_active_identity_null_chat_unique on model conversation
+    Create constraint conv_channel_valid on model conversation
+    Create constraint conv_status_valid on model conversation
+    Create index conv_msg_conversation_time_idx on field(s) conversation, occurred_at of model conversationmessage
+    Create index conv_msg_direction_idx on field(s) direction of model conversationmessage
+    Create index conv_msg_type_idx on field(s) message_type of model conversationmessage
+    Create constraint conv_msg_direction_valid on model conversationmessage
+    Create constraint conv_msg_type_valid on model conversationmessage
+[36;1mconversations.0002_add_template_message_type
+[0m    Remove constraint conv_msg_type_valid from model conversationmessage
+    Alter field message_type on conversationmessage
+    Create constraint conv_msg_type_valid on model conversationmessage
+[36;1mdjango_celery_beat.0001_initial
+[0m    Create model CrontabSchedule
+    Create model IntervalSchedule
+    Create model PeriodicTask
+    Create model PeriodicTasks
+[36;1mdjango_celery_beat.0002_auto_20161118_0346
+[0m    Create model SolarSchedule
+    Add field solar to periodictask
+[36;1mdjango_celery_beat.0003_auto_20161209_0049
+[0m    Change Meta options on solarschedule
+    Alter unique_together for solarschedule (1 constraint(s))
+[36;1mdjango_celery_beat.0004_auto_20170221_0000
+[0m    Alter field longitude on solarschedule
+[36;1mdjango_celery_beat.0005_add_solarschedule_events_choices
+[0m    Alter field event on solarschedule
+[36;1mdjango_celery_beat.0006_auto_20180322_0932
+[0m    Change Meta options on crontabschedule
+    Add field timezone to crontabschedule
+    Alter field day_of_month on crontabschedule
+    Alter field hour on crontabschedule
+    Alter field minute on crontabschedule
+[36;1mdjango_celery_beat.0007_auto_20180521_0826
+[0m    Add field one_off to periodictask
+    Add field start_time to periodictask
+[36;1mdjango_celery_beat.0008_auto_20180914_1922
+[0m    Alter field day_of_month on crontabschedule
+    Alter field day_of_week on crontabschedule
+    Alter field hour on crontabschedule
+    Alter field minute on crontabschedule
+    Alter field month_of_year on crontabschedule
+[36;1mdjango_celery_beat.0006_auto_20180210_1226
+[0m    Alter field day_of_month on crontabschedule
+    Alter field hour on crontabschedule
+    Alter field minute on crontabschedule
+[36;1mdjango_celery_beat.0006_periodictask_priority
+[0m    Add field priority to periodictask
+[36;1mdjango_celery_beat.0009_periodictask_headers
+[0m    Add field headers to periodictask
+[36;1mdjango_celery_beat.0010_auto_20190429_0326
+[0m    Alter field day_of_month on crontabschedule
+    Alter field day_of_week on crontabschedule
+    Alter field hour on crontabschedule
+    Alter field minute on crontabschedule
+    Alter field month_of_year on crontabschedule
+    Alter field timezone on crontabschedule
+    Alter field every on intervalschedule
+    Alter field period on intervalschedule
+    Alter field args on periodictask
+    Alter field crontab on periodictask
+    Alter field date_changed on periodictask
+    Alter field description on periodictask
+    Alter field enabled on periodictask
+    Alter field exchange on periodictask
+    Alter field expires on periodictask
+    Alter field headers on periodictask
+    Alter field interval on periodictask
+    Alter field kwargs on periodictask
+    Alter field last_run_at on periodictask
+    Alter field name on periodictask
+    Alter field one_off on periodictask
+    Alter field priority on periodictask
+    Alter field queue on periodictask
+    Alter field routing_key on periodictask
+    Alter field solar on periodictask
+    Alter field start_time on periodictask
+    Alter field task on periodictask
+    Alter field total_run_count on periodictask
+    Alter field event on solarschedule
+    Alter field latitude on solarschedule
+    Alter field longitude on solarschedule
+[36;1mdjango_celery_beat.0011_auto_20190508_0153
+[0m    Create model ClockedSchedule
+    Add field clocked to periodictask
+[36;1mdjango_celery_beat.0012_periodictask_expire_seconds
+[0m    Add field expire_seconds to periodictask
+[36;1mdjango_celery_beat.0013_auto_20200609_0727
+[0m    Alter field timezone on crontabschedule
+[36;1mdjango_celery_beat.0014_remove_clockedschedule_enabled
+[0m    Remove field enabled from clockedschedule
+[36;1mdjango_celery_beat.0015_edit_solarschedule_events_choices
+[0m    Alter field event on solarschedule
+[36;1mdjango_celery_beat.0016_alter_crontabschedule_timezone
+[0m    Alter field timezone on crontabschedule
+[36;1mdjango_celery_beat.0017_alter_crontabschedule_month_of_year
+[0m    Alter field month_of_year on crontabschedule
+[36;1mdjango_celery_beat.0018_improve_crontab_helptext
+[0m    Alter field day_of_week on crontabschedule
+[36;1mdjango_celery_beat.0019_alter_periodictasks_options
+[0m    Change Meta options on periodictasks
+[36;1mdrivers.0001_initial
+[0m    Create model DriverProfile
+[36;1midentity.0002_alter_userrole_id
+[0m    Alter field id on userrole
+[36;1midentity.0003_userrole_updated_at
+[0m    Add field updated_at to userrole
+[36;1morders.0001_initial
+[0m    Create model Order
+    Create model OrderItem
+    Create index orders_order_customer_idx on field(s) customer of model order
+    Create index orders_order_status_idx on field(s) status of model order
+    Create index orders_order_cust_status_idx on field(s) customer, status of model order
+    Create index orders_order_created_idx on field(s) created_at of model order
+    Create constraint orders_order_status_valid on model order
+    Create constraint orders_order_cancel_code_valid on model order
+    Create constraint orders_order_failure_code_valid on model order
+    Create constraint orders_order_failed_from_valid on model order
+    Create index orders_item_order_idx on field(s) order of model orderitem
+    Create index orders_item_product_idx on field(s) product of model orderitem
+    Create index orders_item_res_status_idx on field(s) resolution_status of model orderitem
+    Create constraint orders_item_quantity_positive on model orderitem
+    Create constraint orders_item_unit_valid on model orderitem
+    Create constraint orders_item_resolution_valid on model orderitem
+    Create constraint orders_item_matched_has_product on model orderitem
+    Create constraint orders_item_unmatched_no_product on model orderitem
+    Create constraint orders_item_variant_has_product on model orderitem
+[36;1msessions.0001_initial
+[0m    Create model Session

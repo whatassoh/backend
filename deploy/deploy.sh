@@ -44,7 +44,7 @@ ENABLE_TLS="${ENABLE_TLS:-1}"
 PORT_RANGE_START="${PORT_RANGE_START:-8010}"
 PORT_RANGE_END="${PORT_RANGE_END:-8099}"
 
-HEALTH_PATH="${HEALTH_PATH:-/}"
+HEALTH_PATH="${HEALTH_PATH:-/health/}"
 CORS_ORIGINS="${CORS_ORIGINS:-}"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -455,6 +455,47 @@ restore_nginx() {
 }
 
 
+
+# ----------------------------------------------------------
+# COMPOSE V1 WORKAROUND
+#
+# docker-compose 1.29.2 peut planter avec:
+# KeyError: 'ContainerConfig'
+# lors d'une recréation sur un Docker Engine récent.
+#
+# On retire uniquement le conteneur "web" du projet
+# whatassoh avant de le recréer.
+#
+# Aucun volume, réseau, postgres, redis ou bangobango
+# n'est supprimé.
+# ----------------------------------------------------------
+
+remove_whatassoh_web_containers() {
+
+    local ids
+
+    ids="$(
+        docker ps -aq \
+            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+            --filter "label=com.docker.compose.service=web" \
+            2>/dev/null || true
+    )"
+
+    if [[ -z "$ids" ]]; then
+        return 0
+    fi
+
+    log "Suppression de l'ancien conteneur web whatassoh uniquement"
+
+    while IFS= read -r cid; do
+
+        [[ -n "$cid" ]] || continue
+
+        docker rm -f "$cid"
+
+    done <<< "$ids"
+}
+
 # ----------------------------------------------------------
 # APPLICATION ROLLBACK
 # ----------------------------------------------------------
@@ -477,6 +518,8 @@ rollback_web() {
         "WEB_IMAGE" \
         "$OLD_WEB_IMAGE"
 
+
+    remove_whatassoh_web_containers
 
     "${COMPOSE[@]}" up \
         -d \
@@ -603,8 +646,8 @@ docker info >/dev/null 2>&1 || \
     die "Docker n'est pas accessible."
 
 
-docker compose version >/dev/null 2>&1 || \
-    die "Docker Compose v2 n'est pas disponible."
+docker-compose version >/dev/null 2>&1 || \
+    die "docker-compose n'est pas disponible."
 
 
 # Sécurité absolue :
@@ -972,7 +1015,7 @@ env_set \
 
 COMPOSE=(
 
-    docker compose
+    docker-compose
 
     -p "$PROJECT_NAME"
 
@@ -1188,6 +1231,8 @@ log "collectstatic"
 
 log "Démarrage du nouveau web"
 
+
+remove_whatassoh_web_containers
 
 "${COMPOSE[@]}" up \
     -d \
@@ -1470,25 +1515,58 @@ else
 fi
 
 
+# Laisse quelques secondes à Nginx après le reload.
+sleep 3
+
+
 log "Test final : ${FINAL_URL}"
 
 
-HTTP_CODE="$(
-    curl \
-        -sS \
-        -o /dev/null \
-        -w '%{http_code}' \
-        --max-time 15 \
-        "$FINAL_URL" \
-        || true
-)"
+if [[ "$ENABLE_TLS" == "1" ]]; then
+
+    HTTP_CODE="$(
+        curl \
+            -sS \
+            -o /dev/null \
+            -w '%{http_code}' \
+            --max-time 15 \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            --resolve "${DOMAIN}:443:${SERVER_IP}" \
+            "$FINAL_URL" \
+            || true
+    )"
+
+else
+
+    HTTP_CODE="$(
+        curl \
+            -sS \
+            -o /dev/null \
+            -w '%{http_code}' \
+            --max-time 15 \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            --resolve "${DOMAIN}:80:${SERVER_IP}" \
+            "$FINAL_URL" \
+            || true
+    )"
+
+fi
 
 
-if [[ ! "$HTTP_CODE" =~ ^[1-4][0-9][0-9]$ ]]; then
+if [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+
+    log "Health check réussi : HTTP ${HTTP_CODE}"
+
+else
 
     die "
 Test public échoué.
 
+URL  : ${FINAL_URL}
 HTTP : ${HTTP_CODE:-000}
 "
 
@@ -1514,7 +1592,9 @@ printf '\n%-20s %s\n' \
     "Projet Compose :" "$PROJECT_NAME" \
     "Image :" "$NEW_WEB_IMAGE" \
     "Port privé :" "127.0.0.1:${APP_PORT}" \
-    "URL :" "$FINAL_URL" \
+    "URL santé :" "$FINAL_URL" \
+    "Documentation :" "https://${DOMAIN}/api/docs/" \
+    "OpenAPI :" "https://${DOMAIN}/api/schema/" \
     "Backup DB :" "$DB_BACKUP"
 
 
