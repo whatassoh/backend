@@ -844,6 +844,21 @@ env_set \
 
 
 env_set \
+    "CELERY_BROKER_URL" \
+    "redis://:${REDIS_PASSWORD}@redis:6379/1"
+
+
+env_set \
+    "CELERY_RESULT_BACKEND" \
+    "redis://:${REDIS_PASSWORD}@redis:6379/2"
+
+
+env_set \
+    "DJANGO_ENV" \
+    "production"
+
+
+env_set \
     "DJANGO_ALLOWED_HOSTS" \
     "$DOMAIN"
 

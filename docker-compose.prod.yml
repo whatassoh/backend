@@ -1,7 +1,7 @@
-name: whatassoh
-
 services:
   web:
+    image: ${WEB_IMAGE}
+
     build:
       context: .
       dockerfile: Dockerfile
@@ -39,7 +39,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
     volumes:
-      - whatassoh_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
 
     healthcheck:
       test:
@@ -66,7 +66,7 @@ services:
       ]
 
     volumes:
-      - whatassoh_redis_data:/data
+      - redis_data:/data
 
     healthcheck:
       test:
@@ -79,5 +79,5 @@ services:
       retries: 10
 
 volumes:
-  whatassoh_postgres_data:
-  whatassoh_redis_data:
+  postgres_data:
+  redis_data:
