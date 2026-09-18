@@ -54,6 +54,7 @@ THIRD_PARTY_APPS = [
     "drf_spectacular",
     "corsheaders",
     "django_celery_beat",
+    "django.contrib.postgres",
 ]
 
 LOCAL_APPS = [
@@ -67,6 +68,9 @@ LOCAL_APPS = [
     "apps.conversations",
     "apps.whatsapp",
     "apps.telegram",
+    "apps.ai",
+    "apps.knowledge",
+    "apps.evaluation",
 ]
 
 INSTALLED_APPS = [
@@ -278,13 +282,36 @@ TELEGRAM_REQUEST_TIMEOUT = env.float("TELEGRAM_REQUEST_TIMEOUT", default=10.0)
 
 
 # ---------------------------------------------------------------------
+# AI
+# ---------------------------------------------------------------------
+
+# Keeping AI disabled by default makes local and test startup independent from
+# external credentials.  The mock provider remains available through explicit
+# dependency injection for deterministic application tests.
+AI_ENABLED = env.bool("AI_ENABLED", default=False)
+AI_PROVIDER = env("AI_PROVIDER", default="mock").lower()
+AI_MODEL = env("AI_MODEL", default="")
+AI_TIMEOUT_SECONDS = env.float("AI_TIMEOUT_SECONDS", default=15.0)
+OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
+
+
+# ---------------------------------------------------------------------
 # OpenAPI
 # ---------------------------------------------------------------------
 
 SPECTACULAR_SETTINGS = {
-    "TITLE": "Marketplace WhatsApp IA API",
-    "DESCRIPTION": ("API du backend marketplace conversationnelle WhatsApp + IA."),
+    "TITLE": "Whatassoh API",
+    "DESCRIPTION": (
+        "API REST de Whatassoh. Les routes `/api/v1/` exigent un JWT sauf les "
+        "webhooks WhatsApp et Telegram. Les schemas de requete et de reponse "
+        "sont fournis pour chaque ressource; les webhooks recoivent les payloads "
+        "bruts de leurs providers respectifs. Les services AI, grounding, RAG, "
+        "clarification et orchestration sont internes et ne constituent pas des "
+        "endpoints publics."
+    ),
     "VERSION": "1.0.0",
+    "SERVE_AUTHENTICATION": [],
+    "COMPONENT_SPLIT_REQUEST": True,
     "SERVE_INCLUDE_SCHEMA": False,
 }
 

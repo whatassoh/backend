@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -22,10 +23,13 @@ from apps.catalog.application.services import (
     remove_product_from_store,
     update_store_product,
 )
-from apps.catalog.infrastructure.models import Category, Product
+from apps.catalog.infrastructure.models import Category, Product, StoreProduct
 from apps.stores.infrastructure.models import Store
 
 
+@extend_schema(
+    tags=["Catalog / Categories"], description="Categories actives du catalogue."
+)
 class CategoryViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = CategorySerializer
@@ -39,6 +43,13 @@ class CategoryViewSet(viewsets.ModelViewSet):
         serializer.instance = create_category(**serializer.validated_data)
 
 
+@extend_schema(
+    tags=["Catalog / Products"],
+    description=(
+        "Produits et variantes. `search` recherche dans les noms et aliases; "
+        "`category` filtre par UUID de categorie."
+    ),
+)
 class ProductViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = ProductSerializer
@@ -65,6 +76,13 @@ class ProductViewSet(viewsets.ModelViewSet):
         serializer.instance = create_product(**serializer.validated_data)
 
 
+@extend_schema(
+    tags=["Catalog / Store offers"],
+    description=(
+        "Offres de catalogue d'une boutique. `availability_status` n'est pas "
+        "une garantie de stock instantane."
+    ),
+)
 class StoreProductViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = StoreProductSerializer
@@ -74,6 +92,8 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         return get_object_or_404(Store, id=self.kwargs["store_pk"])
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return StoreProduct.objects.none()
         return get_store_products(self.get_store())
 
     def perform_create(self, serializer: StoreProductSerializer) -> None:

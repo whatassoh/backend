@@ -1,6 +1,7 @@
 import json
 
 from django.http import HttpResponse
+from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,10 +16,31 @@ from apps.whatsapp.security import verify_meta_signature
 
 
 class WhatsAppWebhookView(APIView):
+    """Webhook Meta entrant; protégé par verify token ou signature HMAC."""
+
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
     throttle_classes = []
 
+    @extend_schema(
+        tags=["Webhooks / WhatsApp"],
+        summary="Verifier le webhook Meta",
+        parameters=[
+            OpenApiParameter(
+                "hub.mode", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True
+            ),
+            OpenApiParameter(
+                "hub.verify_token",
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
+                required=True,
+            ),
+            OpenApiParameter(
+                "hub.challenge", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True
+            ),
+        ],
+        responses={200: OpenApiTypes.STR, 400: None, 403: None, 503: None},
+    )
     def get(self, request):
         try:
             config = get_whatsapp_settings(require_enabled=True)
@@ -34,6 +56,16 @@ class WhatsAppWebhookView(APIView):
             return HttpResponse(challenge, content_type="text/plain")
         return Response(status=status.HTTP_403_FORBIDDEN)
 
+    @extend_schema(
+        tags=["Webhooks / WhatsApp"],
+        summary="Recevoir un evenement WhatsApp",
+        description=(
+            "Payload Meta brut. La signature `X-Hub-Signature-256` est obligatoire; "
+            "le traitement est idempotent par identifiant externe."
+        ),
+        request=OpenApiTypes.OBJECT,
+        responses={200: OpenApiTypes.OBJECT, 400: None, 403: None, 503: None},
+    )
     def post(self, request):
         try:
             config = get_whatsapp_settings(require_enabled=True)

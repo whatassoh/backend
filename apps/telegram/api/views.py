@@ -1,5 +1,6 @@
 import json
 
+from drf_spectacular.utils import OpenApiTypes, extend_schema
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,10 +16,28 @@ from apps.telegram.security import verify_telegram_secret
 
 
 class TelegramWebhookView(APIView):
+    """Webhook Telegram entrant, sécurisé par le secret configuré."""
+
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
     throttle_classes = []
 
+    @extend_schema(
+        tags=["Webhooks / Telegram"],
+        summary="Recevoir une mise a jour Telegram",
+        description=(
+            "Payload Telegram brut. L'en-tete "
+            "`X-Telegram-Bot-Api-Secret-Token` est obligatoire."
+        ),
+        request=OpenApiTypes.OBJECT,
+        responses={
+            200: OpenApiTypes.OBJECT,
+            400: None,
+            403: None,
+            409: OpenApiTypes.OBJECT,
+            503: None,
+        },
+    )
     def post(self, request):
         try:
             config = get_telegram_settings(require_enabled=True)

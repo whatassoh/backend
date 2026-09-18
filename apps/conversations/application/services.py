@@ -250,5 +250,7 @@ def close_conversation(conversation: Conversation) -> Conversation:
     now = timezone.now()
     locked.status = ConversationStatus.CLOSED
     locked.closed_at = now
-    locked.save(update_fields=["status", "closed_at", "updated_at"])
+    # Temporary dialogue state must never leak into a later conversation.
+    locked.context = {}
+    locked.save(update_fields=["status", "closed_at", "context", "updated_at"])
     return locked

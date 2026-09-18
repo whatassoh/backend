@@ -82,7 +82,7 @@ def location_update():
     [
         (False, "", "", False),
         (True, "", WEBHOOK_SECRET, True),
-        (True, "token", "", True),
+        (True, "token", "", False),
         (True, "token", WEBHOOK_SECRET, False),
     ],
 )
