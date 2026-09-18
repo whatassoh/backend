@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException
@@ -65,6 +66,13 @@ def raise_api_domain_error(exc: Exception) -> None:
     raise api_exc from exc
 
 
+@extend_schema(
+    tags=["Orders"],
+    description=(
+        "Commandes du client authentifie; les transitions appliquent la "
+        "machine a etats et produisent l'audit officiel."
+    ),
+)
 class OrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = OrderSerializer
@@ -72,6 +80,8 @@ class OrderViewSet(viewsets.ModelViewSet):
     lookup_url_kwarg = "order_pk"
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Order.objects.none()
         queryset = (
             Order.objects.select_related("customer")
             .prefetch_related(

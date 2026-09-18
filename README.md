@@ -76,6 +76,52 @@ PostgreSQL
 
 L'IA ne peut donc jamais effectuer directement une transition métier ou modifier la base de données.
 
+### AI Core (Lot 5.1)
+
+`apps.ai` is a provider-neutral boundary: application code builds an explicit
+`AIStructuredRequest`, then calls `AIService.generate_structured()`. Providers
+return validated dictionaries wrapped in `AIStructuredResult`; they never see
+Django models and never mutate business state. `MockAIProvider` is deterministic
+for tests. `OpenAIProvider` uses the Responses API Structured Outputs JSON schema
+format and is selected only with `AI_ENABLED=true`, `AI_PROVIDER=openai`,
+`AI_MODEL`, and `OPENAI_API_KEY`. Calls set `store=False`; logs include only
+operational metadata, not prompt/input/context bodies. No AI interaction history
+is persisted in this lot.
+
+### Catalog grounding (Lot 5.3)
+
+`CatalogGroundingService` resolves only real PostgreSQL catalog records from an
+`ExtractedItem`. Retrieval returns evidence-bearing candidates (canonical name,
+alias, display name, variant, or trigram score); resolution then returns
+`MATCHED`, `AMBIGUOUS`, or `UNMATCHED`. It never creates products, selects a
+store, treats availability as stock, or mutates an Order. PostgreSQL trigram
+indexes support typo retrieval after the catalog migration is applied.
+
+### Knowledge retrieval (Lot 5.4)
+
+`apps.knowledge` stores only validated, versioned source content and deterministic
+chunks. PostgreSQL full-text retrieval supplies source lineage to
+`KnowledgeAnswerService`, which accepts grounded answers only when cited chunks
+were retrieved. No-answer is explicit when the knowledge base has no evidence.
+Embeddings and a vector database are intentionally deferred until lexical
+baseline measurements justify them.
+
+### Conversation clarification (Lot 5.5)
+
+`ConversationContextService` is the typed boundary around temporary
+`Conversation.context` state. `ClarificationEngine` emits deterministic response
+instructions and pending fields; it does not mutate Orders or send channel
+messages. Structured locations and interactive confirmation actions bypass LLM
+parsing, while context is cleared when a conversation closes.
+
+### Conversational order orchestration (Lot 5.6)
+
+`ConversationalOrchestrator` composes understanding, catalog grounding,
+clarification and existing Order application services into a channel-neutral
+`ConversationalOutcome` / `ResponsePlan`. Order writes, audit records and domain
+events remain owned by the existing Orders services; the orchestrator contains no
+provider payloads and does not bypass WhatsApp service-window policy.
+
 ---
 
 ## 2. Stack technique
@@ -254,6 +300,22 @@ python manage.py telegram_delete_webhook --drop-pending-updates
 
 Ne jamais commiter de token BotFather ou de secret webhook. Si
 `TELEGRAM_ENABLED=false`, Django demarre sans credentials Telegram.
+
+### Test manuel sans webhook ni IA
+
+Pour un test local ponctuel, seul le token est necessaire. Laisser
+`TELEGRAM_WEBHOOK_SECRET` et `TELEGRAM_WEBHOOK_URL` vides, puis verifier qu'un
+webhook n'est pas actif (le polling et un webhook ne peuvent pas coexister):
+
+```bash
+python manage.py telegram_delete_webhook
+python manage.py telegram_echo --timeout 30 --reply "Bonjour, message recu !"
+```
+
+Envoyer ensuite un message au bot dans les 30 secondes. La commande le recoit
+via `getUpdates` et repond avec le texte indique. Elle ne lance aucun service
+d'IA et n'enregistre pas le message dans le workflow metier: c'est uniquement
+un test de connectivite Telegram. Relancer la commande pour chaque test.
 
 ---
 

@@ -2835,3 +2835,165 @@ Non inclus:
 - La politique 24h/template est deterministe.
 - Telegram reste independant.
 - Orders reste independant de WhatsApp.
+
+---
+
+## Phase 5 - Couche conversationnelle assistee
+
+### Objectif et principes
+
+Cette phase ajoute des capacites d'interpretation, de recherche et de guidage
+conversationnel autour du coeur existant. L'IA ne recoit ni modele Django ni
+autorisation metier, et ne peut pas modifier directement les commandes, le
+catalogue ou les conversations. Toute ecriture reste deleguee aux services
+applicatifs existants et aux regles de domaine.
+
+L'IA est desactivee par defaut (`AI_ENABLED=False`). Les donnees structurees
+recues des canaux (position et actions interactives) restent deterministes et
+ne sont pas reconstruites par un modele.
+
+### Lot 5.1 - AI Core
+
+- Nouveau module `apps.ai`, independant des modeles metier.
+- Contrats `AIStructuredRequest`, `AIStructuredResult` et `AIProvider` pour les
+  appels structures, avec schema JSON explicite.
+- `AIService` valide le schema de sortie avant de retourner le resultat a
+  l'application.
+- Registre de providers avec `MockAIProvider` deterministe pour les tests et
+  `OpenAIProvider` base sur l'API Responses et les Structured Outputs.
+- Configuration par `AI_ENABLED`, `AI_PROVIDER`, `AI_MODEL`,
+  `AI_TIMEOUT_SECONDS` et `OPENAI_API_KEY`.
+- Les appels OpenAI utilisent `store=False`. Les logs couvrent le provider, le
+  modele, la version de prompt, la latence et les compteurs de tokens, sans
+  journaliser le texte utilisateur, le contexte ou les secrets.
+
+### Lot 5.2 - Comprehension structuree des messages
+
+- `MessageUnderstandingService` transforme un message normalise en
+  `UserMessageUnderstanding` type : intention, confiance, articles demandes,
+  quantites, unites, ambiguities, langue et informations manquantes.
+- Le schema contraint les intentions a `CREATE_OR_UPDATE_ORDER`,
+  `PROVIDE_LOCATION`, `CONFIRM`, `MODIFY`, `CANCEL`, `GREETING`, `HELP` ou
+  `UNKNOWN`.
+- Les sorties sont revalidees en objets de domaine : confiance entre 0 et 1,
+  noms non vides et quantites strictement positives.
+- Une localisation normalisee est reconnue avec une confiance de 1 sans appel
+  IA. Les actions interactives structurees sont laissees a l'orchestrateur.
+- Les prompts et leur version sont isoles dans `apps.ai.prompts`.
+
+### Lot 5.3 - Grounding catalogue
+
+- `CatalogGroundingService` ne resout les articles que contre les produits et
+  variantes reels du catalogue PostgreSQL.
+- La recherche couvre les noms canoniques, alias, noms affiches en magasin et
+  variantes ; PostgreSQL ajoute la similarite trigramme pour les fautes de
+  frappe.
+- Chaque resolution conserve ses candidats et sa preuve de matching, puis
+  retourne `MATCHED`, `AMBIGUOUS` ou `UNMATCHED` avec une raison explicite.
+- Les seuils, marges de score et le nombre maximal de candidats sont centralises
+  dans `CatalogGroundingPolicy`.
+- Aucun produit, prix, stock, magasin ou `Order` n'est cree ou modifie par cette
+  couche. La migration `apps/catalog/migrations/0004_catalog_trigram.py` ajoute
+  le support d'indexation necessaire au fuzzy matching PostgreSQL.
+
+### Lot 5.4 - Base de connaissances et reponses ancrees
+
+- Nouveau module `apps.knowledge` avec sources versionnees, statut actif/inactif
+  et chunks deterministes, decoupes par paragraphes.
+- `knowledge_ingest` ingere une source et remplace atomiquement ses chunks ; une
+  nouvelle version inactive les versions precedentes de la meme cle.
+- `PostgresKnowledgeRetriever` utilise la recherche plein texte PostgreSQL en
+  francais, avec un fallback explicite hors PostgreSQL.
+- `KnowledgeAnswerService` ne fournit une reponse ancree que sur les chunks
+  recuperes : les citations retournees par le modele sont verifiees et doivent
+  appartenir au resultat de retrieval.
+- En l'absence de source pertinente, le systeme retourne explicitement une
+  reponse d'information insuffisante. Les embeddings et une base vectorielle ne
+  font pas partie de ce lot.
+
+### Lot 5.5 - Contexte et clarifications conversationnelles
+
+- `ConversationContextService` est la frontiere typee de lecture/ecriture du
+  JSON `Conversation.context`, avec verrou transactionnel et conservation des
+  vingt derniers identifiants de messages traites.
+- Le contexte contient le flux conversationnel, la commande active et une
+  clarification en attente. Il est efface a la fermeture d'une conversation,
+  apres confirmation ou annulation.
+- `ClarificationEngine` produit des decisions deterministes : demander quantite,
+  unite, choix produit, position ou confirmation.
+- Les positions et confirmations interactives sont traitees sans IA. Les
+  interruptions par annulation, aide ou nouvelle demande sont explicites.
+- Cette couche produit des instructions de reponse ; elle n'envoie aucun message
+  et n'ecrit aucune commande elle-meme.
+
+### Lot 5.6 - Orchestration conversationnelle des commandes
+
+- `ConversationalOrchestrator` compose comprehension, grounding catalogue,
+  contexte, clarification et, optionnellement, connaissances.
+- Il retourne un `ConversationalOutcome` et un `ResponsePlan` canal-neutres,
+  comprenant le texte, les actions proposees et une eventuelle demande de
+  localisation.
+- Les commandes sont creees et modifiees uniquement via les services existants :
+  brouillon, ajout d'article, attente de localisation, localisation, confirmation
+  et annulation.
+- Les actions `order.confirm` et `order.cancel` sont interpretees de facon
+  deterministe. Un message deja traite est detecte par son identifiant externe.
+- Les erreurs IA sont converties en reponse recuperable ; elles ne sont jamais
+  assimilees a un article inconnu et ne declenchent pas d'ecriture partielle.
+
+### Lot 5.7 - Collecte dataset, feedback et evaluation hors ligne
+
+- Nouveau module `apps.evaluation` pour construire un jeu de donnees revu par un
+  humain sans conserver les payloads de production bruts.
+- `DatasetSanitizer` masque notamment telephones, emails, coordonnees et secrets
+  avant toute persistance d'un candidat.
+- Les candidats peuvent etre acceptes ou rejetes par un relecteur. Une
+  acceptation produit un exemple avec provenance de label et cle de groupe.
+- Les snapshots versionnes repartissent deterministiquement les exemples entre
+  train, validation et test, par cle de groupe afin d'eviter les fuites entre
+  ensembles.
+- `EvaluationRunner` enregistre provider, modele, version de prompt, resultats
+  par exemple et metriques d'exact-match dans des executions immuables.
+- Cette evaluation est hors ligne : elle n'entraine pas automatiquement un
+  modele et n'influence pas les decisions de production.
+
+### Lot 5.8 - Integration, resilience, securite et validation E2E
+
+- Audit des boundaries : providers IA sans ORM metier, Orders sans SDK IA,
+  orchestrateur sans payload WhatsApp/Telegram et datasets sans mutation metier.
+- Les donnees structurees (location, `order.confirm`, `order.cancel`) passent
+  avant l'interpretation IA et sont revalidees par l'utilisateur et le statut
+  reel de la commande.
+- Les erreurs IA sont recuperables, ne marquent jamais une commande `FAILED` et
+  ne font progresser l'idempotence de contexte qu'apres une decision complete.
+- Le contexte est verrouille lors de ses mises a jour, nettoye a la fermeture
+  d'une conversation, a la confirmation et a l'annulation.
+- Les controles de sanitization dataset et les tests unitaires ciblent les PII,
+  les sorties IA invalides, les injections de faits catalogue et les reponses
+  RAG sans evidence.
+- La validation E2E complete webhook -> provider -> Order.CONFIRMED reste a
+  executer sur PostgreSQL disponible. Dans l'environnement courant, les tests
+  dependants de PostgreSQL sont bloques par l'absence de connexion locale.
+
+### Migrations et validation associees
+
+- `apps/catalog/migrations/0004_catalog_trigram.py` pour la recherche catalogue.
+- `apps/knowledge/migrations/0001_initial.py` pour les sources et chunks de
+  connaissances.
+- `apps/evaluation/migrations/0001_initial.py` pour les candidats, jeux de
+  donnees, versions, executions et resultats d'evaluation.
+- Tests ajoutes dans `apps/ai/tests`, `apps/catalog/tests/test_grounding.py`,
+  `apps/knowledge/tests`, `apps/conversations/tests/test_clarification.py`,
+  `apps/conversations/tests/test_orchestrator.py` et
+  `apps/evaluation/tests/test_sanitizer.py`.
+
+### Limites connues de cloture Phase 5
+
+- `ResponsePlan` prepare le raccordement aux canaux, mais n'est pas encore
+  distribue automatiquement par les services de webhook vers Messaging.
+- Les E2E WhatsApp/Telegram complets, les tests de concurrence DB et les tests
+  de migration depuis une base vide doivent etre executes avec PostgreSQL.
+- La publication des Domain Events utilise toujours `transaction.on_commit` ;
+  une transactional outbox reste une evolution ulterieure.
+- La phase s'arrete a `Order.CONFIRMED` : aucun Store Matching, Driver Matching,
+  paiement, stock reel ou livraison n'est implemente.

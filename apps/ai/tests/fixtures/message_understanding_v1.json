@@ -1,0 +1,12 @@
+[
+  {"input": "Je veux 5 kg de riz", "result": {"intent": "CREATE_OR_UPDATE_ORDER", "confidence": 0.94, "items": [{"requested_name": "riz", "quantity": 5, "unit": "KG", "notes": null}], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": [], "language": "fr"}},
+  {"input": "Deux Mayor stp", "result": {"intent": "CREATE_OR_UPDATE_ORDER", "confidence": 0.91, "items": [{"requested_name": "Mayor", "quantity": 2, "unit": "BOTTLE", "notes": null}], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": [], "language": "fr"}},
+  {"input": "Je veux du riz", "result": {"intent": "CREATE_OR_UPDATE_ORDER", "confidence": 0.84, "items": [{"requested_name": "riz", "quantity": null, "unit": null, "notes": null}], "location_text": null, "confirmation": null, "missing_fields": ["item_quantity"], "ambiguities": [], "language": "fr"}},
+  {"input": "Ajoute aussi de l'huile", "result": {"intent": "CREATE_OR_UPDATE_ORDER", "confidence": 0.79, "items": [{"requested_name": "huile", "quantity": null, "unit": null, "notes": null}], "location_text": null, "confirmation": null, "missing_fields": ["item_quantity"], "ambiguities": [], "language": "fr"}},
+  {"input": "Oui je confirme", "result": {"intent": "CONFIRM", "confidence": 0.96, "items": [], "location_text": null, "confirmation": true, "missing_fields": [], "ambiguities": [], "language": "fr"}},
+  {"input": "Annule", "result": {"intent": "CANCEL", "confidence": 0.97, "items": [], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": [], "language": "fr"}},
+  {"input": "Bonjour", "result": {"intent": "GREETING", "confidence": 0.99, "items": [], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": [], "language": "fr"}},
+  {"input": "Vous livrez où ?", "result": {"intent": "HELP", "confidence": 0.93, "items": [], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": [], "language": "fr"}},
+  {"input": "Je veux deux caisses", "result": {"intent": "CREATE_OR_UPDATE_ORDER", "confidence": 0.42, "items": [], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": ["product_unspecified"], "language": "fr"}},
+  {"input": "jvx 5kg riz", "result": {"intent": "CREATE_OR_UPDATE_ORDER", "confidence": 0.83, "items": [{"requested_name": "riz", "quantity": 5, "unit": "KG", "notes": null}], "location_text": null, "confirmation": null, "missing_fields": [], "ambiguities": [], "language": "fr"}}
+]

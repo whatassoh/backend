@@ -11,11 +11,29 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterField(
-            model_name="storemembership",
-            name="id",
-            field=models.UUIDField(
-                default=uuid.uuid4, editable=False, primary_key=True, serialize=False
-            ),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        "ALTER TABLE stores_storemembership "
+                        "ALTER COLUMN id DROP IDENTITY IF EXISTS; "
+                        "ALTER TABLE stores_storemembership "
+                        "ALTER COLUMN id TYPE uuid USING gen_random_uuid()"
+                    ),
+                    reverse_sql=migrations.RunSQL.noop,
+                )
+            ],
+            state_operations=[
+                migrations.AlterField(
+                    model_name="storemembership",
+                    name="id",
+                    field=models.UUIDField(
+                        default=uuid.uuid4,
+                        editable=False,
+                        primary_key=True,
+                        serialize=False,
+                    ),
+                )
+            ],
         ),
     ]

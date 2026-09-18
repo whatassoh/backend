@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -14,6 +15,13 @@ from apps.stores.application.services import (
 from apps.stores.infrastructure.models import Store, StoreMembership
 
 
+@extend_schema(
+    tags=["Stores"],
+    description=(
+        "Gestion des boutiques et de leurs membres. Les ecritures exigent "
+        "les permissions de gestion de boutique."
+    ),
+)
 class StoreViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = StoreSerializer

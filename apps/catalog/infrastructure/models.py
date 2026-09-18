@@ -1,3 +1,4 @@
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 from apps.catalog.domain.enums import (
@@ -91,6 +92,11 @@ class Product(BaseModel):
         ordering = ["name"]
         indexes = [
             models.Index(fields=["normalized_name"], name="catalog_product_name_idx"),
+            GinIndex(
+                fields=["normalized_name"],
+                name="catalog_product_name_trgm",
+                opclasses=["gin_trgm_ops"],
+            ),
             models.Index(fields=["status"], name="catalog_product_status_idx"),
             models.Index(fields=["category", "status"], name="catalog_product_cat_idx"),
         ]
@@ -178,6 +184,11 @@ class ProductAlias(BaseModel):
             models.Index(
                 fields=["normalized_alias"],
                 name="catalog_alias_normalized_idx",
+            ),
+            GinIndex(
+                fields=["normalized_alias"],
+                name="catalog_alias_name_trgm",
+                opclasses=["gin_trgm_ops"],
             ),
         ]
         constraints = [

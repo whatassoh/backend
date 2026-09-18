@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -16,6 +17,13 @@ from apps.drivers.application.services import (
 from apps.drivers.infrastructure.models import DriverProfile
 
 
+@extend_schema(
+    tags=["Drivers"],
+    description=(
+        "Profils chauffeur et transitions operationnelles. Toutes les routes "
+        "necessitent une authentification."
+    ),
+)
 class DriverProfileViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = DriverProfileSerializer

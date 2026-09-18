@@ -33,7 +33,7 @@ def get_telegram_settings(*, require_enabled: bool = False) -> TelegramSettings:
             name
             for name, value in {
                 "TELEGRAM_BOT_TOKEN": config.bot_token,
-                "TELEGRAM_WEBHOOK_SECRET": config.webhook_secret,
+                # "TELEGRAM_WEBHOOK_SECRET": config.webhook_secret,
             }.items()
             if not value
         ]

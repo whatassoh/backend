@@ -101,6 +101,10 @@ class TelegramProvider(MessagingProvider):
             raise TelegramConfigurationError(
                 "TELEGRAM_WEBHOOK_URL is required to set the Telegram webhook."
             )
+        if not self.config.webhook_secret:
+            raise TelegramConfigurationError(
+                "TELEGRAM_WEBHOOK_SECRET is required to set the Telegram webhook."
+            )
         return self._call(
             "setWebhook",
             {
@@ -118,6 +122,22 @@ class TelegramProvider(MessagingProvider):
 
     def get_webhook_info(self) -> dict[str, Any]:
         return self._call("getWebhookInfo", {})
+
+    def get_updates(self, *, timeout: int = 0) -> list[dict[str, Any]]:
+        """Return pending updates through Telegram long polling.
+
+        Telegram only permits this while no webhook is configured.
+        """
+        if not 0 <= timeout <= 50:
+            raise ValueError("Telegram polling timeout must be between 0 and 50 seconds.")
+        response = self._call(
+            "getUpdates",
+            {"timeout": timeout, "allowed_updates": ["message"]},
+        )
+        result = response.get("result", [])
+        if not isinstance(result, list):
+            raise TelegramInvalidPayloadError("Telegram getUpdates result was not a list.")
+        return result
 
     def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = self._method_url(method)
