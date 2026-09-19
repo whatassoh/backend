@@ -224,8 +224,10 @@ def test_contexts_do_not_contaminate_across_channels(phase4_settings):
     set_context_value(whatsapp_conversation, "awaiting", "LOCATION")
     telegram_conversation.refresh_from_db()
 
-    assert whatsapp_conversation.context == {"awaiting": "LOCATION"}
-    assert telegram_conversation.context == {}
+    assert whatsapp_conversation.context["awaiting"] == "LOCATION"
+    assert whatsapp_conversation.context["flow"] == "IDLE"
+    assert telegram_conversation.context.get("awaiting") is None
+    assert telegram_conversation.context["processed_message_ids"] == ["telegram:987:42"]
 
 
 @pytest.mark.django_db
@@ -424,6 +426,13 @@ def test_outbound_conversation_routing_writes_once(monkeypatch):
     monkeypatch.setattr(
         "apps.messaging.application.orchestration.get_provider",
         lambda channel: FakeProvider(),
+    )
+
+    ConversationMessage.objects.create(
+        conversation=wa_conversation,
+        direction=MessageDirection.INBOUND,
+        message_type=MessageType.TEXT,
+        text="Bonjour",
     )
 
     send_conversation_text(conversation=wa_conversation, text="Aide WA")

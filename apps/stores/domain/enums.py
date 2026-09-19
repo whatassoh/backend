@@ -7,6 +7,35 @@ class StoreStatus(models.TextChoices):
     SUSPENDED = "SUSPENDED", "Suspended"
 
 
+class StoreOfferStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    ACCEPTED = "ACCEPTED", "Accepted"
+    REJECTED = "REJECTED", "Rejected"
+    EXPIRED = "EXPIRED", "Expired"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class StoreMatchingAttemptStatus(models.TextChoices):
+    RUNNING = "RUNNING", "Running"
+    EXHAUSTED = "EXHAUSTED", "Exhausted"
+    SUCCEEDED = "SUCCEEDED", "Succeeded"
+
+
+class StoreOfferNotificationStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    SENDING = "SENDING", "Sending"
+    SENT = "SENT", "Sent"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE", "Failed retryable"
+    FAILED_PERMANENT = "FAILED_PERMANENT", "Failed permanent"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class StoreOfferNotificationAttemptStatus(models.TextChoices):
+    STARTED = "STARTED", "Started"
+    SUCCEEDED = "SUCCEEDED", "Succeeded"
+    FAILED = "FAILED", "Failed"
+
+
 class StoreMembershipRole(models.TextChoices):
     OWNER = "OWNER", "Owner"
     MANAGER = "MANAGER", "Manager"

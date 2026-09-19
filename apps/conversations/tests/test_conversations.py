@@ -20,7 +20,6 @@ from apps.conversations.application.services import (
     update_conversation_context,
 )
 from apps.conversations.domain.enums import ConversationStatus
-from apps.conversations.domain.exceptions import UnknownChannelIdentityError
 from apps.conversations.infrastructure.models import Conversation, ConversationMessage
 from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import (
@@ -317,7 +316,7 @@ def test_unknown_whatsapp_identity_creates_user_and_identity():
 
 
 @pytest.mark.django_db
-def test_unknown_telegram_identity_is_explicitly_rejected():
+def test_unknown_telegram_identity_creates_telegram_only_user():
     message = NormalizedInboundMessage(
         channel=MessagingChannel.TELEGRAM,
         external_message_id="tg.1",
@@ -327,8 +326,11 @@ def test_unknown_telegram_identity_is_explicitly_rejected():
         text="Bonjour",
     )
 
-    with pytest.raises(UnknownChannelIdentityError):
-        ingest_inbound_message(message, create_inbound_event(message))
+    result = ingest_inbound_message(message, create_inbound_event(message))
+
+    assert result.user.whatsapp_phone is None
+    assert result.channel_identity.channel == MessagingChannel.TELEGRAM
+    assert result.channel_identity.external_user_id == "123456"
 
 
 @pytest.mark.django_db
