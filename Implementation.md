@@ -2997,3 +2997,426 @@ ne sont pas reconstruites par un modele.
   une transactional outbox reste une evolution ulterieure.
 - La phase s'arrete a `Order.CONFIRMED` : aucun Store Matching, Driver Matching,
   paiement, stock reel ou livraison n'est implemente.
+
+## Phase 6 — Lot 6.1 : Customer Order Session / Active Draft
+
+### Politique active-order
+
+La session est `Conversation + ConversationContext.active_order_id + Order` ;
+aucun modele `CustomerOrderSession` supplementaire n'est necessaire. Le
+contexte n'est qu'un pointeur non fiable et n'est jamais utilise comme preuve
+d'autorisation. Seuls `DRAFT` et `AWAITING_LOCATION`, issus de
+`DRAFT_MUTABLE_STATUSES`, sont reprenables.
+
+`ActiveCustomerOrderService` (`apps/conversations/application/active_orders.py`)
+est la frontiere unique pour lire, attacher, creer, reprendre ou abandonner un
+draft. Il verrouille la ligne Conversation dans une transaction avant de lire
+et modifier le contexte. Cela serialize la creation par conversation ; la
+contrainte ne limite volontairement pas les drafts au niveau global User afin
+de conserver l'isolation des canaux et les usages futurs.
+
+### Validation, reprise et abandon
+
+Chaque pointeur est parse comme UUID, charge depuis PostgreSQL, puis controle
+contre `conversation.user` et les statuts actifs. Un UUID invalide, commande
+supprimee, terminale ou d'un autre proprietaire est detache et produit une
+decision `STALE_CONTEXT` tracee. Une conversation `CLOSED` produit
+`CLOSED_CONVERSATION`, sans mutation Order ni heritance automatique lors de la
+creation d'une autre conversation.
+
+`get_or_create_draft` reutilise exclusivement le draft rattache a la
+conversation ; il ne recherche pas arbitrairement un ancien draft du User.
+`resume_order` est explicite et revalide proprietaire/statut. Les actions
+stables sont `order.resume`, `order.start_new` et
+`order.abandon_and_start_new`. Demarrer une nouvelle commande avec un draft
+demande d'abord un choix ; l'abandon explicite applique `cancel_order` avec
+`CUSTOMER_REQUEST`, donc conserve transition, audit et evenement domaine.
+
+Le recapitulatif reste reconstruit depuis `Order`/`OrderItem` en base. Les
+futures statistiques et recommandations doivent partir des commandes dans des
+etats metier aboutis, et exclure brouillons, items retires et annulations.
+
+### Observabilite et validation
+
+Les evenements de log sans PII sont : `draft_created`, `draft_resumed`,
+`draft_abandoned`, `stale_active_order` et `active_order_conflict`; ils portent
+`conversation_id`, `order_id` et `correlation_id`. Les tests
+`apps/conversations/tests/test_active_orders.py` couvrent creation/reutilisation,
+contextes stale ou corrompus, ownership, conversation fermee, isolation
+multi-canal, reprise explicite et abandon. Aucune migration n'est requise : le
+champ JSON de contexte et les index Conversation existants suffisent.
+
+## Phase 6 — Lot 6.2 : Order Building & Modification Experience
+
+### Item targeting et mutations
+
+`apps/conversations/application/order_building.py` introduit
+`ItemReference` (identifiant de ligne backend, nom demandé ou position affichée)
+et `OrderBuildingService`. Une cible est acceptée seulement si elle est unique ;
+un nom correspondant à plusieurs lignes retourne `AMBIGUOUS`. Un identifiant
+provenant du modèle de langage n'est jamais utilisé comme autorité.
+
+La politique de doublon est « une demande, une ligne » : ajouter à nouveau
+Mayor ne fusionne pas silencieusement la quantité. `add`, `update`, `remove` et
+`replace` délèguent aux services applicatifs Orders. `replace_order_item` met à
+jour une ligne sous transaction, après résolution/revalidation du nouveau
+catalogue, au lieu de supprimer l'ancien item en avance.
+
+### Grounding, clarifications et résumé
+
+Les articles `MATCHED` conservent `requested_name` et sont revalidés contre le
+Product/Variant actif avant écriture. `UNMATCHED` produit une ligne avec
+`product=NULL`; aucun Product ni alias n'est créé. Une requête multi-item écrit
+les items sûrs et ouvre une clarification pour le premier item non résolu.
+
+L'action stable `order.modify` ouvre le mode de modification. Les suppressions,
+mises à jour d'une cible unique et remplacements « remplace X par Y » passent
+par le service; le résumé est reconstruit à partir de `OrderItem`. Les prix et
+le stock ne sont pas inférés : StoreProduct ne fournit pas encore une promesse
+de stock ou un prix final client.
+
+### Données futures et tests
+
+Les audits `ORDER_ITEM_ADDED`, `ORDER_ITEM_UPDATED` et `ORDER_ITEM_REMOVED`
+restent des signaux de cycle de vie de draft, pas des achats. Les futures
+recommandations doivent utiliser les commandes confirmées puis les états de
+livraison. Le test `apps/conversations/tests/test_order_building.py` couvre
+doublons, ciblage ambigu/position, quantité/unité, remplacement et suppression.
+Aucune migration n'est nécessaire.
+
+## Phase 7 — Lot 7.5 : Store Conversation & Offer Actions
+
+`StoreRecipientResolver` sélectionne les StoreMembership actifs ayant un rôle
+opérationnel réel (OWNER, MANAGER, AGENT), puis leurs ChannelIdentity actives,
+dédupliquées par user/canal. En l'absence de primary contact dans le modèle, la
+policy V1 ne choisit pas arbitrairement un unique destinataire.
+
+`StoreOfferAuthorizationPolicy` revalide Store, user, rôle et statut de
+membership à chaque action. `StoreOfferActionService` traite seulement les IDs
+stables `store_offer.accept`/`store_offer.reject`, recharge l'offre et retourne
+un résultat contrôlé pour UUID forgé, membership retiré, offre expirée ou déjà
+résolue. La présentation est reconstruite depuis Order/OrderItem et expose
+référence, lignes, expiration et distance snapshot éventuelle, sans téléphone,
+adresse ou coordonnées client.
+
+Le renderer devra transmettre `offer_id` comme contexte opaque et utiliser la
+policy WhatsApp/template ou Telegram existante. La livraison de notification est
+distincte du statut StoreOffer; aucun provider, texte libre d'acceptation,
+fallback matching ou notification tracking séparée n'est ajouté dans ce lot.
+
+## Phase 7 — Lot 7.3 : Store Ranking & Candidate Selection
+
+`StoreRankingService` consomme exclusivement les DTOs issus de 7.1 et 7.2 :
+il ne recharge ni catalogue ni IA. La stratégie versionnée `deterministic_v1`
+utilise un ordre lexicographique explicable : couverture complète, ratio de
+couverture décroissant, distance croissante en mètres, UUID croissant. Ce choix
+fonctionne également au cold start et évite des poids inventés.
+
+Les boutiques partielles sont conservées dans `diagnostics` pour support et
+analytics, mais exclues de `ranked_candidates` : le MVP n'implémente ni split
+order ni offer partielle. Les prix sont volontairement ignorés car ils peuvent
+être absents et aucune politique de panier comparable n'existe. Chaque candidat
+produit des composants, raisons et un snapshot sérialisable qui pourront être
+persistés lors des futures StoreOffers. L'API accepte un `max_candidates`
+explicite, sans valeur business cachée.
+
+Les futurs modèles ML pourront remplacer la stratégie derrière la même
+interface, avec rang, version et snapshot pour mesurer le feedback. Le risque
+futur de concentration/fairness est donc visible et l'ordre reste modifiable.
+`apps/stores/tests/test_ranking.py` couvre priorité full/partial, tie-break,
+limite, version et snapshot. Aucune migration n'est nécessaire.
+
+## Phase 7 — Lot 7.4 : Store Offer Lifecycle
+
+Le modèle `StoreOffer` est ajouté dans Stores avec états contrôlés `PENDING`,
+`ACCEPTED`, `REJECTED`, `EXPIRED`, `CANCELLED`, expiration, timestamps et
+snapshot JSON minimal du ranking. Les contraintes garantissent une offre par
+couple Order/Store et au plus une offre acceptée par Order; les index couvrent
+les consultations par Order/statut et les sweeps d'expiration.
+
+`StoreOfferService` crée des offres seulement pour Order en matching/offered et
+boutique active/ouverte. La première offre déclenche la transition
+`MATCHING_STORES → STORE_OFFERED`. L'acceptation verrouille Order et offres,
+vérifie l'expiration et le gagnant existant, accepte une seule offre, passe
+l'Order à `STORE_ACCEPTED` et annule les autres pending. Refus, expiration et
+annulation sont idempotents pour leur propre état. `expires_at` est la vérité;
+le worker/sweep n'est pas encore ajouté.
+
+Aucun provider messaging, offre Store UX, fallback, pricing, stock, Driver
+Matching ou ML n'est introduit. Les événements/audits StoreOffer dédiés restent
+à brancher dans le lot d'orchestration suivant. La migration
+`stores/0003_storeoffer.py` doit être appliquée avec PostgreSQL pour valider la
+contrainte conditionnelle.
+
+## Phase 6 — Lot 6.3 : Delivery Location & Delivery Details
+
+### Modèle, validation et canaux
+
+Le modèle existant est conservé : `Order.delivery_location` est un PointField
+géographique SRID 4326, `delivery_address_label` est le texte humain et
+`delivery_instructions` la consigne opérationnelle. `MessageLocation` est le
+contrat normalisé reçu autant de WhatsApp que de Telegram. Il valide les bornes
+WGS84 et, désormais, les valeurs non finies. L'orchestrateur utilise
+`Point(longitude, latitude, srid=4326)` et appelle exclusivement
+`set_delivery_location`.
+
+Le service Orders vérifie à son tour SRID, bornes, finitude et statut mutable,
+ce qui protège également les appels API. `set_delivery_address_label` persiste
+une adresse texte sans la géocoder ni inventer de GPS. Les instructions sont
+normalisées, optionnelles et limitées à 1000 caractères.
+
+### Flow, confidentialité et préparation
+
+Une position définie ou remplacée invalide le parcours de confirmation courant,
+puis propose une indication optionnelle. `order.change_location` ramène le
+contexte à `AWAITING_LOCATION`; après consigne ou refus, un nouveau récapitulatif
+est produit. La state machine Orders bloque déjà les états terminaux via les
+services draft mutables; l'active order revalide également ownership.
+
+Les audits de localisation ne contiennent plus latitude/longitude : seulement
+un signal de position, SRID et présence de libellé. Les coordonnées restent dans
+le PointField, prêt pour les futures requêtes PostGIS Store/Driver Matching,
+mais ne constituent ni donnée dataset ni feature de recommandation. Aucun
+geocoding, zone métier, stock ou matching n'est ajouté.
+
+Le test Messaging couvre maintenant NaN et infini. Aucune migration n'est
+requise : le champ spatial existant est déjà indexable et compatible PostGIS.
+
+## Phase 6 — Lot 6.4 : Order Review, Confirmation & Cancellation UX
+
+### Review et readiness
+
+`apps/orders/application/review.py` fournit `OrderReviewService`,
+`OrderReviewItem` et `OrderConfirmationReadiness`. Le review relit Order et
+OrderItem depuis PostgreSQL et expose référence, lignes, destination, consignes,
+readiness, blockers, warnings, actions et fingerprint. Les blockers sont :
+statut non mutable, commande vide, position absente, clarification en attente
+et item ambigu. Les items `UNMATCHED` suivent la policy Phase 3 : ils restent
+autorisés avec un avertissement, pas une résolution inventée.
+
+Le fingerprint SHA-256 porte les données visibles pertinentes. Un callback
+`order.confirm` qui le fournit est refusé s'il ne correspond plus à l'état
+persisté ; la readiness est toujours réévaluée juste avant `confirm_order`.
+La confirmation textuelle est explicite et converge vers le même service.
+`confirm_order` fournit déjà transition, verrouillage, audit et publication
+unique de `OrderConfirmed`; `cancel_order` fournit les garanties équivalentes
+pour l'annulation.
+
+### Présentation et limites
+
+`ResponsePlan` reste neutre vis-à-vis de WhatsApp/Telegram et porte le
+fingerprint dans ses métadonnées pour les renderers. Les actions restent stables
+(`order.confirm`, `order.modify`, `order.cancel`). Les renderers de canaux et
+la politique de fenêtre WhatsApp demeurent à la frontière Messaging; aucune
+logique Meta n'est introduite dans le review.
+
+Le review ne présente ni prix final ni disponibilité garantie. Les audits et
+événements confirmation/annulation existants restent les signaux métier;
+`CONFIRMED` n'est pas assimilé à une livraison ou à une fréquence d'achat. Le
+test `apps/orders/tests/test_review.py` couvre vérité DB, fingerprint, readiness
+et avertissement UNMATCHED. Aucune migration n'est requise.
+
+## Phase 6 — Lot 6.5 : Customer Notifications & Conversation Recovery
+
+### Récupération et réponses client
+
+`ConversationRecoveryService` et `RecoveryDecision` reconstruisent le flow à
+partir de PostgreSQL et du contexte typé, sans cache RAM ni appel provider. Les
+états couverts sont absence de flow, draft à reprendre, clarification, demande
+de position, review prêt, contexte stale récupéré et conversation fermée. Sur
+un salut, l'orchestrateur propose la suite adaptée au lieu de créer un nouveau
+draft arbitrairement. Ownership et statuts sont revalidés par
+`ActiveCustomerOrderService`.
+
+`customer_responses.technical_retry_message` produit des messages contrôlés
+pour les erreurs techniques, sans exposer API, secret ou détail transport. Les
+erreurs IA restent récupérables et ne modifient pas l'Order.
+
+### Boundary outbound et notifications
+
+La mutation Order est toujours achevée avant tout envoi : l'orchestrateur
+retourne un `ResponsePlan`, et Messaging l'envoie ensuite. Une panne outbound
+ne rollback donc pas une confirmation déjà commitée; une reprise relit l'état
+réel au lieu de rejouer la transition. Les `MessageEvent`, correlation IDs,
+classification `MessagingTemporaryError`/rate-limit/permanent et tests provider
+existants portent les garanties réelles : mutation métier idempotente et réseau
+au mieux at-least-once, pas exactly-once.
+
+WhatsApp continue d'utiliser `WhatsAppOutboundPolicy` et
+`send_whatsapp_text_with_template_fallback` avec template explicitement fourni;
+un échec template ne devient jamais du free-form hors fenêtre. Telegram reste
+sur le provider normal, sans règle Meta. Aucun retry Celery durable, campagne,
+notification d'engagement ou moteur anti-spam n'est ajouté : les ResponsePlan
+transactionnels laissent cette extension derrière une frontière métier/canal.
+
+`apps/conversations/tests/test_recovery.py` couvre reprise de localisation,
+clarification et review persistées. Aucune migration n'est nécessaire.
+
+## Phase 6 — Lot 6.6 : intégration et durcissement final
+
+L'audit a identifié que les webhooks Phase 4 persistaient correctement les
+messages mais ne déclenchaient pas encore le flow conversationnel. Le point de
+composition `process_inbound_conversation` corrige cette frontière : chaque
+webhook WhatsApp/Telegram réalise ingestion et idempotence dans une transaction
+courte, puis appelle l'orchestrateur après commit avec le MessageEvent comme
+correlation ID. Aucun appel IA ou provider outbound n'est introduit dans la
+transaction d'ingestion.
+
+Les deux canaux utilisent ainsi le même métier : adapters → Messaging →
+Conversation → Orchestrator → Active Order → services Orders → review →
+confirmation/annulation. Les actions structurées évitent l'IA. Lorsque l'IA est
+désactivée, l'ingestion reste disponible et les messages structurés peuvent
+toujours être traités; les messages texte nécessitant compréhension retournent
+une décision contrôlée, sans mutation arbitraire.
+
+La Phase 6 s'arrête strictement à `Order.CONFIRMED`. Les données d'audit et les
+événements existants distinguent création/modification/retrait d'item,
+confirmation et annulation, sans les convertir en recommandations. Aucun Store
+Matching, Driver Matching, prix final, paiement, campagne ou Recommendation
+Engine n'est implémenté. Les E2E fournisseurs/PostGIS complets doivent être
+exécutés dans l'environnement Django/PostgreSQL avec AI mock configuré; ils ne
+sont pas substituables par les vérifications syntaxiques de cette image.
+
+## Phase 7 — Lot 7.1 : Store Matching Foundation & Eligibility
+
+### Architecture inspectée et règles réelles
+
+Avant ce lot, `Store` possédait déjà un PointField geography SRID 4326, un
+statut (`ACTIVE`, `INACTIVE`, `SUSPENDED`), `is_open` et un
+`service_radius_meters` validé, de 5000 m par défaut. `Order` possède la même
+représentation géographique et `start_store_matching()` est déjà la transition
+explicite `CONFIRMED → MATCHING_STORES`. Aucun service d'éligibilité ou contrat
+de candidats n'existait.
+
+`StoreEligibilityService` (`apps/stores/application/eligibility.py`) est une
+query pure : il exige `Order.CONFIRMED` et une destination, sans modifier
+l'Order. Il utilise `Distance` PostGIS sur les Geography PointFields, en mètres,
+filtre activité et ouverture puis compare la distance au rayon déclaré par
+boutique. Les résultats sont ordonnés par distance puis UUID et décrivent les
+exclusions `STORE_INACTIVE`, `STORE_NOT_OPERATIONAL` et `TOO_FAR`.
+
+### Limites et suite
+
+Le résultat DTO ne transporte que IDs, distance et raisons, sans coordonnées
+client précises ni modèle Store complet. Il n'appelle pas l'IA, n'inspecte pas
+les membres humains et ne réalise aucune couverture OrderItem, ranking ou offre.
+La validité reste instantanée : les Lots 7.2+ devront revalider statut et rayon
+au moment de la couverture/offre. Le test `apps/stores/tests/test_eligibility.py`
+couvre précondition, exclusions et distance; il doit être exécuté sur
+PostgreSQL/PostGIS, pas présenté comme une preuve SQLite. Aucune migration n'est
+requise.
+
+## Phase 7 — Lot 7.2 : Product Fulfillment & Store Coverage
+
+`StoreProduct` porte un Product, éventuellement une ProductVariant, un prix
+nullable et une disponibilité déclarée (`AVAILABLE`, `UNAVAILABLE`, `UNKNOWN`),
+mais aucun stock quantifié. `StoreFulfillmentService`
+(`apps/stores/application/fulfillment.py`) en déduit une couverture de catalogue,
+jamais une réservation ou une garantie de quantité.
+
+Les StoreProducts sont préchargés en une requête groupée pour toutes les
+boutiques/items à évaluer. Une variante demandée exige la même variante; un
+produit global ne suffit pas. `UNMATCHED` et `AMBIGUOUS` restent non couverts,
+sans inférence. Les résultats exposent raisons contrôlées, ratio par OrderItem,
+couverture totale et prix réel nullable. La policy est diagnostique : les
+boutiques partielles sont retournées mais ne deviennent pas offerables dans ce
+lot; aucun split-order, conversion d'unités, solver de packages ou ranking.
+
+Les tests `apps/stores/tests/test_fulfillment.py` couvrent disponibilité
+déclarée, absence de fausse garantie de stock/prix, UNMATCHED et indisponibilité.
+Aucune migration n'est nécessaire.
+
+## Phase 7 — Lots 7.6C.1/7.6C.2 : frontière de livraison StoreOffer
+
+`MessageEvent` représente l'envoi provider effectif mais ne pouvait pas porter
+l'intention métier destinataire/offre, son idempotence logique et ses retries.
+Les modèles dédiés `StoreOfferNotification` et
+`StoreOfferNotificationAttempt` complètent donc Messaging sans remplacer ses
+providers. La première est unique par `offer + ChannelIdentity`, référence la
+Conversation multicanal existante et conserve un snapshot sans GPS, adresse,
+téléphone, conversation brute ni secret. La seconde est numérotée et mémorise
+le provider, le canal, le résultat, MessageEvent éventuel, corrélation et une
+catégorie d'erreur contrôlée.
+
+`StoreConversationResolver` réutilise `Conversation` avec l'identité du membre
+Store ; aucune table parallèle ni conversation par offre n'est créée. Le
+renderer est sans HTTP : WhatsApp utilise soit boutons stables
+`store_offer.accept/reject`, soit le template
+`OPERATIONAL_ACTION_REQUIRED` hors fenêtre ; Telegram garde le même contrat
+métier sans dépendance Meta.
+
+La tâche Celery réclame l'intention dans une transaction courte (`SENDING` et
+attempt créé), envoie hors verrou, puis persiste `SENT`,
+`FAILED_RETRYABLE` ou `FAILED_PERMANENT`. Backoff et plafond d'essais sont
+configurables. Un timeout/rate-limit ne modifie jamais StoreOffer ni Order. Une
+offre résolue annule les notifications non envoyées. Le cas crash après appel
+provider reste explicitement ambigu et peut produire une livraison at-least-once
+lors d'une future réconciliation ; il n'est pas présenté comme exactly-once.
+
+## Phase 7 — Lot 7.6D : recovery et concurrence
+
+Les invariants contrôlés sont : au plus une offre acceptée par Order (contrainte
+conditionnelle PostgreSQL), `STORE_ACCEPTED` avec exactement un gagnant, une
+seule offre `PENDING` actionable pour la stratégie séquentielle, et absence
+d'offre actionable après annulation. L'ordre de verrouillage appliqué par les
+services est Order, puis attempt, puis offers ; aucun appel provider ne se fait
+sous verrou de transaction.
+
+`StoreMatchingReconciliationService` lit exclusivement l'état persistant et
+utilise `StoreOfferService` pour expirer/annuler, et
+`StoreMatchingOrchestrator.advance_matching()` pour progresser. Une expiration
+oubliée converge donc vers le candidat suivant; une notification `PENDING` ou
+retryable est ré-enqueue depuis la base. Les outcomes comportant un `offer_id`
+sont refusés s'ils ne correspondent plus au rang courant : un callback tardif
+ou un sweep dupliqué ne peut pas consommer deux candidats.
+
+Les incohérences non déterminables (gagnants multiples, succès sans gagnant,
+Order acceptée sans offre) sont loggées `critical` et retournées sous forme
+`INVARIANT_VIOLATION`, sans réparation silencieuse. La tâche
+`reconcile_store_matching` est bornée par
+`STORE_MATCHING_RECONCILIATION_BATCH_SIZE`; son ordonnanceur Beat reste à
+configurer par l'environnement, afin de ne pas imposer une cadence produit.
+
+## Phase 7 — Lot 7.6E : corrections finales et limite de validation
+
+Un ranking sans candidat offerable passe maintenant par `fail_order()` avec
+`NO_STORE_AVAILABLE`, au lieu de laisser une commande `MATCHING_STORES` sans
+issue. `StoreOfferActionService` transmet les actions autorisées au matching :
+un refus déclenche le fallback séquentiel et une acceptation clôture l'attempt
+lorsque l'Order est devenue `STORE_ACCEPTED`.
+
+Les contrôles disponibles dans cette image sont `compileall` et
+`git diff --check`. Django, pytest, PostgreSQL/PostGIS et le broker Celery ne
+sont pas installés ici : migrations, E2E provider, contraintes PostgreSQL,
+tests transactionnels et régression complète doivent encore être exécutés dans
+l'environnement de test du projet avant de déclarer la Phase 7 clôturée.
+
+## Phase 7 — Lot 7.6F : exécution runtime
+
+Le dépôt contenait déjà `.venv` avec Django 6.0.8 et pytest 9.1.1. Compose a
+fourni une base PostGIS isolée ; toutes les migrations ont été appliquées avec
+succès depuis zéro, jusqu'à `stores.0007`. `manage.py check` et
+`makemigrations --check` retournent zéro erreur, et `apps/stores/tests` passe
+24/24 sur PostgreSQL/PostGIS. La suite complète atteint 334/338 après la
+correction PostgreSQL du verrouillage `OrderItem` (`OF self` sur une jointure
+nullable), des méthodes PATCH/DELETE Order et du chemin sans candidat.
+
+Les quatre échecs restants ne sont pas masqués : ils portent sur des assertions
+antérieures incompatibles avec la policy WhatsApp fermée, le contexte typed et
+la réponse health enrichie. Les E2E matching, tests TransactionTestCase de
+race et smoke providers réels restent à ajouter/exécuter; la Phase 7 ne peut
+donc pas être marquée CLOSED à ce stade.
+
+## Phase 7 — Lot 7.6G : contrats de régression runtime
+
+Les quatre tests rouges ont été traités au niveau de leur contrat : les tests
+Messaging créent un inbound récent avant de vérifier une panne provider, les
+tests multicanal vérifient l'isolation métier du contexte typed plutôt que la
+forme JSON historique, et le health check vérifie son statut ainsi que son
+diagnostic Messaging sans imposer une égalité fragile du payload. PostgreSQL a
+également validé le correctif `FOR UPDATE OF self` sur OrderItem nullable.
+
+Résultat réel : `pytest -q` passe **338/338** sur PostgreSQL/PostGIS,
+`manage.py check` et `makemigrations --check` passent. Cela ne remplace pas
+les E2E Phase 7 dédiés ni les TransactionTestCase de courses concurrentes,
+qui restent nécessaires à la fermeture formelle.

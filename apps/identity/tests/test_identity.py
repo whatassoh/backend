@@ -31,6 +31,14 @@ def test_create_user_normalizes_whatsapp_phone():
 
 
 @pytest.mark.django_db
+def test_create_user_without_whatsapp_phone():
+    user = User.objects.create_user(first_name="Telegram")
+
+    assert user.whatsapp_phone is None
+    assert user.first_name == "Telegram"
+
+
+@pytest.mark.django_db
 def test_whatsapp_phone_is_unique_after_normalization():
     User.objects.create_user(whatsapp_phone="+237699887766")
 

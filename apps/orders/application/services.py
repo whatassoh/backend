@@ -1,4 +1,5 @@
 from decimal import Decimal
+from math import isfinite
 from typing import Any
 
 from django.contrib.gis.geos import Point
@@ -227,7 +228,9 @@ def update_order_item(
 ) -> OrderItem:
     with transaction.atomic():
         item = (
-            OrderItem.objects.select_for_update()
+            # product_variant is nullable: locking the joined nullable table is
+            # rejected by PostgreSQL. Lock only the OrderItem row.
+            OrderItem.objects.select_for_update(of=("self",))
             .select_related("order", "product", "product_variant")
             .get(pk=order_item.pk)
         )
@@ -251,6 +254,35 @@ def update_order_item(
         )
 
         return item
+
+
+def replace_order_item(
+    order_item: OrderItem,
+    *,
+    requested_name: str,
+    product: Product | None,
+    product_variant: ProductVariant | None = None,
+    resolution_status: OrderItemResolutionStatus | str,
+    actor: Any | None = None,
+    actor_type: AuditActorType | str = AuditActorType.SYSTEM,
+    correlation_id: str | None = None,
+) -> OrderItem:
+    """Atomically replace catalog identity without deleting the old item first.
+
+    Quantity, unit and notes intentionally remain unchanged: a replacement is a
+    product correction, not an implicit quantity conversion.
+    """
+    with transaction.atomic():
+        return update_order_item(
+            order_item,
+            requested_name=requested_name,
+            product=product,
+            product_variant=product_variant,
+            resolution_status=resolution_status,
+            actor=actor,
+            actor_type=actor_type,
+            correlation_id=correlation_id,
+        )
 
 
 def remove_order_item(
@@ -283,7 +315,6 @@ def remove_order_item(
 
 
 def set_delivery_location(
-    *,
     order: Order,
     point: Point,
     address_label: str | None = None,
@@ -294,6 +325,10 @@ def set_delivery_location(
     with transaction.atomic():
         locked_order = _lock_order(order)
         validate_order_is_draft_mutable(locked_order.status)
+        if not isfinite(point.x) or not isfinite(point.y):
+            raise ValidationError("Delivery coordinates must be finite.")
+        if not -180 <= point.x <= 180 or not -90 <= point.y <= 90:
+            raise ValidationError("Delivery coordinates are outside valid WGS84 bounds.")
         if point.srid is None:
             point.srid = 4326
         if point.srid != 4326:
@@ -313,10 +348,9 @@ def set_delivery_location(
             actor=actor,
             actor_type=actor_type,
             metadata={
-                "longitude": str(point.x),
-                "latitude": str(point.y),
                 "srid": point.srid,
-                "address_label": locked_order.delivery_address_label,
+                "location_provided": True,
+                "has_address_label": bool(locked_order.delivery_address_label),
             },
             correlation_id=correlation_id,
         )
@@ -332,6 +366,10 @@ def set_delivery_instructions(
     actor_type: AuditActorType | str = AuditActorType.SYSTEM,
     correlation_id: str | None = None,
 ) -> Order:
+    if instructions is not None:
+        instructions = instructions.strip() or None
+        if instructions and len(instructions) > 1000:
+            raise ValidationError("Delivery instructions cannot exceed 1000 characters.")
     with transaction.atomic():
         locked_order = _lock_order(order)
         validate_order_is_draft_mutable(locked_order.status)
@@ -343,10 +381,39 @@ def set_delivery_instructions(
             event_type=AuditEventType.ORDER_DELIVERY_INSTRUCTIONS_UPDATED,
             actor=actor,
             actor_type=actor_type,
-            metadata={"instructions": instructions},
+            metadata={"instructions_provided": bool(instructions)},
             correlation_id=correlation_id,
         )
 
+        return locked_order
+
+
+def set_delivery_address_label(
+    order: Order,
+    address_label: str | None,
+    *,
+    actor: Any | None = None,
+    actor_type: AuditActorType | str = AuditActorType.SYSTEM,
+    correlation_id: str | None = None,
+) -> Order:
+    """Persist a user-provided human label without pretending it is GPS data."""
+    if address_label is not None:
+        address_label = address_label.strip() or None
+        if address_label and len(address_label) > 255:
+            raise ValidationError("Delivery address label cannot exceed 255 characters.")
+    with transaction.atomic():
+        locked_order = _lock_order(order)
+        validate_order_is_draft_mutable(locked_order.status)
+        locked_order.delivery_address_label = address_label
+        locked_order.save(update_fields=["delivery_address_label", "updated_at"])
+        _record_order_audit(
+            locked_order,
+            event_type=AuditEventType.ORDER_DELIVERY_LOCATION_UPDATED,
+            actor=actor,
+            actor_type=actor_type,
+            metadata={"address_label_provided": bool(address_label)},
+            correlation_id=correlation_id,
+        )
         return locked_order
 
 

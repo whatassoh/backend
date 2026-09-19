@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import isfinite
 from typing import Any
 
 from django.core.exceptions import ValidationError
@@ -15,6 +16,8 @@ class MessageLocation:
     address: str | None = None
 
     def __post_init__(self) -> None:
+        if not isfinite(self.latitude) or not isfinite(self.longitude):
+            raise ValidationError("Latitude and longitude must be finite numbers.")
         if not -90 <= self.latitude <= 90:
             raise ValidationError("Latitude must be between -90 and 90.")
         if not -180 <= self.longitude <= 180:

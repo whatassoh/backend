@@ -1,0 +1,16 @@
+import uuid
+from django.conf import settings
+from django.db import migrations, models
+import django.db.models.deletion
+
+class Migration(migrations.Migration):
+    dependencies = [migrations.swappable_dependency(settings.AUTH_USER_MODEL), ("conversations", "0002_add_template_message_type"), ("messaging", "0003_add_template_message_type"), ("stores", "0004_storematchingattempt")]
+    operations = [migrations.CreateModel(name="StoreOfferNotification", fields=[
+        ("id", models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, serialize=False)), ("created_at", models.DateTimeField(auto_now_add=True)), ("updated_at", models.DateTimeField(auto_now=True)),
+        ("channel", models.CharField(max_length=20)), ("status", models.CharField(max_length=20, default="PENDING", choices=[("PENDING","Pending"),("SENT","Sent"),("FAILED","Failed"),("CANCELLED","Cancelled")])),
+        ("presentation_snapshot", models.JSONField(default=dict)), ("idempotency_key", models.CharField(max_length=150, unique=True)), ("next_retry_at", models.DateTimeField(null=True,blank=True)), ("last_error_category", models.CharField(null=True,blank=True,max_length=40)),
+        ("offer", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="notifications", to="stores.storeoffer")), ("recipient", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="store_offer_notifications", to=settings.AUTH_USER_MODEL)), ("channel_identity", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name="store_offer_notifications", to="messaging.channelidentity")), ("conversation", models.ForeignKey(null=True,blank=True,on_delete=django.db.models.deletion.SET_NULL,related_name="store_offer_notifications",to="conversations.conversation"))]),
+        migrations.CreateModel(name="StoreOfferNotificationAttempt", fields=[
+        ("id", models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, serialize=False)), ("created_at", models.DateTimeField(auto_now_add=True)), ("updated_at", models.DateTimeField(auto_now=True)), ("attempt_number", models.PositiveIntegerField()), ("provider", models.CharField(max_length=40)), ("status", models.CharField(max_length=20, default="STARTED", choices=[("STARTED","Started"),("SENT","Sent"),("FAILED","Failed")])), ("started_at", models.DateTimeField(auto_now_add=True)), ("completed_at", models.DateTimeField(null=True,blank=True)), ("provider_message_id", models.CharField(null=True,blank=True,max_length=255)), ("error_category", models.CharField(null=True,blank=True,max_length=40)), ("retryable", models.BooleanField(default=False)), ("notification", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE,related_name="attempts",to="stores.storeoffernotification"))]),
+        migrations.AddConstraint(model_name="storeoffernotificationattempt", constraint=models.UniqueConstraint(fields=("notification","attempt_number"),name="store_offer_notif_attempt_unique")),
+        migrations.AddIndex(model_name="storeoffernotification", index=models.Index(fields=["status","next_retry_at"],name="store_offer_notif_retry_idx")), migrations.AddIndex(model_name="storeoffernotification", index=models.Index(fields=["offer","status"],name="store_offer_notif_offer_idx"))]
