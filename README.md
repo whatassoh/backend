@@ -1835,3 +1835,213 @@ Les priorités sont :
 - une architecture capable d'évoluer après le MVP.
 
 > **Whatassoh est un backend Django modulaire et transactionnel qui transforme WhatsApp en interface de marketplace. L'IA comprend et assiste, PostGIS conserve la vérité géographique, Redis GEO accélère le temps réel, Celery gère les traitements asynchrones, et chaque décision métier critique reste contrôlée par le backend.**
+
+## Phase 6 — Lot 6.1 : session de commande client
+
+Une session de commande est portée par `Conversation.context.active_order_id` :
+ce champ est un pointeur technique, jamais une autorisation. `Order` et ses
+items restent la source de vérité métier.
+
+- `ActiveCustomerOrderService` valide à chaque lecture l'UUID, le propriétaire,
+  le statut éditable (`DRAFT` ou `AWAITING_LOCATION`) et la conversation active.
+- La Conversation est verrouillée pendant lecture/attachement/création ; deux
+  messages concurrents d'une même conversation ne créent donc pas deux drafts.
+- Un contexte stale, malformé, terminal ou appartenant à un autre client est
+  détaché sans interrompre le parcours. Une intention de commande peut alors
+  créer un nouveau draft valide.
+- Un draft est réutilisé uniquement dans la Conversation qui le référence. Les
+  conversations WhatsApp et Telegram du même client sont isolées ; une reprise
+  cross-channel doit être une action explicite `order.resume` avec `order_id`.
+- Une conversation fermée ne crée ni ne rattache de commande. Elle préserve
+  l'historique, sans transmettre automatiquement son draft à la nouvelle
+  conversation.
+- `order.start_new` demande confirmation lorsqu'un draft existe ;
+  `order.abandon_and_start_new` annule explicitement le draft via le service
+  Order, sans créer un brouillon vide. `order.confirm`, `order.cancel` et le
+  récapitulatif relisent toujours l'état persistant des `OrderItem`.
+
+Les logs structurés émettent `draft_created`, `draft_resumed`,
+`draft_abandoned`, `stale_active_order` et `active_order_conflict`, avec les
+identifiants de conversation, commande et corrélation, sans données client.
+Les futurs indicateurs de recommandation doivent compter uniquement les
+commandes réellement abouties, jamais les items retirés ou les drafts annulés.
+
+## Phase 6 — Lot 6.2 : construction et modification de commande
+
+`OrderBuildingService` centralise le ciblage et les mutations conversationnelles
+des `OrderItem`. Une cible est résolue côté backend par référence connue,
+position affichée stable ou nom ; une correspondance multiple demande une
+clarification et ne modifie jamais une ligne arbitrairement.
+
+- Chaque demande d'ajout crée une ligne distincte, même pour le même produit :
+  cette politique préserve l'intention formulée et l'audit.
+- Ajout, quantité/unité, suppression et remplacement utilisent les services
+  Orders existants. Le remplacement ne supprime jamais l'ancien item avant que
+  le grounding du nouveau produit soit validé.
+- `MATCHED` est revalidé contre le catalogue actif ; `UNMATCHED` conserve le
+  libellé client avec un produit nul ; `AMBIGUOUS` ne sélectionne aucun produit.
+- Le récapitulatif est relu depuis PostgreSQL après chaque mutation. Il ne
+  présente ni prix final ni garantie de stock, qui dépendent du futur matching.
+
+## Phase 6 — Lot 6.3 : destination de livraison
+
+La destination canonique est `Order.delivery_location`, un `PointField` WGS84
+SRID 4326 construit comme `Point(longitude, latitude)`. `MessageLocation` est
+la représentation normalisée commune aux adaptateurs WhatsApp et Telegram ;
+elle rejette bornes invalides, NaN et infini avant toute écriture.
+
+`delivery_address_label` conserve le libellé humain, tandis que
+`delivery_instructions` stocke les indications opérationnelles. Une adresse
+texte ne devient jamais des coordonnées inventées : elle est conservée comme
+libellé et le client est invité à partager sa position. Après la position, les
+instructions sont proposées mais restent facultatives. Les coordonnées précises
+ne sont plus placées dans les métadonnées d'audit ou d'observabilité générique.
+
+## Phase 6 — Lot 6.4 : revue et confirmation
+
+`OrderReviewService` reconstruit le récapitulatif depuis les lignes PostgreSQL,
+la destination et les consignes. Il centralise les blockers (commande vide,
+destination manquante, clarification ou item ambigu, statut non éditable) et
+les avertissements (`UNMATCHED`). Aucun prix final ou promesse de stock n’est
+affiché avant le Store Matching.
+
+Le review porte un fingerprint. Si un canal le renvoie avec `order.confirm`, le
+backend refuse une confirmation devenue stale après modification. Les clics et
+la confirmation textuelle convergent vers `confirm_order`; l’annulation vers
+`cancel_order`, avec audit et événements domaine existants.
+
+## Phase 6 — Lot 6.5 : récupération conversationnelle
+
+`ConversationRecoveryService` reconstruit le prochain état du client depuis
+la Conversation, son contexte et la commande persistée : clarification à
+reprendre, position demandée, review prêt, draft incomplet ou contexte stale.
+Il n’envoie aucun message provider et ne dépend d’aucune mémoire de processus.
+
+Les messages techniques sont contrôlés et ne révèlent jamais les détails d’un
+provider ou d’un modèle IA. La frontière reste : mutation métier validée et
+commitée, puis envoi outbound. Les mécanismes existants de fenêtre WhatsApp,
+fallback template, Telegram et classification retryable des erreurs provider
+sont réutilisés; un retry asynchrone durable n’est pas créé dans ce lot.
+
+## Phase 6 — flow client complet
+
+Les webhooks WhatsApp et Telegram persistent d’abord le message entrant dans
+une transaction courte, puis déclenchent le `ConversationalOrchestrator` après
+commit. Les mutations Orders restent donc hors des adaptateurs et les appels IA
+ne maintiennent pas de verrou de réception. Le flux s’arrête explicitement à
+`Order.CONFIRMED` : aucun Store Matching, Driver Matching ou moteur de
+recommandation n’est inclus.
+
+```text
+Client → WhatsApp / Telegram → Messaging → Conversation → Orchestrator
+      → Active Draft → Order Building → Delivery Details → Review
+      → Confirmed | Cancelled
+```
+
+## Phase 7 — Lot 7.1 : éligibilité des boutiques
+
+`StoreEligibilityService` est une requête déterministe et sans effet de bord
+pour une commande `CONFIRMED` localisée. Il utilise PostGIS pour calculer les
+distances en mètres, puis applique les règles réellement présentes : boutique
+active, ouverte et dans son `service_radius_meters`. Il expose les candidats et
+exclusions contrôlées, sans couverture produit détaillée, ranking ou offre.
+
+## Phase 7 — Lot 7.2 : couverture catalogue
+
+`StoreFulfillmentService` évalue, pour chaque boutique éligible, les items
+réellement référencés dans son catalogue. `AVAILABLE` signifie uniquement une
+disponibilité déclarée : ni stock physique, ni quantité, ni conversion d’unités
+ne sont garantis. Les résultats expliquent couverture, indisponibilité,
+produit/variante absent ou item non résolu, sans split-order ni ranking.
+
+## Phase 7 — Lot 7.3 : ranking des boutiques
+
+`StoreRankingService` applique `deterministic_v1` : couverture complète,
+ratio de couverture, distance, puis UUID. Les prix sont ignorés tant qu’un
+panier comparable n’est pas défini. Les candidats partiels restent visibles
+dans les diagnostics, mais seuls les candidats complètement couverts sont
+sélectionnables pour les futures offres.
+
+## Phase 7 — Lot 7.4 : lifecycle StoreOffer
+
+`StoreOffer` persiste une proposition à une boutique avec snapshot de sélection,
+rang, version de stratégie et échéance. Le service transactionnel crée, accepte,
+refuse, expire ou annule les offres. Une contrainte conditionnelle interdit deux
+offres `ACCEPTED` pour la même commande ; l’acceptation annule les pending
+restantes et utilise la state machine Order.
+
+## Phase 7 — Lot 7.5 : actions boutique sécurisées
+
+Les offres sont présentées aux memberships Store actifs (owner, manager, agent)
+ayant une identité de canal active. `store_offer.accept` et
+`store_offer.reject` sont des intentions structurées : le backend recharge
+l’offre et revalide membership/rôle au moment de l’action. La présentation ne
+contient ni GPS, téléphone ni adresse précise client.
+
+## Phase 7 — Lot 7.6A : matching séquentiel persistant
+
+`StoreMatchingOrchestrator` crée un `StoreMatchingAttempt` unique par commande,
+fait transiter l’Order vers `MATCHING_STORES`, exécute eligibility, fulfillment
+et ranking, puis crée uniquement l’offre du candidat rang 1. Le snapshot de
+candidats permet la reprise ultérieure; un ensemble vide est persisté
+`EXHAUSTED` avec `NO_CANDIDATES`, sans encore finaliser l’échec métier.
+
+## Phase 7 — Lot 7.6D : réconciliation du matching
+
+`StoreMatchingReconciliationService` reprend les attempts `RUNNING` depuis
+PostgreSQL en lots bornés. Il ré-expédie les notifications persistées, expire
+les offres `PENDING` oubliées par le lifecycle existant puis avance une seule
+fois le matching. Les callbacks tardifs sont liés à l’offre/rang courant afin
+de ne pas faire avancer deux fois la séquence.
+
+Les invariants ambigus — plusieurs offres acceptées, attempt `SUCCEEDED` sans
+gagnant ou Order `STORE_ACCEPTED` sans offre acceptée — sont signalés comme
+violations opérationnelles, jamais “réparés” en choisissant arbitrairement une
+boutique. Celery n’est qu’un déclencheur : les lignes PostgreSQL, contraintes
+et verrous restent la vérité.
+
+## Phase 7 — Lot 7.6E : clôture conditionnelle
+
+Le chemin vide du matching finalise désormais explicitement la commande avec
+`NO_STORE_AVAILABLE`; les actions Store autorisées font progresser l’attempt
+après acceptation ou refus. Les validations E2E, PostGIS et de concurrence
+restent à exécuter dans l’environnement Django/PostgreSQL prévu : cette image
+ne contient pas Django ni pytest et ne permet donc pas de déclarer la Phase 7
+clôturée sur la seule base des contrôles syntaxiques.
+
+## Phase 7 — Lot 7.6F : validation runtime
+
+L'environnement prévu par le dépôt (`.venv`, Django 6, pytest, Compose
+PostGIS/Redis) a été identifié et utilisé. Les migrations ont été appliquées
+sur une base PostGIS Compose vierge, `manage.py check` et
+`makemigrations --check` passent, et les 24 tests Store passent sur PostgreSQL.
+La régression complète atteint 334/338 : les quatre échecs restants concernent
+des contrats de tests antérieurs autour de la fenêtre WhatsApp, du contexte
+conversationnel et de `/health/`, non le matching Store. La clôture reste
+conditionnée à l'ajout/exécution des E2E et tests transactionnels dédiés 7.6F.
+
+## Phase 7 — Lot 7.6G : nettoyage de régression
+
+Les contrats de tests ont été alignés sur les comportements produits actuels :
+la fenêtre WhatsApp doit être réellement ouverte pour tester un free-form, le
+contexte conversationnel est typé et `/health/` est extensible. Aucune policy
+de service window n'a été contournée. La suite complète passe désormais
+**338/338** sur PostgreSQL/PostGIS, avec migrations et checks Django propres.
+Les E2E et races transactionnelles dédiés au matching restent le dernier
+travail requis avant une clôture Phase 7 formelle.
+
+## Phase 7 — Lots 7.6C.1/7.6C.2 : livraison persistante des StoreOffers
+
+`StoreOffer`, `StoreOfferNotification` et `StoreOfferNotificationAttempt` sont
+désormais trois états distincts. Une notification est unique par
+offre/destinataire/identité de canal et conserve une présentation minimisée ;
+chaque envoi crée une tentative numérotée. Celery recharge uniquement les IDs
+persistés, réclame brièvement la notification en base, puis appelle le provider
+hors transaction. Les erreurs retryables suivent un backoff configurable ; les
+erreurs permanentes n’équivalent jamais à un refus de la boutique.
+
+WhatsApp passe par la policy de fenêtre (interaction dans la fenêtre, template
+opérationnel hors fenêtre), tandis que Telegram ne dépend d’aucune règle Meta.
+Une notification `PENDING` commitée reste récupérable après panne du broker ou
+redémarrage. La livraison réseau reste au mieux *at-least-once* en cas de crash
+ambigu après l’appel provider ; aucune promesse d’exactly-once n’est faite.

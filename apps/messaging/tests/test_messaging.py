@@ -1,6 +1,6 @@
 import pytest
+from django.db import IntegrityError, transaction
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
 from django.utils import timezone
 
 from apps.identity.infrastructure.models import User
@@ -172,6 +172,15 @@ def test_message_location_rejects_invalid_coordinates(latitude, longitude):
         MessageLocation(latitude=latitude, longitude=longitude)
 
 
+@pytest.mark.parametrize(
+    ("latitude", "longitude"),
+    [(float("nan"), 9.7), (4.05, float("inf"))],
+)
+def test_message_location_rejects_non_finite_coordinates(latitude, longitude):
+    with pytest.raises(ValidationError):
+        MessageLocation(latitude=latitude, longitude=longitude)
+
+
 @pytest.mark.django_db
 def test_records_inbound_and_outbound_message_events():
     inbound = NormalizedInboundMessage(
@@ -220,15 +229,18 @@ def test_message_event_idempotence_is_scoped_by_channel():
         status=MessageStatus.RECEIVED,
     )
 
-    with pytest.raises(IntegrityError):
-        MessageEvent.objects.create(
-            channel=MessagingChannel.WHATSAPP,
-            direction=MessageDirection.INBOUND,
-            external_message_id="wamid.123",
-            external_user_id="237699887766",
-            message_type=MessageType.TEXT,
-            status=MessageStatus.RECEIVED,
-        )
+    # PostgreSQL marks the surrounding test transaction as broken after a
+    # constraint violation. Isolate the expected failure in a savepoint.
+    with transaction.atomic():
+        with pytest.raises(IntegrityError):
+            MessageEvent.objects.create(
+                channel=MessagingChannel.WHATSAPP,
+                direction=MessageDirection.INBOUND,
+                external_message_id="wamid.123",
+                external_user_id="237699887766",
+                message_type=MessageType.TEXT,
+                status=MessageStatus.RECEIVED,
+            )
 
     MessageEvent.objects.create(
         channel=MessagingChannel.TELEGRAM,

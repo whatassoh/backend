@@ -10,15 +10,14 @@ from common.models import BaseModel
 class UserManager(BaseUserManager["User"]):
     def create_user(
         self,
-        whatsapp_phone: str,
+        whatsapp_phone: str | None = None,
         password: str | None = None,
         **extra_fields: object,
     ) -> "User":
-        if not whatsapp_phone:
-            raise ValueError("The WhatsApp phone must be set.")
-
         user = self.model(
-            whatsapp_phone=normalize_whatsapp_phone(whatsapp_phone),
+            whatsapp_phone=(
+                normalize_whatsapp_phone(whatsapp_phone) if whatsapp_phone else None
+            ),
             **extra_fields,
         )
         user.set_password(password)
@@ -40,12 +39,14 @@ class UserManager(BaseUserManager["User"]):
             raise ValueError("Superuser must have is_staff=True.")
         if extra_fields.get("is_superuser") is not True:
             raise ValueError("Superuser must have is_superuser=True.")
+        if not whatsapp_phone:
+            raise ValueError("Superuser must have a WhatsApp phone.")
 
         return self.create_user(whatsapp_phone, password, **extra_fields)
 
 
 class User(BaseModel, AbstractBaseUser, PermissionsMixin):
-    whatsapp_phone = models.CharField(max_length=16, unique=True)
+    whatsapp_phone = models.CharField(max_length=16, unique=True, blank=True, null=True)
     first_name = models.CharField(max_length=150, blank=True, null=True)
     last_name = models.CharField(max_length=150, blank=True, null=True)
     preferred_language = models.CharField(max_length=10, default="fr")
@@ -72,14 +73,16 @@ class User(BaseModel, AbstractBaseUser, PermissionsMixin):
 
     def clean(self) -> None:
         super().clean()
-        self.whatsapp_phone = normalize_whatsapp_phone(self.whatsapp_phone)
+        if self.whatsapp_phone:
+            self.whatsapp_phone = normalize_whatsapp_phone(self.whatsapp_phone)
 
     def save(self, *args: object, **kwargs: object) -> None:
-        self.whatsapp_phone = normalize_whatsapp_phone(self.whatsapp_phone)
+        if self.whatsapp_phone:
+            self.whatsapp_phone = normalize_whatsapp_phone(self.whatsapp_phone)
         super().save(*args, **kwargs)
 
     def __str__(self) -> str:
-        return self.whatsapp_phone
+        return self.whatsapp_phone or f"User {self.id}"
 
 
 class UserRole(BaseModel):

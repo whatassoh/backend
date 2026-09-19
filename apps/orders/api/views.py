@@ -76,7 +76,7 @@ def raise_api_domain_error(exc: Exception) -> None:
 class OrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = OrderSerializer
-    http_method_names = ["get", "post", "head", "options"]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
     lookup_url_kwarg = "order_pk"
 
     def get_queryset(self):
