@@ -17,7 +17,7 @@ from apps.messaging.application.registry import (
 )
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.dtos import MessageLocation, ProviderSendResult
-from apps.messaging.domain.enums import MessageStatus, MessagingChannel
+from apps.messaging.domain.enums import MessageDirection, MessageStatus, MessageType, MessagingChannel
 from apps.messaging.domain.exceptions import (
     MessagingAuthenticationError,
     MessagingChannelDisabled,
@@ -202,6 +202,14 @@ def test_send_conversation_location_checks_capability(monkeypatch):
         channel=MessagingChannel.WHATSAPP,
         channel_identity=identity,
     )
+    # This test exercises provider-failure handling; keep the WhatsApp window
+    # legitimately open so the outbound policy is not the failure under test.
+    ConversationMessage.objects.create(
+        conversation=conversation,
+        direction=MessageDirection.INBOUND,
+        message_type=MessageType.TEXT,
+        text="Bonjour",
+    )
 
     with pytest.raises(UnsupportedMessagingCapability):
         send_conversation_location(
@@ -232,8 +240,17 @@ def test_failed_send_does_not_record_conversation_message(monkeypatch):
         channel_identity=identity,
     )
 
+    ConversationMessage.objects.create(
+        conversation=conversation,
+        direction=MessageDirection.INBOUND,
+        message_type=MessageType.TEXT,
+        text="Bonjour",
+    )
+
     with pytest.raises(MessagingTemporaryError):
         send_conversation_text(conversation=conversation, text="Bonjour")
 
     assert MessageEvent.objects.count() == 0
-    assert ConversationMessage.objects.count() == 0
+    assert ConversationMessage.objects.filter(
+        direction=MessageDirection.OUTBOUND
+    ).count() == 0

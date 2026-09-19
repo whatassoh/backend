@@ -29,6 +29,19 @@ def get_or_create_user_by_whatsapp(
         return User.objects.get(whatsapp_phone=whatsapp_phone), False
 
 
+def create_user_for_telegram(
+    *,
+    first_name: str | None = None,
+    last_name: str | None = None,
+) -> User:
+    """Create a local user with no implied WhatsApp identity."""
+    return User.objects.create_user(
+        first_name=first_name or None,
+        last_name=last_name or None,
+        status=UserStatus.ACTIVE,
+    )
+
+
 def assign_role(user: User, role: UserRoleType | str) -> UserRole:
     user_role, _ = UserRole.objects.get_or_create(
         user=user,

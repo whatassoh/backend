@@ -11,10 +11,12 @@ from apps.conversations.domain.enums import ConversationStatus
 from apps.conversations.domain.exceptions import (
     ConversationAlreadyClosedError,
     ConversationChannelMismatchError,
-    UnknownChannelIdentityError,
 )
 from apps.conversations.infrastructure.models import Conversation, ConversationMessage
-from apps.identity.application.services import get_or_create_user_by_whatsapp
+from apps.identity.application.services import (
+    create_user_for_telegram,
+    get_or_create_user_by_whatsapp,
+)
 from apps.messaging.application.selectors import get_channel_identity
 from apps.messaging.application.services import get_or_create_channel_identity
 from apps.messaging.domain.dtos import (
@@ -57,14 +59,29 @@ def resolve_channel_identity_for_inbound(
     if identity is not None:
         return identity, False
 
-    if message.channel != MessagingChannel.WHATSAPP:
-        raise UnknownChannelIdentityError(
-            "Only WhatsApp identities can create users automatically today.",
-            details={
-                "channel": message.channel,
-                "external_user_id": message.external_user_id,
+    if message.channel == MessagingChannel.TELEGRAM:
+        telegram_metadata = message.metadata.get("telegram", {})
+        if not isinstance(telegram_metadata, dict):
+            telegram_metadata = {}
+        user = create_user_for_telegram(
+            first_name=telegram_metadata.get("first_name"),
+            last_name=telegram_metadata.get("last_name"),
+        )
+        identity, created = get_or_create_channel_identity(
+            user=user,
+            channel=MessagingChannel.TELEGRAM,
+            external_user_id=message.external_user_id,
+            defaults={
+                "external_username": telegram_metadata.get("username"),
+                "metadata": {"telegram": telegram_metadata},
             },
         )
+        if not created:
+            user.delete()
+        return identity, created
+
+    if message.channel != MessagingChannel.WHATSAPP:
+        raise ValueError(f"Unsupported messaging channel: {message.channel}")
 
     user, _ = get_or_create_user_by_whatsapp(message.external_user_id)
     identity, created = get_or_create_channel_identity(

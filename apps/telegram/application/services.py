@@ -5,6 +5,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.conversations.application.services import ingest_inbound_message
+from apps.conversations.application.flow import process_inbound_conversation
 from apps.messaging.domain.enums import (
     MessageDirection,
     MessageStatus,
@@ -16,7 +17,6 @@ from apps.telegram.adapters.inbound import parse_telegram_update
 logger = logging.getLogger(__name__)
 
 
-@transaction.atomic
 def process_telegram_webhook(payload: dict[str, Any]) -> dict[str, int]:
     messages = parse_telegram_update(payload)
     processed = 0
@@ -24,15 +24,20 @@ def process_telegram_webhook(payload: dict[str, Any]) -> dict[str, int]:
     ignored = 0
 
     for message in messages:
-        message_event, created = _get_or_create_inbound_message_event(message)
-        if not created and _has_conversation_message(message_event):
-            duplicates += 1
-            continue
-
-        ingest_inbound_message(message, message_event)
-        message_event.status = MessageStatus.PROCESSED
-        message_event.processed_at = timezone.now()
-        message_event.save(update_fields=["status", "processed_at", "updated_at"])
+        with transaction.atomic():
+            message_event, created = _get_or_create_inbound_message_event(message)
+            if not created and _has_conversation_message(message_event):
+                duplicates += 1
+                continue
+            inbound = ingest_inbound_message(message, message_event)
+            message_event.status = MessageStatus.PROCESSED
+            message_event.processed_at = timezone.now()
+            message_event.save(update_fields=["status", "processed_at", "updated_at"])
+        process_inbound_conversation(
+            inbound.conversation,
+            message,
+            correlation_id=str(message_event.id),
+        )
         processed += 1
 
         logger.info(
