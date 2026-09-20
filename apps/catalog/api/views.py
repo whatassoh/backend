@@ -9,7 +9,6 @@ from apps.catalog.api.serializers import (
     ProductSerializer,
     StoreProductSerializer,
 )
-from apps.catalog.application.permissions import can_manage_store_catalog
 from apps.catalog.application.selectors import (
     get_active_categories,
     get_active_products,
@@ -17,11 +16,12 @@ from apps.catalog.application.selectors import (
     search_products,
 )
 from apps.catalog.application.services import (
-    add_product_to_store,
     create_category,
     create_product,
-    remove_product_from_store,
-    update_store_product,
+)
+from apps.catalog.application.seller_catalog import (
+    SellerCatalogService,
+    SellerCatalogStatus,
 )
 from apps.catalog.infrastructure.models import Category, Product, StoreProduct
 from apps.stores.infrastructure.models import Store
@@ -98,34 +98,70 @@ class StoreProductViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer: StoreProductSerializer) -> None:
         store = self.get_store()
-
-        if not can_manage_store_catalog(self.request.user, store):
-            self.permission_denied(self.request)
-
-        serializer.instance = add_product_to_store(
+        data = serializer.validated_data
+        result = SellerCatalogService().add_product(
+            actor=self.request.user,
             store=store,
-            **serializer.validated_data,
+            product_id=data["product"].id,
+            variant_id=(data["product_variant"].id if data.get("product_variant") else None),
+            price=data.get("price"),
+            currency=data.get("currency", "XAF"),
+            availability=data.get("availability_status", "UNKNOWN"),
+            display_name=data.get("display_name"),
+            correlation_id=self.request.headers.get("X-Correlation-ID"),
         )
+        if result.status == SellerCatalogStatus.FORBIDDEN:
+            self.permission_denied(self.request)
+        if result.status != SellerCatalogStatus.SUCCESS:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": result.status.value})
+        serializer.instance = result.store_product
 
     def partial_update(self, request, *args, **kwargs):
         store = self.get_store()
 
-        if not can_manage_store_catalog(request.user, store):
-            self.permission_denied(request)
-
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        store_product = update_store_product(instance, **serializer.validated_data)
+        data = serializer.validated_data
+        if set(data) - {"price", "currency", "availability_status"}:
+            return Response({"detail": "Only price and availability can be updated here."}, status=status.HTTP_400_BAD_REQUEST)
+        service = SellerCatalogService()
+        result = None
+        if "price" in data or "currency" in data:
+            result = service.update_price(
+                actor=request.user, store_product_id=instance.id,
+                price=data.get("price", instance.price),
+                currency=data.get("currency", instance.currency),
+                correlation_id=request.headers.get("X-Correlation-ID"),
+            )
+        if "availability_status" in data:
+            result = service.set_availability(
+                actor=request.user, store_product_id=instance.id,
+                availability=data["availability_status"],
+                correlation_id=request.headers.get("X-Correlation-ID"),
+            )
+        if result is None:
+            return Response(self.get_serializer(instance).data)
+        if result.status == SellerCatalogStatus.FORBIDDEN:
+            self.permission_denied(request)
+        if result.status != SellerCatalogStatus.SUCCESS:
+            return Response({"detail": result.status.value}, status=status.HTTP_400_BAD_REQUEST)
+        store_product = result.store_product
 
         return Response(self.get_serializer(store_product).data)
 
     def destroy(self, request, *args, **kwargs):
         store = self.get_store()
 
-        if not can_manage_store_catalog(request.user, store):
+        result = SellerCatalogService().remove_product(
+            actor=request.user,
+            store_product_id=self.get_object().id,
+            correlation_id=request.headers.get("X-Correlation-ID"),
+        )
+        if result.status == SellerCatalogStatus.FORBIDDEN:
             self.permission_denied(request)
-
-        remove_product_from_store(self.get_object())
+        if result.status != SellerCatalogStatus.SUCCESS:
+            return Response({"detail": result.status.value}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(status=status.HTTP_204_NO_CONTENT)
