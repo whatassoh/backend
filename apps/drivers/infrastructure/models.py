@@ -1,10 +1,14 @@
 from django.conf import settings
+from django.contrib.gis.db import models as gis_models
 from django.db import models
 
 from apps.drivers.domain.enums import (
     DriverAvailability,
     DriverStatus,
     VehicleType,
+    DriverOfferStatus,
+    DriverMatchingAttemptStatus,
+    DriverOfferNotificationStatus,
 )
 from apps.drivers.domain.rules import (
     validate_driver_state,
@@ -29,6 +33,10 @@ class DriverProfile(BaseModel):
         choices=DriverAvailability.choices,
         default=DriverAvailability.OFFLINE,
     )
+    # Set by the location ingestion boundary planned for lot 9.3.  Availability
+    # uses it as freshness evidence; coordinates are deliberately not stored here.
+    last_location_at = models.DateTimeField(blank=True, null=True)
+    last_location = gis_models.PointField(geography=True, srid=4326, blank=True, null=True)
     vehicle_type = models.CharField(
         max_length=20,
         choices=VehicleType.choices,
@@ -87,3 +95,66 @@ class DriverProfile(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.user} - {self.status}/{self.availability_status}"
+
+
+class DriverOffer(BaseModel):
+    order = models.ForeignKey("orders.Order", on_delete=models.CASCADE, related_name="driver_offers")
+    driver = models.ForeignKey(DriverProfile, on_delete=models.CASCADE, related_name="offers")
+    status = models.CharField(max_length=20, choices=DriverOfferStatus.choices, default=DriverOfferStatus.PENDING)
+    rank = models.PositiveIntegerField()
+    strategy_version = models.CharField(max_length=50)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(blank=True, null=True)
+    rejected_at = models.DateTimeField(blank=True, null=True)
+    expired_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    rejection_reason = models.CharField(max_length=80, blank=True, null=True)
+    candidate_snapshot = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["order", "status"], name="driver_offer_order_status_idx"), models.Index(fields=["driver", "status"], name="driver_offer_driver_status_idx"), models.Index(fields=["status", "expires_at"], name="driver_offer_status_exp_idx")]
+        constraints = [
+            models.UniqueConstraint(fields=["order", "driver"], name="driver_offer_order_driver_unique"),
+            models.UniqueConstraint(fields=["order"], condition=models.Q(status=DriverOfferStatus.PENDING), name="driver_offer_one_pending_per_order"),
+            models.UniqueConstraint(fields=["order"], condition=models.Q(status=DriverOfferStatus.ACCEPTED), name="driver_offer_one_accepted_per_order"),
+            models.CheckConstraint(condition=models.Q(status__in=DriverOfferStatus.values), name="driver_offer_status_valid"),
+        ]
+
+
+class DriverAssignment(BaseModel):
+    """The durable active-delivery truth until a richer Delivery model exists."""
+    order = models.OneToOneField("orders.Order", on_delete=models.CASCADE, related_name="driver_assignment")
+    driver = models.ForeignKey(DriverProfile, on_delete=models.PROTECT, related_name="assignments")
+    offer = models.OneToOneField(DriverOffer, on_delete=models.PROTECT, related_name="assignment")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["driver"], condition=models.Q(is_active=True), name="driver_assignment_one_active_per_driver")]
+
+
+class DriverMatchingAttempt(BaseModel):
+    order = models.OneToOneField("orders.Order", on_delete=models.CASCADE, related_name="driver_matching_attempt")
+    status = models.CharField(max_length=30, choices=DriverMatchingAttemptStatus.choices, default=DriverMatchingAttemptStatus.RUNNING)
+    strategy = models.CharField(max_length=30, default="SEQUENTIAL")
+    strategy_version = models.CharField(max_length=50)
+    candidate_snapshot = models.JSONField(default=list)
+    current_position = models.PositiveIntegerField(default=0)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+
+class DriverOfferNotification(BaseModel):
+    offer = models.ForeignKey(DriverOffer, on_delete=models.CASCADE, related_name="notifications")
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    channel_identity = models.ForeignKey("messaging.ChannelIdentity", on_delete=models.PROTECT)
+    conversation = models.ForeignKey("conversations.Conversation", on_delete=models.SET_NULL, null=True, blank=True)
+    channel = models.CharField(max_length=20)
+    status = models.CharField(max_length=30, choices=DriverOfferNotificationStatus.choices, default=DriverOfferNotificationStatus.PENDING)
+    idempotency_key = models.CharField(max_length=180, unique=True)
+    presentation_snapshot = models.JSONField(default=dict)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    failed_at = models.DateTimeField(null=True, blank=True)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "next_retry_at"], name="driver_offer_notif_retry_idx")]

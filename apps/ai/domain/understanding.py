@@ -15,6 +15,8 @@ class MessageIntent(StrEnum):
     GREETING = "GREETING"
     HELP = "HELP"
     UNKNOWN = "UNKNOWN"
+    SELL = "SELL"
+    DELIVER = "DELIVER"
 
 
 class ExtractedUnit(StrEnum):

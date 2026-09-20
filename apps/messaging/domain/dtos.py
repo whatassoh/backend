@@ -14,6 +14,7 @@ class MessageLocation:
     longitude: float
     name: str | None = None
     address: str | None = None
+    accuracy_meters: float | None = None
 
     def __post_init__(self) -> None:
         if not isfinite(self.latitude) or not isfinite(self.longitude):
@@ -22,6 +23,8 @@ class MessageLocation:
             raise ValidationError("Latitude must be between -90 and 90.")
         if not -180 <= self.longitude <= 180:
             raise ValidationError("Longitude must be between -180 and 180.")
+        if self.accuracy_meters is not None and (not isfinite(self.accuracy_meters) or self.accuracy_meters < 0):
+            raise ValidationError("Location accuracy must be a finite positive number.")
 
 
 @dataclass(frozen=True, kw_only=True)

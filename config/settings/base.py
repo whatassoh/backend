@@ -13,6 +13,13 @@ env = environ.Env(
     WHATSAPP_REQUEST_TIMEOUT=(float, 10.0),
     TELEGRAM_ENABLED=(bool, False),
     TELEGRAM_REQUEST_TIMEOUT=(float, 10.0),
+    SELLER_DASHBOARD_LINK_TTL_SECONDS=(int, 600),
+    # Provisional MVP default. Deployments must configure this explicitly before
+    # driver matching is enabled; lot 9.3 only supplies the location ingestion.
+    DRIVER_LOCATION_FRESHNESS_SECONDS=(int, 900),
+    DRIVER_MATCHING_RADIUS_METERS=(int, 5000),
+    DRIVER_MATCHING_MAX_CANDIDATES=(int, 10),
+    DRIVER_OFFER_TTL_SECONDS=(int, 90),
 )
 
 environ.Env.read_env(BASE_DIR / ".env")
@@ -25,6 +32,13 @@ environ.Env.read_env(BASE_DIR / ".env")
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 
 DEBUG = env.bool("DJANGO_DEBUG", default=False)
+
+DRIVER_LOCATION_FRESHNESS_SECONDS = env.int(
+    "DRIVER_LOCATION_FRESHNESS_SECONDS", default=900
+)
+DRIVER_MATCHING_RADIUS_METERS = env.int("DRIVER_MATCHING_RADIUS_METERS", default=5000)
+DRIVER_MATCHING_MAX_CANDIDATES = env.int("DRIVER_MATCHING_MAX_CANDIDATES", default=10)
+DRIVER_OFFER_TTL_SECONDS = env.int("DRIVER_OFFER_TTL_SECONDS", default=90)
 
 ALLOWED_HOSTS = env.list(
     "DJANGO_ALLOWED_HOSTS",
@@ -219,6 +233,7 @@ CACHES = {
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         ("rest_framework_simplejwt.authentication.JWTAuthentication"),
+        ("rest_framework.authentication.SessionAuthentication"),
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -323,6 +338,14 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS",
     default=[],
+)
+
+SELLER_DASHBOARD_LINK_TTL_SECONDS = env.int(
+    "SELLER_DASHBOARD_LINK_TTL_SECONDS", default=600
+)
+SELLER_DASHBOARD_FRONTEND_URL = env(
+    "SELLER_DASHBOARD_FRONTEND_URL",
+    default="http://localhost:3000/seller-dashboard/access",
 )
 
 

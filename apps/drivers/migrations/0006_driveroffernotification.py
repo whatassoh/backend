@@ -1,0 +1,9 @@
+import uuid
+import django.db.models.deletion
+from django.conf import settings
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    dependencies = [("drivers", "0005_drivermatchingattempt"), ("messaging", "0001_initial"), ("conversations", "0002_add_template_message_type")]
+    operations = [migrations.CreateModel(name="DriverOfferNotification", fields=[("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)), ("channel", models.CharField(max_length=20)), ("status", models.CharField(max_length=30, default="PENDING", choices=[("PENDING", "Pending"), ("SENDING", "Sending"), ("SENT", "Sent"), ("FAILED_RETRYABLE", "Failed retryable"), ("FAILED_PERMANENT", "Failed permanent"), ("CANCELLED", "Cancelled")])), ("idempotency_key", models.CharField(max_length=180, unique=True)), ("presentation_snapshot", models.JSONField(default=dict)), ("sent_at", models.DateTimeField(null=True, blank=True)), ("failed_at", models.DateTimeField(null=True, blank=True)), ("next_retry_at", models.DateTimeField(null=True, blank=True)), ("created_at", models.DateTimeField(auto_now_add=True)), ("updated_at", models.DateTimeField(auto_now=True)), ("channel_identity", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to="messaging.channelidentity")), ("conversation", models.ForeignKey(null=True, blank=True, on_delete=django.db.models.deletion.SET_NULL, to="conversations.conversation")), ("offer", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="notifications", to="drivers.driveroffer")), ("recipient", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL))]), migrations.AddIndex(model_name="driveroffernotification", index=models.Index(fields=["status", "next_retry_at"], name="driver_offer_notif_retry_idx"))]

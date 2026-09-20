@@ -3420,3 +3420,491 @@ Résultat réel : `pytest -q` passe **338/338** sur PostgreSQL/PostGIS,
 `manage.py check` et `makemigrations --check` passent. Cela ne remplace pas
 les E2E Phase 7 dédiés ni les TransactionTestCase de courses concurrentes,
 qui restent nécessaires à la fermeture formelle.
+
+## Phase 8 — Lot 8.1 : Role Routing & Conversational Entry
+
+### État initial et composants réutilisés
+
+L'audit a trouvé `User`/`UserRole` et les rôles `CLIENT`, `STORE_OWNER`,
+`STORE_MANAGER`, `STORE_AGENT`, `DRIVER`, `ADMIN`; `ChannelIdentity` est la
+source de l'utilisateur pour les messages entrants. Les conversations sont
+persistées par `Conversation` avec `Conversation.context` JSON et les messages
+par `ConversationMessage`/`MessageEvent` (contrainte unique
+`channel + external_message_id`). Le flow client déjà en place est
+`ConversationalOrchestrator`, composé depuis `process_inbound_conversation`,
+avec `MessageUnderstandingService`/`AIService`, `ConversationContextService`,
+`ConversationRecoveryService`, `ActiveCustomerOrderService`, les actions
+structurées Order et `MessagingService` (`apps.messaging.application.orchestration`).
+
+Le lot réutilise ces composants; il n'ajoute ni modèle parallèle, ni rôle
+durable, ni moteur IA séparé. Il complète le contrat `MessageIntent` par
+`SELL` et `DELIVER`, tandis que l'achat reste l'intention client existante
+`CREATE_OR_UPDATE_ORDER`.
+
+### Architecture et données
+
+`ActiveJourney` (`BUY`, `SELL`, `DELIVER`) est ajouté au `ConversationContext`
+typé et sérialisé dans `Conversation.context`; aucune migration n'est requise.
+`JourneyRoutingService` est le routeur métier channel-agnostic : il verrouille
+et met à jour ce contexte via `ConversationContextService`, puis lit seulement
+les `StoreMembership` actives ou le `DriverProfile` pour produire les états
+`SELLER_ONBOARDING_REQUIRED` / `SELLER_JOURNEY_READY` et
+`DRIVER_ONBOARDING_REQUIRED` / `DRIVER_JOURNEY_READY`. Il ne crée ni Store,
+ni profil livreur, ni commande.
+
+Une intention explicite BUY/SELL/DELIVER est routée directement. Une salutation,
+une intention inconnue ou une confiance sous le seuil sans parcours actif
+retourne un `ResponsePlan` avec les IDs stables
+`journey.select.buy`, `journey.select.sell`, `journey.select.deliver` et les
+labels français indépendants. Une action structurée est traitée avant l'appel
+au LLM. Le changement BUY ⇄ SELL ne modifie ni `UserRole`, ni Order, Store ou
+DriverProfile; un ordre actif n'est pas effacé par le changement de contexte.
+
+### Canaux, recovery, idempotence et sécurité
+
+La présentation reste à la frontière : `send_response_plan` utilise les
+boutons WhatsApp existants (donc `WhatsAppOutboundPolicy` et fenêtre de service)
+ou un clavier inline Telegram. L'adapter Telegram normalise maintenant
+`callback_query.data` vers `metadata.action_id`; les deux canaux atteignent le
+même routeur. WhatsApp ne contourne pas la règle template lorsque la fenêtre
+est fermée.
+
+Le parcours actif et les IDs de messages traités sont persistés dans PostgreSQL,
+donc redémarrables sans Redis. La déduplication existante `MessageEvent` et la
+liste bornée `processed_message_ids` évitent de retraiter un callback. Le
+routeur n'accepte aucune identité, rôle, store ou profil depuis le bouton ou le
+texte : il part de `Conversation.channel_identity.user` et interroge les
+relations persistées.
+
+### Tests et validation réelle
+
+Ajout de `apps/conversations/tests/test_journey_routing.py`, couvrant la
+sélection ambiguë, les routes explicites, BUY sans création d'Order, les trois
+actions déterministes sans LLM, absence de création Store/DriverProfile,
+multi-rôles, switch BUY/SELL, callback dupliqué et persistance Telegram.
+Les tests existants WhatsApp/Telegram et orchestrator ont aussi été ciblés.
+
+Commandes réellement exécutées :
+
+```text
+.venv/bin/python manage.py check
+.venv/bin/python manage.py makemigrations --check --dry-run
+.venv/bin/pytest -q apps/conversations/tests/test_journey_routing.py apps/conversations/tests/test_orchestrator.py apps/telegram/tests/test_telegram.py apps/whatsapp/tests/test_whatsapp.py
+.venv/bin/pytest -q apps/conversations/tests/test_orchestrator.py
+.venv/bin/python -m compileall -q apps
+git diff --check
+```
+
+Résultats réels : `manage.py check`, `compileall` et `git diff --check` passent;
+`test_orchestrator.py` passe 2/2. La suite ciblée avec DB ne peut pas être
+validée dans cette session : la connexion PostgreSQL/PostGIS
+`localhost:5432` échoue avant setup des tests. `makemigrations --check` ne
+détecte aucune migration applicative, avec un avertissement de connexion DB.
+
+Limites : l'onboarding vendeur (8.2), onboarding/disponibilité/matching
+livreur (Phase 9), ainsi que les E2E providers réels restent hors scope. Le
+contrat `SELLER_ONBOARDING_REQUIRED` est prêt pour que le Lot 8.2 branche son
+onboarding sans modifier les rôles ni le routeur.
+
+## Phase 8 — Lot 8.2 : Seller Onboarding & Store Creation
+
+### État initial et réutilisation
+
+L'audit a confirmé que `Store` possède un `PointField(geography=True, srid=4326)`
+et exige `name`, `location` et `city`; `StoreMembership` a déjà les rôles
+`OWNER`, `MANAGER`, `AGENT`, et le service transactionnel
+`apps.stores.application.services.create_store()` crée déjà le couple Store +
+membership quand `created_by` est fourni. Les permissions réutilisables sont
+`can_manage_store` / `is_store_owner`. `StoreMembership` ne limite pas un
+utilisateur à une seule boutique : l'onboarding reprend donc le workspace
+vendeur si une membership active existe, sans créer automatiquement une autre
+boutique.
+
+Les conventions GeoDjango et les messages normalisés sont réutilisés :
+`MessageLocation` vérifie latitude/longitude avant que le service métier ne
+reçoive les données; la création utilise explicitement
+`Point(longitude, latitude, srid=4326)`. Aucun payload Meta/Telegram, adresse
+textuelle ou géocodage n'entre dans le service.
+
+### Architecture et draft
+
+`SellerOnboardingService` est un service conversationnel channel-agnostic avec
+`start`, transitions nom/position/ville, `review`, `confirm`, `cancel`, reprise
+et choix catalogue. Le draft `SellerOnboardingDraft` persiste dans
+`Conversation.context` avec les étapes `NAME`, `LOCATION`, `CITY`, `REVIEW`,
+`COMPLETED`; il est donc récupérable après restart sans Redis. Une Store n'est
+pas créée avant confirmation : c'est l'option A (état temporaire puis création
+définitive), cohérente avec l'absence d'état Store DRAFT dans le modèle.
+
+Les données minimales demandées sont nom, position et ville. La ville est une
+contrainte technique réelle du modèle actuel, pas une étape métier ajoutée
+arbitrairement. Le nom est normalisé (espaces, forme « ma boutique s'appelle »),
+refusé s'il est vide ou dépasse 255 caractères; la ville est refusée vide ou
+au-delà de 120 caractères. Les coordonnées non finies ou hors bornes sont
+refusées et ne sont jamais inversées ou géocodées.
+
+### Confirmation, sécurité et concurrence
+
+Le résumé expose les actions stables `seller_onboarding.confirm`, `.edit`,
+`.cancel`. La confirmation verrouille `Conversation` puis `User`, revalide le
+draft et la journey SELL, crée via `create_store(..., created_by=user)` dans la
+transaction, ajoute/réutilise `UserRole.STORE_OWNER`, puis persiste le
+`store_id` complété dans le draft. Ainsi Store et membership ne peuvent pas
+être partiellement validées; une seconde confirmation retourne le même état.
+Le verrou utilisateur et la recherche de membership active empêchent deux
+conversations concurrentes d'aboutir à deux premières boutiques.
+
+L'utilisateur est exclusivement celui de `Conversation.channel_identity.user`;
+aucun `user_id`, `store_id`, rôle ou coordonnée texte client n'est accepté.
+Les événements d'audit disponibles sont des logs structurés
+`seller_onboarding_started` et `seller_onboarding_completed`, sans coordonnées
+GPS. Après création, les actions `seller.catalog.chat` et
+`seller.catalog.dashboard` conservent uniquement le choix de prochaine étape
+pour les lots 8.3/8.4/8.5.
+
+### Canaux et tests
+
+L'orchestrateur existant délègue les messages du draft au même service avant
+l'IA. WhatsApp et Telegram utilisent la présentation déjà ajoutée au lot 8.1;
+Telegram fournit `metadata.action_id` depuis callback data, et WhatsApp reste
+soumis à `WhatsAppOutboundPolicy`/template hors fenêtre. Les prompts
+d'onboarding et les actions sont envoyés via `send_response_plan`, sans placer
+de règles channel dans le service métier.
+
+Ajout de `apps/conversations/tests/test_seller_onboarding.py` : parcours SELL
+complet, création après confirmation seulement, OWNER + UserRole, ordre
+longitude/latitude/SRID, location WhatsApp et Telegram, annulation/reprise,
+double confirmation, boutique existante, coordonnées invalides et confirmation
+concurrente. Les tests ne couvrent pas de géocodage car aucun géocodeur n'est
+introduit.
+
+Commandes réellement exécutées pour ce lot :
+
+```text
+.venv/bin/python -m compileall -q apps
+.venv/bin/python manage.py check
+.venv/bin/pytest -q apps/conversations/tests/test_orchestrator.py apps/telegram/tests/test_telegram.py -k 'test_greeting_does_not_create_order_or_call_catalog or callback'
+.venv/bin/pytest -q apps/conversations/tests/test_seller_onboarding.py
+git diff --check
+```
+
+Résultats réels : compilation, `manage.py check` et diff check passent; les deux
+tests sans dépendance DB passent (2 passés). La suite onboarding a été lancée :
+son test pur de coordonnées passe (1 passé), mais les six tests nécessitant DB
+échouent avant leur setup car PostgreSQL/PostGIS sur `localhost:5432` reste
+indisponible. Elle doit être relancée dans l'environnement de test avant
+validation finale de la concurrence et des contraintes transactionnelles.
+
+Aucune migration : seuls les états JSON existants de `Conversation.context`
+sont étendus. Les limites restantes sont volontairement hors scope : édition
+catalogue effective, dashboard vendeur, KYC, paiements, préparation de commande
+et fonctionnalités livreur. Le résultat est prêt pour le Lot 8.3 : une Store
+valide, localisée, avec son créateur membre OWNER, et un choix persistant de
+point d'entrée catalogue.
+
+## Phase 8 — Lot 8.3 : Seller Catalog Management Core
+
+L'audit confirme la séparation existante entre `Product`, `ProductVariant`,
+`ProductAlias` et `StoreProduct`. `StoreProduct` possède déjà `price`
+(`DecimalField(12,2)`, nullable), currency XAF, disponibilité déclarative
+`AVAILABLE`/`UNAVAILABLE`/`UNKNOWN`, indexes de recherche et contraintes DB de
+prix et d'unicité Store/Product/Variant. Le retrait existant est un soft-disable
+`UNAVAILABLE`, qui préserve les références historiques. `StoreFulfillmentService`
+ne couvre les commandes futures que lorsque cette disponibilité est AVAILABLE;
+aucun stock physique n'a été ajouté.
+
+Ajout de `SellerCatalogService` : façade unique et déterministe pour le chat
+8.4 et dashboard 8.5. Elle réutilise les primitives catalogue existantes pour
+liste, ajout, prix, disponibilité, retrait et restauration, mais impose
+`StoreMembership`: tout membre actif peut lister, OWNER/MANAGER seulement peut
+muter via `can_manage_store_catalog`. Un rôle global ne donne aucun accès hors
+membership de la Store visée.
+
+L'ajout charge exclusivement les IDs Product/Variant persistés, refuse Product
+absent/inactif, variante absente/inactive/d'un autre produit, et ne crée jamais
+de Product depuis texte/IA. La politique doublon est `ALREADY_EXISTS` sans mise
+à jour implicite. Prix : `Decimal` fini non négatif et compatible (12,2);
+`None` signifie non déclaré, pas gratuit. Currency est ISO alphabétique à trois
+caractères. Transactions, verrou StoreProduct, contraintes uniques et rattrapage
+d'IntegrityError couvrent ajouts/updates concurrents.
+
+L'API existante `/stores/{store_pk}/products/` passe désormais par cette façade
+pour POST/PATCH/DELETE. Les changements produisent logs structurés minimaux
+(actor/store/StoreProduct/old/new/correlation ID) et événements post-commit
+`StoreProductAdded`, `StoreProductPriceChanged`,
+`StoreProductAvailabilityChanged` via `common.events`. Les lectures utilisent
+le selector existant avec `select_related`, sans N+1.
+
+Ajout de `apps/catalog/tests/test_seller_catalog_service.py`: mutation/listing
+autorisé, event, Decimal/null, disponibilité/retrait/restauration, isolation
+inter-boutiques, Product absent/inactif, variantes, prix négatif/NaN, doublon
+et ajout concurrent. Aucune migration n'est nécessaire : les indexes et
+contraintes requis existaient déjà.
+
+Commandes réellement exécutées : `.venv/bin/python -m compileall -q apps`,
+`.venv/bin/python manage.py check`, `git diff --check` et
+`.venv/bin/python manage.py makemigrations --check --dry-run`,
+`.venv/bin/pytest -q apps/catalog/tests/test_seller_catalog_service.py`, ainsi
+qu'un shell Django validant prix Decimal/NaN.
+Compilation, check et diff passent; makemigrations ne détecte aucune migration
+(avec l'avertissement de connexion DB connu). La suite catalogue a été lancée, mais ses
+quatre tests DB échouent avant setup car PostgreSQL/PostGIS `localhost:5432`
+est indisponible. Les limites volontaires sont le parsing LLM conversationnel
+(8.4), UI dashboard, CSV/images et inventaire physique. La façade est prête
+pour 8.4 : le chat devra seulement résoudre l'intention en IDs persistés puis
+l'appeler.
+
+## Phase 8 — Lot 8.4 : Conversational Catalog Management
+
+L'audit a trouvé `AIService`/providers mock, validation JSON Schema,
+`CatalogGroundingService` Phase 5 (`MATCHED`, `AMBIGUOUS`, `UNMATCHED`), le
+contexte Conversation persistant, les actions normalisées WhatsApp/Telegram,
+la façade 8.3 `SellerCatalogService` et `DatasetSanitizer` (suppression PII et
+coordonnées avant persistance evaluation).
+
+Ajout de `SellerCatalogUnderstandingService` avec le schéma strict
+`seller_catalog_command` et les cinq intents LIST, ADD, UPDATE_PRICE,
+SET_AVAILABILITY, REMOVE. Le contrat contient requête produit/variante, prix,
+devise, disponibilité, confiance et champs manquants, mais aucun ID Product,
+Variant, Store ou User. Une réponse IA malformée produit une erreur récupérable
+sans mutation.
+
+`SellerCatalogConversationService` réutilise le grounding Phase 5 : MATCH crée
+une proposition, AMBIGUOUS persiste des candidats backend et affiche les choix
+contrôlés `seller.catalog.select.{index}`, NOT_FOUND ne crée jamais un Product.
+`PendingSellerCatalogMutation`, persisté dans `Conversation.context`, garde
+uniquement action, IDs résolus, prix/devise/disponibilité, version `updated_at`
+attendue et candidats — jamais le prompt complet.
+
+Toute mutation nécessite `seller.catalog.confirm`; `.modify` et `.cancel`
+effacent le draft sans toucher la base. Confirmation verrouille Conversation,
+revalide journey SELL, membership, produit/StoreProduct et version stale, puis
+appelle exclusivement `SellerCatalogService`. Un callback forgé ne peut utiliser
+que les candidats du draft et la façade 8.3 revalide store/membership. Le draft
+est supprimé après succès, rendant les doubles confirmations convergentes.
+ADD/prix exigent un Decimal explicite; SET_AVAILABILITY exige l'enum réel;
+REMOVE devient soft-disable UNAVAILABLE. Une faible confiance ou une intention
+inconnue ne déclenche aucune mutation ni revendication de stock physique.
+
+Le service est channel-agnostic et est appelé par l'orchestrateur. La
+présentation passe par les adapters existants : WhatsApp conserve sa policy de
+fenêtre/template, Telegram ses callbacks. Des logs sans texte brut couvrent
+intent, grounding, proposition, confirmation/annulation et échec AI. Aucun
+exemple n'est automatiquement ajouté aux datasets : l'infrastructure de
+sanitization existe, mais la revue humaine reste obligatoire.
+
+Ajout de `apps/ai/tests/test_seller_catalog_understanding.py`, couvrant contrat
+sans IDs inventés, Decimal et réponse IA invalide. Commandes réellement
+exécutées : tests AI + orchestrateur, compileall, `manage.py check`, diff check.
+Résultat : 4 tests passent; compilation, check et diff passent. Aucune migration
+n'est nécessaire, `Conversation.context` est seulement étendu. Les E2E DB
+(ambiguïté, stale membership, callbacks et pagination) restent à exécuter quand
+PostgreSQL/PostGIS sera disponible. La couche est prête pour 8.5 : le dashboard
+peut appeler la façade 8.3 sans reproduire la logique métier.
+
+## Phase 8 — Lot 8.5 : Seller Dashboard Access & Management API
+
+L'audit a trouvé JWT comme auth DRF principale, sessions Django et middleware
+CSRF déjà installés, CORS par allowlist, throttles DRF anon/user, corrélation
+middleware et audit append-only. Aucun grant/magic link n'existait. Le modèle
+StoreMembership supporte plusieurs boutiques, et les endpoints StoreProduct
+appellent déjà la façade 8.3 après le lot précédent.
+
+Le mécanisme retenu est stateful : `SellerDashboardAccessGrant` persiste user,
+hash SHA-256 du token opaque généré par `secrets.token_urlsafe(32)`, purpose,
+expiration, consommation et révocation. Ce choix permet usage unique,
+révocation et concurrence, contrairement à un lien signed stateless. Le token
+brut n'est jamais stocké ni loggué. Son TTL est configurable par
+`SELLER_DASHBOARD_LINK_TTL_SECONDS` (défaut 600 secondes); l'émission révoque
+les grants actifs précédents du même vendeur.
+
+`SellerDashboardAccessService.issue_access_link()` vérifie une membership
+OWNER/MANAGER locale avant émission. `consume()` verrouille le grant, vérifie
+hash/purpose/expiration/révocation, marque `consumed_at` dans la transaction et
+refuse toute seconde consommation. L'URL de conversation place le token dans le
+fragment `#token=`, non transmis au serveur ni Referer; le frontend doit le
+POSTer immédiatement vers `seller-dashboard/access/consume/`, puis remplacer
+l'historique par une URL propre. La consommation fait un `login()` Django et
+ouvre une session HttpOnly; DRF accepte maintenant JWT puis SessionAuthentication,
+donc les mutations session restent protégées par CSRF. Les settings production
+possédaient déjà cookies Secure et le CORS reste une allowlist, sans désactivation
+globale CSRF.
+
+Le parcours chat reconnaît `seller.dashboard.open` et « espace vendeur » puis
+appelle le service d'accès, jamais le webhook. Les APIs Dashboard ajoutées listent
+les Stores accessibles, détail Store, catalogue et commandes liées aux offres,
+avec validation StoreMembership pour chaque `store_id`. La gestion catalogue web
+réutilise les endpoints StoreProduct existants et `SellerCatalogService` 8.3;
+elle ne crée ni ne modifie StoreProduct directement. Les commandes sont lecture
+seule en attente du lot 8.6.
+
+L'action structurée reste disponible même quand `AI_ENABLED=False` : le
+composition root instancie la couche conversationnelle avec un understander
+inactif qui ne peut produire qu'une intention inconnue. Ainsi les callbacks
+déterministes (dont `seller.dashboard.open`) ne dépendent ni d'un LLM ni d'une
+réponse IA. Les tentatives de consommation d'un grant connu mais expiré, révoqué
+ou déjà consommé produisent aussi un audit `REJECTED`; un token inconnu ne peut
+être associé à une entité et est uniquement journalisé sans valeur secrète.
+
+Audit persistant ajouté via `AuditEvent` pour émission et consommation; logs
+structurés sans raw token couvrent issued/consumed/expired/invalid/denied.
+Les throttles DRF génériques protègent la consommation publique; aucune
+infrastructure de rate limiting distincte n'existait pour l'émission chat.
+
+Migrations ajoutées : `stores.0008_seller_dashboard_access_grant`, ainsi que
+`audit.0002`/`0003` pour les nouveaux types d'audit et leurs contraintes. Tests
+ajoutés dans `apps/stores/tests/test_dashboard_access.py` pour hash, usage unique,
+révocation, absence de membership, expiration et token inconnu. Commandes
+réellement exécutées : compileall, `manage.py check`, makemigrations check,
+diff check, tests AI/orchestrateur et suite dashboard grant. Checks et les 4
+tests AI/orchestrateur passent; makemigrations ne détecte aucun changement (avec
+l'avertissement DB connu). Les 2 tests grant ont été lancés mais échouent avant
+setup car PostgreSQL/PostGIS `localhost:5432` est indisponible.
+
+Limites/risques : le frontend réel doit respecter l'échange fragment→POST→clean
+history et fournir le CSRF token pour les mutations session; des tests E2E de
+session, CSRF, CORS, concurrence et Dashboard API doivent être exécutés avec
+PostgreSQL. Le contrat d'accès et les endpoints read-only commandes sont prêts
+pour le lot 8.6, sans introduire un second backend métier.
+
+## Phase 8 — Lot 8.6 : Store Preparation Workflow
+
+L'audit a confirmé que Phase 3 possède déjà la machine d'état canonique et les
+fonctions `mark_preparing()` et `mark_ready_for_pickup()`. Ce lot utilise
+uniquement `STORE_ACCEPTED → PREPARING → READY_FOR_PICKUP`; aucun statut Driver
+ni matching n'est appelé. La Store gagnante est déterminée depuis la
+`StoreOffer` persistée avec statut `ACCEPTED`, jamais depuis un `store_id` client.
+
+`StorePreparationService` est la façade commune Chat/Dashboard. Dans une courte
+transaction, il verrouille Order et l'offre acceptée, revalide la membership via
+`StoreOfferAuthorizationPolicy`, puis appelle exclusivement les services Orders
+existants. Les répétitions renvoient `ALREADY_PREPARING` ou `ALREADY_READY`, sans
+audit ou événement supplémentaire; les conflits et droits retirés sont refusés.
+L'audit status-change existant conserve actor, Order, états et correlation id;
+les logs structurés ajoutent les mesures started, ready, denied et conflict.
+
+Les action IDs sont `store_order.start_preparation` et
+`store_order.mark_ready`. Ils contournent le LLM et passent par les adapters
+WhatsApp/Telegram existants. Une action conversationnelle ne résout une commande
+que si elle est l'unique commande autorisée dans l'état pertinent. Le Dashboard
+expose les POST `seller-dashboard/orders/<order_id>/start-preparation/` et
+`mark-ready/`, qui appellent ce même service.
+
+`OrderReadyForPickup` est publié via `transaction.on_commit` une seule fois à la
+transition effective READY. Aucun subscriber Driver, DriverOffer ou transition
+au-delà de READY n'est créé. Aucune primitive persistante de notification client
+post-acceptation n'existait; son raccordement post-commit reste à faire sans
+rollback métier. La machine existante permet FAILED/CANCELLED pendant la
+préparation; aucun timeout ou workflow de substitution n'est ajouté.
+
+Ajout de `apps/stores/tests/test_preparation.py` : chemin autorisé, idempotence,
+event unique, ready direct refusé et non-membre. Aucune migration n'est requise.
+Les contrôles statiques et les 4 tests AI/orchestrateur passent. Les 2 tests de
+préparation ont été lancés mais échouent au setup car PostgreSQL/PostGIS
+`localhost:5432` est indisponible. Les tests DB de concurrence, API et adapters
+doivent être exécutés avec PostgreSQL avant clôture. Le contrat READY est prêt
+pour Phase 9 sans démarrer le matching.
+
+## Phase 8 — Lot 8.7 : Integration, Security, Recovery & End-to-End Validation
+
+### Inventaire inspecté
+
+Les lots 8.1 à 8.6 sont réellement présents : journey temporaire dans
+`Conversation.context` (`ActiveJourney`, draft onboarding et mutation catalogue
+en attente), `JourneyRoutingService`, `SellerOnboardingService`,
+`SellerCatalogService`, `SellerCatalogConversationService`, grant Dashboard
+stateful, `StorePreparationService` et `OrderReadyForPickup`. Les nouvelles
+migrations sont `stores.0008` et `audit.0002/0003`; aucune migration 8.6/8.7
+n'est requise. Les contraintes pertinentes trouvées sont l'unicité
+StoreOffer acceptée par Order, StoreOffer(Order, Store), StoreMembership(Store,
+User), le grant hash unique et les index de grant, StoreOffer et catalog déjà
+existants.
+
+Les actions stables sont `journey.select.*`, `seller_onboarding.*`,
+`seller.catalog.*`, `seller.dashboard.open` et `store_order.*`. Les endpoints
+Dashboard sont sous `/api/v1/seller-dashboard/`; les mutations catalogue restent
+les endpoints StoreProduct qui passent par `SellerCatalogService`; préparation
+utilise les endpoints Dashboard dédiés. Les tâches persistantes inspectées ne
+concernent que StoreOffer notifications/réconciliation. Aucun TODO métier 8.x,
+matching Driver, DriverOffer ou subscriber de `OrderReadyForPickup` n'a été
+trouvé.
+
+### Résultats d'audit
+
+Les intentions ambiguës passent par la clarification BUY/SELL/DELIVER et les
+intentions explicites réutilisent l'understanding existant. SELL conserve le
+draft persistant et crée Store, membership OWNER et rôle STORE_OWNER dans une
+transaction; `city` est aussi demandé car le modèle Store l'exige. La location
+native est validée finie/ranges et stockée `Point(longitude, latitude, 4326)`;
+aucun géocodage ou log GPS explicite n'est ajouté. BUY reste dans
+l'orchestrateur client existant; DELIVER retourne le handoff Phase 9 sans créer
+de profil.
+
+Le catalogue Chat fait extraction structurée sans IDs, grounding backend,
+clarification AMBIGUOUS et refus NOT_FOUND; les confirmations passent par la
+façade 8.3. Cette façade impose Product/variant persistés, membership locale,
+Decimal fini/non négatif, currency et enum availability. `None` signifie prix
+non déclaré, jamais gratuit; AVAILABLE reste une disponibilité déclarée, pas un
+stock physique. Les services IA ne font aucune écriture ORM. Les écritures ORM
+trouvées hors façade sont des services historiques de catalogue, matching,
+notifications, infrastructure, fixtures/migrations/tests; les vues vendeur
+passent bien par les façades.
+
+L'accès Dashboard utilise token opaque hashé, TTL configurable, révocation,
+consommation atomique et fragment URL; sessions Django restent protégées par
+CSRF et CORS est une allowlist. Les vues revalident StoreMembership; UUID de
+Store/Order arbitraire ne confère aucun accès. `StorePreparationService` verrouille
+Order + StoreOffer acceptée, réutilise la state machine, est idempotent et publie
+OrderReadyForPickup après commit. Aucune notification/provider externe n'est
+effectuée dans cette transaction. Les callbacks conversationnels sont dédupliqués
+par MessageEvent/contexte persistant et les drafts permettent reprise après
+restart; les scénarios réels DB restent à exécuter.
+
+### Commandes et résultats réels
+
+- `.venv/bin/python -m compileall -q apps config` : succès.
+- `.venv/bin/python manage.py check` : succès.
+- `.venv/bin/python manage.py makemigrations --check --dry-run` : `No changes
+  detected`, avec avertissement de connexion PostgreSQL indisponible.
+- `git diff --check` : succès.
+- `.venv/bin/pytest --collect-only -q` : 364 tests collectés.
+- `.venv/bin/pytest -q apps/ai/tests/test_seller_catalog_understanding.py
+  apps/conversations/tests/test_orchestrator.py` : 4 passed.
+- Suites WhatsApp/Telegram ciblées : 34 passed, 13 errors au setup DB.
+- Suites journey/onboarding/catalog ciblées : 5 passed, 15 errors au setup DB.
+- `apps/stores/tests/test_dashboard_access.py` : 2 errors au setup DB.
+- `apps/stores/tests/test_preparation.py` : 2 errors au setup DB.
+
+Tous les errors listés proviennent de l'absence de PostgreSQL/PostGIS sur
+`localhost:5432`; aucun test concerné n'a atteint son assertion métier. `migrate`
+et la suite complète ne sont donc pas exécutables dans cet environnement.
+
+### Matrice Definition of Done
+
+YES (inspection/contrôles unitaires disponibles) : 1-6, 8-17, 19-24, 30, 34.
+NO non validé par test PostgreSQL réel : 7, 18, 25-29, 31-33, 35. Les NO 18,
+25-29 et 31-33 sont des blockers critiques de clôture car ils couvrent isolation,
+adapters E2E, concurrence, récupération et régression. Le NO 7 est aussi à
+revalider sur persistence réelle. Une dette non critique reste le raccordement
+des notifications client post-commit et un scénario seed E2E documenté/exécutable
+sur base de test.
+
+# Phase 8 Closure
+
+```yaml
+Overall status: BLOCKED
+Critical blockers: PostgreSQL/PostGIS indisponible; E2E, isolation et races non validés
+Non-critical debt: notification client post-commit; seed/demo exécutable
+Tests executed: collect, checks, suites ciblées
+Tests passed: 4 + 34 + 5 (commandes distinctes)
+Tests failed: 0 assertion métier observée
+Tests skipped: 0 rapporté
+Tests blocked: 32 errors de setup PostgreSQL sur les suites citées
+Migrations status: no changes detected, non appliquées ici
+Security status: design inspecté, non validé E2E DB
+Concurrency status: code/locks inspectés, non validés PostgreSQL
+Recovery status: persistence inspectée, non validée E2E DB
+Phase 1-7 regression status: non validée intégralement
+```
+
+Phase 9 must not begin yet.
