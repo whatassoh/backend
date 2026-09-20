@@ -3,8 +3,8 @@ import logging
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.conversations.application.services import ingest_inbound_message
 from apps.conversations.application.flow import process_inbound_conversation
+from apps.conversations.application.services import ingest_inbound_message
 from apps.messaging.domain.enums import (
     MessageDirection,
     MessageStatus,
@@ -37,20 +37,13 @@ def process_whatsapp_webhook(payload: dict) -> dict[str, int]:
             message,
             correlation_id=str(message_event.id),
         )
-        # Existing customer replies are handled by their established delivery path.
-        # This lot needs an immediate interactive presentation only for routing.
-        if (
-            outcome.response.metadata.get("journey_selection")
-            or outcome.response.metadata.get("seller_onboarding")
-            or outcome.response.metadata.get("seller_workspace")
-            or outcome.response.metadata.get("seller_catalog")
-            or outcome.response.metadata.get("driver_onboarding")
-            or outcome.response.metadata.get("driver_profile_ready")
-            or outcome.response.metadata.get("driver_availability")
-            or outcome.response.metadata.get("driver_location")
-        ):
-            from apps.conversations.application.responding import send_response_plan
-            send_response_plan(conversation=inbound.conversation, response=outcome.response, correlation_id=str(message_event.id))
+        from apps.conversations.application.responding import deliver_outcome_response
+
+        deliver_outcome_response(
+            conversation=inbound.conversation,
+            outcome=outcome,
+            correlation_id=str(message_event.id),
+        )
         processed += 1
 
         logger.info(
