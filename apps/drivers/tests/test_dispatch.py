@@ -6,13 +6,22 @@ from django.utils import timezone
 
 from apps.drivers.application.dispatch import DriverMatchingOrchestrator
 from apps.drivers.application.matching import (
-    DriverMatchingResult, DriverMatchingStatus, RankedDriverCandidate,
+    DriverMatchingResult,
+    DriverMatchingStatus,
+    RankedDriverCandidate,
 )
-from apps.drivers.application.offer_notifications import DriverOfferNotificationService
-from apps.drivers.application.offers import DriverOfferService
-from apps.drivers.application.services import activate_driver, create_driver_profile, set_driver_available
+from apps.drivers.application.services import (
+    activate_driver,
+    create_driver_profile,
+    set_driver_available,
+)
 from apps.drivers.domain.enums import DriverMatchingAttemptStatus, DriverOfferStatus
-from apps.drivers.infrastructure.models import DriverAssignment, DriverMatchingAttempt, DriverOffer, DriverOfferNotification
+from apps.drivers.infrastructure.models import (
+    DriverAssignment,
+    DriverOffer,
+    DriverOfferNotification,
+)
+from apps.drivers.tasks import _expire_driver_offer
 from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.enums import MessagingChannel
@@ -104,3 +113,17 @@ def test_no_recipient_cancels_offer_without_calling_provider(monkeypatch):
     app = DriverMatchingOrchestrator(matching_service=Matching([candidate(driver, 1)]))
     app.start_matching(order.id)
     assert DriverOffer.objects.get(order=order).status == DriverOfferStatus.CANCELLED
+
+
+@pytest.mark.django_db
+def test_driver_expiry_uses_deadline_and_duplicate_is_noop(monkeypatch):
+    order, driver = make_order(), make_driver("+237691000006")
+    monkeypatch.setattr("apps.drivers.tasks.deliver_driver_offer_notification.delay", lambda *args: None)
+    DriverMatchingOrchestrator(matching_service=Matching([candidate(driver, 1)])).start_matching(order.id)
+    offer = DriverOffer.objects.get(order=order)
+    offer.expires_at = timezone.now()
+    offer.save(update_fields=["expires_at", "updated_at"])
+    assert _expire_driver_offer(offer.id)["status"] == "EXPIRED"
+    assert _expire_driver_offer(offer.id)["status"] == "NOOP"
+    offer.refresh_from_db()
+    assert offer.status == DriverOfferStatus.EXPIRED

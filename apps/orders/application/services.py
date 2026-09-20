@@ -531,6 +531,7 @@ def cancel_order(
                 "cancellation_reason",
             ],
         )
+        _deactivate_delivery_assignment(locked_order)
         _record_order_audit(
             locked_order,
             event_type=AuditEventType.ORDER_CANCELLED,
@@ -588,6 +589,7 @@ def fail_order(
                 "failed_at",
             ],
         )
+        _deactivate_delivery_assignment(locked_order)
         _record_order_audit(
             locked_order,
             event_type=AuditEventType.ORDER_FAILED,
@@ -801,14 +803,26 @@ def mark_picked_up(
     actor_type: AuditActorType | str = AuditActorType.SYSTEM,
     correlation_id: str | None = None,
 ) -> Order:
-    return _semantic_transition(
-        order,
-        OrderStatus.PICKED_UP,
-        idempotent_from={OrderStatus.PICKED_UP},
-        actor=actor,
-        actor_type=actor_type,
-        correlation_id=correlation_id,
-    )
+    with transaction.atomic():
+        locked_order = _lock_order(order)
+        if locked_order.status == OrderStatus.PICKED_UP:
+            return locked_order
+        ensure_transition_allowed(locked_order.status, OrderStatus.PICKED_UP)
+        previous_state = locked_order.status
+        locked_order.status = OrderStatus.PICKED_UP
+        if locked_order.picked_up_at is None:
+            locked_order.picked_up_at = timezone.now()
+        _save_status(locked_order, ["status", "picked_up_at"])
+        _record_order_audit(
+            locked_order,
+            event_type=AuditEventType.ORDER_STATUS_CHANGED,
+            actor=actor,
+            actor_type=actor_type,
+            previous_state=previous_state,
+            new_state=OrderStatus.PICKED_UP,
+            correlation_id=correlation_id,
+        )
+        return locked_order
 
 
 def mark_in_delivery(
@@ -818,14 +832,28 @@ def mark_in_delivery(
     actor_type: AuditActorType | str = AuditActorType.SYSTEM,
     correlation_id: str | None = None,
 ) -> Order:
-    return _semantic_transition(
-        order,
-        OrderStatus.IN_DELIVERY,
-        idempotent_from={OrderStatus.IN_DELIVERY},
-        actor=actor,
-        actor_type=actor_type,
-        correlation_id=correlation_id,
-    )
+    with transaction.atomic():
+        locked_order = _lock_order(order)
+        if locked_order.status == OrderStatus.IN_DELIVERY:
+            return locked_order
+        ensure_transition_allowed(locked_order.status, OrderStatus.IN_DELIVERY)
+        previous_state = locked_order.status
+        locked_order.status = OrderStatus.IN_DELIVERY
+        if locked_order.delivery_started_at is None:
+            now = timezone.now()
+            # Server time is authoritative; guard against malformed legacy data.
+            locked_order.delivery_started_at = max(now, locked_order.picked_up_at) if locked_order.picked_up_at else now
+        _save_status(locked_order, ["status", "delivery_started_at"])
+        _record_order_audit(
+            locked_order,
+            event_type=AuditEventType.ORDER_STATUS_CHANGED,
+            actor=actor,
+            actor_type=actor_type,
+            previous_state=previous_state,
+            new_state=OrderStatus.IN_DELIVERY,
+            correlation_id=correlation_id,
+        )
+        return locked_order
 
 
 def mark_delivered(
@@ -838,17 +866,23 @@ def mark_delivered(
     with transaction.atomic():
         locked_order = _lock_order(order)
         if locked_order.status == OrderStatus.DELIVERED:
+            _deactivate_delivery_assignment(locked_order)
             return locked_order
 
         ensure_transition_allowed(locked_order.status, OrderStatus.DELIVERED)
         previous_state = locked_order.status
         locked_order.status = OrderStatus.DELIVERED
         update_fields = ["status"]
+        now = timezone.now()
+        if locked_order.delivered_at is None:
+            locked_order.delivered_at = max(now, locked_order.delivery_started_at) if locked_order.delivery_started_at else now
+            update_fields.append("delivered_at")
         if locked_order.completed_at is None:
-            locked_order.completed_at = timezone.now()
+            locked_order.completed_at = locked_order.delivered_at
             update_fields.append("completed_at")
 
         _save_status(locked_order, update_fields)
+        _deactivate_delivery_assignment(locked_order)
         _record_order_audit(
             locked_order,
             event_type=AuditEventType.ORDER_STATUS_CHANGED,
@@ -859,6 +893,20 @@ def mark_delivered(
             correlation_id=correlation_id,
         )
         return locked_order
+
+
+def _deactivate_delivery_assignment(order: Order) -> None:
+    """Close the assignment lifecycle with the terminal Order transition.
+
+    DriverAssignment deliberately has only an operational active flag; Order
+    remains the sole delivery state machine.  The import stays local to avoid
+    coupling the orders domain model module back to drivers at import time.
+    """
+    from apps.drivers.infrastructure.models import DriverAssignment
+
+    DriverAssignment.objects.filter(order_id=order.id, is_active=True).update(
+        is_active=False
+    )
 
 
 def _semantic_transition(

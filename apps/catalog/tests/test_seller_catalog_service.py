@@ -30,7 +30,10 @@ def product(name="Riz"):
 
 
 def owner_for(target_store):
-    actor = user(User.objects.count())
+    # ``count`` is the number of existing users, while the test helper embeds
+    # the supplied number directly in a unique phone value.  Use the next slot;
+    # otherwise a pre-created ``user(1)`` collides when count is also one.
+    actor = user(User.objects.count() + 1)
     add_store_member(target_store, actor, StoreMembershipRole.OWNER)
     return actor
 

@@ -1,3 +1,62 @@
+## Phase 11.1 - Delivery Domain & Assignment Execution Foundation
+
+### Implémenté
+
+- Réutilisation de `Order + DriverAssignment` comme mission physique durable ; aucun modèle `Delivery` créé.
+- Ajout du `DeliveryExecutionService`, qui récupère une mission active depuis PostgreSQL et autorise le chemin `ChannelIdentity → User → DriverProfile → DriverAssignment → Order`.
+- Ajout du DTO channel-neutral et minimisé `DriverMissionDto` (pickup gagnant, destination, instructions et actions stables), sans conversation, téléphone client, payload provider ni donnée IA.
+- Une mission active est un `DriverAssignment.is_active=True` dont l’Order est `DRIVER_ASSIGNED`, `PICKED_UP` ou `IN_DELIVERY`.
+- La contrainte PostgreSQL existante `driver_assignment_one_active_per_driver` reste la protection concurrency-safe de l’unicité ; les transitions terminales existantes (`CANCELLED`, `FAILED`, `DELIVERED`) ferment désormais le flag opérationnel d’assignment dans la même transaction.
+- Les transitions Order Phase 3 (`DRIVER_ASSIGNED → PICKED_UP → IN_DELIVERY → DELIVERED`) et leurs audits restent réutilisées ; ce lot n’expose aucune mutation de livraison et aucun chemin LLM.
+
+### Préparation des lots suivants
+
+- Actions stables : `delivery.confirm_pickup`, `delivery.start_delivery`, `delivery.confirm_delivered`, `delivery.report_issue`.
+- `assigned_at` est `DriverAssignment.created_at`; pickup/start/delivered seront des timestamps métier sur Order ou événements append-only lorsque les mutations seront introduites. `Order.completed_at` existe déjà pour `DELIVERED`.
+- L’événement de domaine `DriverAssigned` est publié après commit lors de la création durable d’un assignment ; aucun doublon `DeliveryMissionAssigned` n’est créé. La notification d’offre Phase 9/10 est conservée, sans envoi supplémentaire ici.
+- Contact client/proxy téléphonique et les règles d’exception après pickup restent à définir dans 11.3/11.6. Les règles actuelles permettent `CANCELLED` seulement depuis `DRIVER_ASSIGNED`, et `DELIVERY_FAILED` depuis les trois états actifs.
+
+## Phase 11.2 - Pickup Workflow & Proof of Pickup
+
+- Ajout de `Order.picked_up_at`, écrit par `mark_picked_up` dans la transition existante et auditée `DRIVER_ASSIGNED → PICKED_UP`.
+- `DeliveryExecutionService.confirm_pickup` verrouille puis réautorise l’Order et l’assignment, vérifie le StoreOffer accepté, est idempotent pour `PICKED_UP`, et ne dépend ni d’un `store_id` entrant ni de `Conversation.context`.
+- La preuve MVP est `AUDIT_AND_TIMESTAMP` : Driver authentifié + audit de transition + timestamp persistant. QR, OTP, photo, signature, géofence et NFC restent hors scope, mais pourront enrichir le contrat ultérieurement.
+- Ajout de l’action structurée channel-neutral `delivery.confirm_pickup` dans le routeur conversationnel WA/TG ; aucune interprétation LLM n’est appelée.
+- `OrderPickedUp` est publié après commit, une seule fois lors de la transition effective. Les intents Phase 10 client et vendeurs actifs sont persistés dans la transaction puis livrés async ; leur échec ne rollback jamais le pickup.
+
+## Phase 11.3 - In-Delivery Workflow & Driver Progress
+
+- Décision : transition `EXPLICIT`. `PICKED_UP` confirme la possession; `IN_DELIVERY` confirme explicitement le départ, conformément aux deux états distincts de la state machine Phase 3.
+- Ajout de `Order.delivery_started_at` et de `DeliveryExecutionService.start_delivery`, qui verrouille, réautorise, utilise `mark_in_delivery`, audite, publie `DeliveryStarted` après commit et persiste une notification client Phase 10 sans ETA.
+- `delivery.start_delivery` est routé de façon structurée et identique pour WhatsApp/Telegram. Après succès, les actions contractuelles `delivery.confirm_delivered` et `delivery.report_issue` sont présentées mais ne mutent rien avant les lots 11.5/11.6.
+- La localisation Driver et les rappels stale Phase 10 sont réutilisés sans transition GPS automatique, sans failure/cancellation/unassignment. Passer OFFLINE retire seulement les nouvelles offres : l’assignment IN_DELIVERY reste active.
+
+## Phase 11.4 - Delivery Location, Driver Location & Customer Tracking Foundation
+
+- Ajout de `DeliveryTrackingService` et `DeliveryTrackingSnapshot`, lecture dérivée depuis `Order`, `DriverAssignment`, StoreOffer gagnante et `DriverProfile.last_location` durable. Redis GEO n’est jamais une source tracking.
+- `order_status` et `location_status` restent deux dimensions distinctes (`FRESH`, `STALE`, `UNAVAILABLE`). Une position stale n’est jamais renvoyée comme position courante.
+- Politique MVP : coordonnées Driver exactes uniquement au client propriétaire, uniquement en `IN_DELIVERY`, uniquement si fraîches et jamais après un état terminal. Le vendeur reçoit l’état opérationnel mais jamais la position live.
+- Aucun historique GPS, ETA, route, geofence, push à chaque point ou transition automatique GPS n’est créé. Les rappels de fraîcheur Phase 10 et le broker `DriverLocationService` restent réutilisés.
+
+## Phase 11.5 - Delivery Completion & Proof of Delivery
+
+- Ajout de `Order.delivered_at` et de `DeliveryExecutionService.confirm_delivered`, qui réutilise exclusivement `mark_delivered`, vérifie l’assignment sous verrou, persiste la clôture et conserve l’historique de `DriverAssignment` en le marquant inactif.
+- Décision evidence : `AUDIT_AND_TIMESTAMP`. Pour le MVP, Driver assigné authentifié + action `delivery.confirm_delivered` + audit de transition + timestamp serveur constituent la preuve; aucun OTP/photo/signature/GPS n’est imposé.
+- Ajout de `OrderDelivered`, publié après commit une fois par transition effective. C’est le hook métier propre pour la future Phase 12, sans implémenter rating/recommendation.
+- Notification client persistante `ORDER_DELIVERED` via Phase 10; aucun provider failure ne rollback `DELIVERED`. Le tracking 11.4 masque déjà la position Driver pour l’état terminal.
+
+## Phase 11.6 - Delivery Exceptions, Failure & Operational Recovery
+
+- Ajout du modèle durable `DeliveryIssue`, séparé de l’état Order, avec types contrôlés, statut `OPEN/RESOLVED/TERMINAL`, note optionnelle et contrainte d’un seul incident ouvert par type/assignment.
+- `report_issue` n’échoue jamais automatiquement une commande; `resolve_issue` conserve l’historique. `confirm_failure` est une action explicite séparée, reliée à un incident ouvert et réutilise `fail_order(..., DELIVERY_FAILED)`.
+- Les incidents sont autorisés sur les missions actives; `PICKUP_PROBLEM` est limité à `DRIVER_ASSIGNED`. Après pickup, aucun rematching automatique n’est déclenché. Les pannes techniques Messaging/Redis/Celery ne créent aucun incident métier.
+
+## Phase 11.7 - Validation status
+
+- Environnement audité : `.venv` Python 3.12/Django 6 et Docker Compose PostGIS/Redis. `manage.py check` et `makemigrations --check --dry-run` passent hors connexion DB; un index DeliveryIssue invalide (>30 caractères PostgreSQL) a été corrigé avant migration.
+- Validation transactionnelle bloquée : `.env` configure `postgres@localhost:5432`/DB `whatassoh`, tandis que le Compose sain expose `whatassoh@localhost:5433`/DB `whatassoh_db`; Django charge cette configuration et les tests ne peuvent établir la connexion.
+- Aucune validation PostgreSQL/PostGIS/Redis, race, E2E, provider ou régression complète n’est revendiquée tant que cette configuration n’est pas alignée et les tests exécutés.
+
 ## Lot 2.1 - Identity
 
 ### Refactor transversal - BaseModel
@@ -3907,4 +3966,27 @@ Recovery status: persistence inspectée, non validée E2E DB
 Phase 1-7 regression status: non validée intégralement
 ```
 
-Phase 9 must not begin yet.
+# Phase 10 — Async Operations Foundation
+
+Phase 10 consolide le travail opérationnel asynchrone sans déplacer la vérité
+métier hors PostgreSQL/PostGIS. Les tasks Celery reçoivent des IDs opaques,
+rechargent l'état et appellent les services applicatifs existants.
+
+- 10.1 : app Celery unique, JSON, corrélation, enqueue post-commit, acks tardifs
+  sur tâches critiques, services worker/Beat de production.
+- 10.2–10.3 : notifications persistantes, attempts append-only, routage canal,
+  retry borné/backoff, taxonomie d'échecs et replay sûr.
+- 10.4 : ETA après commit et sweeps DB batchés pour StoreOffer/DriverOffer.
+- 10.5 : cycles bornés de rappel de localisation Driver; une assignment active
+  n'est jamais annulée ni rematchée à cause d'une position stale.
+- 10.6 : reconciliation Store/Driver/notifications/reminders par services
+  existants, sans mutation directe d'état métier dans les reconcilers.
+
+Le core Phase 10 n'appelle aucun LLM et n'implémente pas les états Phase 11
+`PICKED_UP`, `IN_DELIVERY` ou `DELIVERED`.
+
+Validation locale `.venv` avec PostgreSQL/PostGIS : migrations appliquées,
+`manage.py check` OK et 16 tests Phase 10 ciblés passants. La suite complète
+conserve une collision de fixture catalogue reproductible (téléphone WhatsApp
+dupliqué dans `test_authorization_product_variant_and_price_validation`), sans
+lien avec les changements async Phase 10.

@@ -96,6 +96,10 @@ class DriverLocationService:
                 return DriverLocationResult(status=DriverLocationStatus.OUT_OF_ORDER, redis_indexed=False)
             locked.last_location, locked.last_location_at = point, update.occurred_at
             locked.save(update_fields=["last_location", "last_location_at", "updated_at"])
+            from apps.drivers.application.location_reminders import (
+                DriverLocationReminderService,
+            )
+            DriverLocationReminderService().resolve_for_driver(locked.id)
         try:
             self.geo_index.index(locked)
             indexed = True

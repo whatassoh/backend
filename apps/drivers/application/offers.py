@@ -7,14 +7,23 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.drivers.application.availability import DriverAvailabilityService, DriverMatchability
+from apps.audit.application.services import record_audit_event
+from apps.audit.domain.enums import AuditActorType, AuditEntityType, AuditEventType
+from apps.drivers.application.availability import (
+    DriverAvailabilityService,
+    DriverMatchability,
+)
 from apps.drivers.domain.enums import DriverOfferStatus
-from apps.drivers.infrastructure.models import DriverAssignment, DriverOffer, DriverProfile
+from apps.drivers.domain.events import DriverAssigned
+from apps.drivers.infrastructure.models import (
+    DriverAssignment,
+    DriverOffer,
+    DriverProfile,
+)
 from apps.orders.application.services import assign_driver
 from apps.orders.domain.enums import OrderStatus
 from apps.orders.infrastructure.models import Order
-from apps.audit.application.services import record_audit_event
-from apps.audit.domain.enums import AuditActorType, AuditEntityType, AuditEventType
+from common.events import publish
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +54,9 @@ class DriverOfferService:
                 }
                 created = DriverOffer.objects.create(order=locked_order, driver=locked_driver, rank=rank, strategy_version=strategy_version, candidate_snapshot=snapshot, expires_at=expires_at)
                 record_audit_event(entity_type=AuditEntityType.DRIVER_OFFER, entity_id=created.id, event_type=AuditEventType.DRIVER_OFFER_CREATED, metadata={"order_id": str(order.id), "driver_id": str(driver.id), "rank": rank, "strategy_version": strategy_version})
+                from apps.drivers.tasks import expire_driver_offer
+                from common.deadlines import schedule_deadline
+                schedule_deadline(task=expire_driver_offer, entity_id=created.id, expires_at=created.expires_at, task_name="drivers.expire_driver_offer")
                 return created
             except IntegrityError as exc:
                 raise ValueError("An actionable driver offer already exists.") from exc
@@ -85,6 +97,16 @@ class DriverOfferService:
             locked.save(update_fields=["status", "accepted_at", "updated_at"])
             DriverOffer.objects.filter(order=order, status=DriverOfferStatus.PENDING).exclude(pk=locked.pk).update(status=DriverOfferStatus.CANCELLED, cancelled_at=now)
             assign_driver(order, actor=actor, correlation_id=correlation_id)
+            transaction.on_commit(
+                lambda: publish(
+                    DriverAssigned(
+                        assignment_id=assignment.id,
+                        order_id=order.id,
+                        driver_id=driver.id,
+                        correlation_id=correlation_id,
+                    )
+                )
+            )
             record_audit_event(actor=actor, actor_type=AuditActorType.USER, entity_type=AuditEntityType.DRIVER_OFFER, entity_id=locked.id, event_type=AuditEventType.DRIVER_OFFER_ACCEPTED, previous_state=DriverOfferStatus.PENDING, new_state=DriverOfferStatus.ACCEPTED, metadata={"order_id": str(order.id), "driver_id": str(driver.id), "rank": locked.rank, "strategy_version": locked.strategy_version}, correlation_id=correlation_id)
             logger.info("driver_offer_accepted", extra={"offer_id": str(locked.id), "order_id": str(order.id), "driver_id": str(driver.id), "correlation_id": correlation_id})
             return locked

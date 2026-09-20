@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.utils import timezone
 
 from apps.orders.application.services import mark_store_accepted, mark_store_offered
@@ -28,7 +28,11 @@ class StoreOfferService:
             )
             if created and locked_order.status == OrderStatus.MATCHING_STORES:
                 mark_store_offered(locked_order)
-            return offer
+        if created:
+            from apps.stores.tasks import expire_store_offer
+            from common.deadlines import schedule_deadline
+            schedule_deadline(task=expire_store_offer, entity_id=offer.id, expires_at=offer.expires_at, task_name="stores.expire_store_offer")
+        return offer
 
     def accept_offer(self, offer):
         with transaction.atomic():
@@ -46,7 +50,9 @@ class StoreOfferService:
             mark_store_accepted(order)
             remaining = list(StoreOffer.objects.filter(order=order, status=StoreOfferStatus.PENDING).exclude(pk=locked.pk))
             StoreOffer.objects.filter(pk__in=[item.pk for item in remaining]).update(status=StoreOfferStatus.CANCELLED, cancelled_at=timezone.now())
-            from apps.stores.application.offer_notifications import StoreOfferNotificationService
+            from apps.stores.application.offer_notifications import (
+                StoreOfferNotificationService,
+            )
             notifier = StoreOfferNotificationService()
             for pending_offer in remaining:
                 notifier.cancel_unsent_for_offer(pending_offer)
@@ -78,6 +84,8 @@ class StoreOfferService:
                 locked.rejection_reason = reason
             fields = ["status", timestamp_field, "updated_at"] + (["rejection_reason"] if reason is not None else [])
             locked.save(update_fields=fields)
-            from apps.stores.application.offer_notifications import StoreOfferNotificationService
+            from apps.stores.application.offer_notifications import (
+                StoreOfferNotificationService,
+            )
             StoreOfferNotificationService().cancel_unsent_for_offer(locked)
             return locked

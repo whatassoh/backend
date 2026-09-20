@@ -172,6 +172,9 @@ class ConversationalOrchestrator:
             driver_offer = self._driver_offer_action(conversation, context, action_id, correlation_id)
             if driver_offer is not None:
                 return driver_offer
+            delivery = self._delivery_action(conversation, context, action_id, correlation_id)
+            if delivery is not None:
+                return delivery
             journey = self.journey_routing_service.journey_for_action(action_id)
             if journey:
                 return self._select_journey(conversation, context, journey)
@@ -371,11 +374,100 @@ class ConversationalOrchestrator:
         try:
             if action_id == "driver_offer.accept":
                 DriverMatchingOrchestrator().handle_accept(offer, actor=conversation.user, correlation_id=correlation_id)
-                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Livraison acceptée.", context, metadata={"driver_offer": "ACCEPTED"})
+                from apps.drivers.application.delivery_execution import DeliveryExecutionService
+                mission = DeliveryExecutionService().get_active_mission(conversation.user)
+                return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                    f"Livraison acceptée. Retrait : {mission.pickup.display_name}.", context,
+                    metadata={"driver_offer": "ACCEPTED", "assignment_id": mission.assignment_id},
+                    actions=(ResponseAction(action_id="delivery.confirm_pickup", label="Commande récupérée"),),
+                )
             DriverMatchingOrchestrator().handle_reject(offer, actor=conversation.user, correlation_id=correlation_id)
             return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Proposition refusée.", context, metadata={"driver_offer": "REJECTED"})
         except (ValueError, PermissionError):
             return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+
+    def _delivery_action(self, conversation, context, action_id, correlation_id):
+        issue_actions = {
+            "delivery.issue.customer_unreachable": "CUSTOMER_UNREACHABLE",
+            "delivery.issue.address_problem": "ADDRESS_PROBLEM",
+            "delivery.issue.vehicle_problem": "VEHICLE_PROBLEM",
+            "delivery.issue.other": "OTHER",
+        }
+        if action_id == "delivery.report_issue":
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Quel problème rencontrez-vous ?", context, actions=tuple(
+                ResponseAction(action_id=key, label=label) for key, label in (
+                    ("delivery.issue.customer_unreachable", "Client injoignable"),
+                    ("delivery.issue.address_problem", "Problème d'adresse"),
+                    ("delivery.issue.vehicle_problem", "Problème de véhicule"),
+                    ("delivery.issue.other", "Autre problème"),
+                )
+            ))
+        if action_id in issue_actions:
+            from apps.drivers.application.delivery_execution import DeliveryExecutionService, DeliveryMissionAuthorizationError
+            try:
+                mission = DeliveryExecutionService().get_active_mission(conversation.channel_identity)
+                issue, _ = DeliveryExecutionService().report_issue(conversation.channel_identity, assignment_id=mission.assignment_id, issue_type=issue_actions[action_id], correlation_id=correlation_id)
+            except (DeliveryMissionAuthorizationError, ValueError):
+                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Ce signalement n'est plus disponible.", context)
+            self.context_service.update_context(conversation, replace(context, metadata={**context.metadata, "delivery_issue_id": str(issue.id)}))
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Incident enregistré.", context, actions=(ResponseAction(action_id="delivery.confirm_failure", label="Confirmer l'impossibilité"),))
+        if action_id == "delivery.confirm_failure":
+            issue_id = context.metadata.get("delivery_issue_id")
+            if not issue_id:
+                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Aucun incident à confirmer.", context)
+            from apps.drivers.application.delivery_execution import DeliveryExecutionService, DeliveryMissionAuthorizationError
+            try:
+                mission = DeliveryExecutionService().get_active_mission(conversation.channel_identity)
+                _, duplicate = DeliveryExecutionService().confirm_failure(conversation.channel_identity, assignment_id=mission.assignment_id, issue_id=issue_id, correlation_id=correlation_id)
+            except (DeliveryMissionAuthorizationError, ValueError):
+                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette confirmation n'est plus disponible.", context)
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Échec de livraison déjà confirmé." if duplicate else "Échec de livraison confirmé.", context)
+        if action_id not in {"delivery.confirm_pickup", "delivery.start_delivery", "delivery.confirm_delivered"}:
+            return None
+        from apps.drivers.application.delivery_execution import (
+            DeliveryExecutionService,
+            DeliveryMissionAuthorizationError,
+            DeliveryMissionNotFound,
+        )
+        try:
+            service = DeliveryExecutionService()
+            result = (
+                service.confirm_pickup(conversation.channel_identity, correlation_id=correlation_id)
+                if action_id == "delivery.confirm_pickup"
+                else service.start_delivery(conversation.channel_identity, correlation_id=correlation_id)
+                if action_id == "delivery.start_delivery"
+                else service.confirm_delivered(conversation.channel_identity, correlation_id=correlation_id)
+            )
+        except (DeliveryMissionAuthorizationError, DeliveryMissionNotFound, ValueError):
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette confirmation de retrait n'est plus disponible.", context,
+            )
+        if action_id == "delivery.start_delivery":
+            text = "Livraison déjà en cours." if result.duplicate else "Livraison démarrée."
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED, text, context,
+                metadata={"delivery_start": "DUPLICATE" if result.duplicate else "CONFIRMED"},
+                actions=(
+                    ResponseAction(action_id="delivery.confirm_delivered", label="Commande livrée"),
+                    ResponseAction(action_id="delivery.report_issue", label="Signaler un problème"),
+                ),
+            )
+        if action_id == "delivery.confirm_delivered":
+            text = "Livraison déjà terminée." if result.duplicate else "Livraison terminée."
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED, text, context,
+                metadata={"delivery_completion": "DUPLICATE" if result.duplicate else "CONFIRMED"},
+            )
+        destination = result.mission.destination.address_label or "Destination enregistrée"
+        prefix = "Retrait déjà confirmé." if result.duplicate else "Commande récupérée confirmée."
+        text = f"{prefix}\nDestination : {destination}"
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED, text, context,
+            metadata={"delivery_pickup": "DUPLICATE" if result.duplicate else "CONFIRMED"},
+            actions=(ResponseAction(action_id="delivery.start_delivery", label="Démarrer la livraison"),),
+        )
 
     def _natural_driver_availability(self, conversation, context, text):
         if context.active_journey != ActiveJourney.DELIVER or not text:
@@ -1021,10 +1113,10 @@ class ConversationalOrchestrator:
             requires_followup=True,
         )
 
-    def _outcome(self, status, text, context, metadata=None):
+    def _outcome(self, status, text, context, metadata=None, actions=()):
         return ConversationalOutcome(
             status=status,
-            response=ResponsePlan(text=text),
+            response=ResponsePlan(text=text, actions=actions),
             active_order_id=context.active_order_id,
             metadata=metadata or {},
         )

@@ -1,5 +1,6 @@
 # config/settings/base.py
 
+from datetime import timedelta
 from pathlib import Path
 
 import environ
@@ -365,6 +366,48 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 
 CELERY_TASK_TIME_LIMIT = 5 * 60
+# Persistent Beat schedules live in PostgreSQL; deploy exactly one Beat
+# instance.  No business schedule is introduced by this foundation.
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# ``tasks_reconciliation`` is intentionally separate from delivery tasks;
+# Celery autodiscovery only imports ``tasks`` by convention.
+CELERY_IMPORTS = ("apps.stores.tasks_reconciliation",)
+
+# Shared defaults for tasks that explicitly choose Celery retry.  Tasks do not
+# auto-retry business exceptions.
+CELERY_TASK_RETRY_BACKOFF = env.int("CELERY_TASK_RETRY_BACKOFF", default=30)
+CELERY_TASK_RETRY_BACKOFF_MAX = env.int("CELERY_TASK_RETRY_BACKOFF_MAX", default=900)
+CELERY_TASK_RETRY_JITTER = env.bool("CELERY_TASK_RETRY_JITTER", default=True)
+
+NOTIFICATION_DELIVERY_MAX_ATTEMPTS = env.int("NOTIFICATION_DELIVERY_MAX_ATTEMPTS", default=3)
+NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS = env.int("NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS", default=30)
+NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS = env.int("NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS", default=900)
+NOTIFICATION_DELIVERY_RETRY_JITTER = env.bool("NOTIFICATION_DELIVERY_RETRY_JITTER", default=True)
+
+OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS = env.int("OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS", default=60)
+OFFER_EXPIRY_SWEEP_BATCH_SIZE = env.int("OFFER_EXPIRY_SWEEP_BATCH_SIZE", default=100)
+DRIVER_LOCATION_REMINDER_INTERVAL_SECONDS = env.int("DRIVER_LOCATION_REMINDER_INTERVAL_SECONDS", default=900)
+DRIVER_LOCATION_REMINDER_MAX_ATTEMPTS = env.int("DRIVER_LOCATION_REMINDER_MAX_ATTEMPTS", default=3)
+DRIVER_LOCATION_REMINDER_SWEEP_BATCH_SIZE = env.int("DRIVER_LOCATION_REMINDER_SWEEP_BATCH_SIZE", default=100)
+WORKFLOW_RECONCILIATION_BATCH_SIZE = env.int("WORKFLOW_RECONCILIATION_BATCH_SIZE", default=100)
+NOTIFICATION_PROCESSING_LEASE_SECONDS = env.int("NOTIFICATION_PROCESSING_LEASE_SECONDS", default=900)
+CELERY_BEAT_SCHEDULE = {
+    "stores-sweep-expired-offers": {
+        "task": "stores.sweep_expired_store_offers",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "drivers-sweep-expired-offers": {
+        "task": "drivers.sweep_expired_driver_offers",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "drivers-sweep-location-reminders": {
+        "task": "drivers.sweep_location_reminders",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "stores-reconcile-matching": {"task": "stores.reconcile_store_matching", "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS)},
+    "drivers-reconcile-matching": {"task": "drivers.reconcile_driver_matching", "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS)},
+    "messaging-reconcile-notifications": {"task": "messaging.reconcile_operational_notifications", "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS)},
+}
 
 # Store-offer notifications are delivery concerns, distinct from StoreOffer.
 STORE_OFFER_NOTIFICATION_MAX_ATTEMPTS = env.int("STORE_OFFER_NOTIFICATION_MAX_ATTEMPTS", default=3)
