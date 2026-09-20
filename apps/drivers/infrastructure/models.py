@@ -4,11 +4,13 @@ from django.db import models
 
 from apps.drivers.domain.enums import (
     DriverAvailability,
-    DriverStatus,
-    VehicleType,
-    DriverOfferStatus,
     DriverMatchingAttemptStatus,
     DriverOfferNotificationStatus,
+    DriverOfferStatus,
+    DeliveryIssueStatus,
+    DeliveryIssueType,
+    DriverStatus,
+    VehicleType,
 )
 from apps.drivers.domain.rules import (
     validate_driver_state,
@@ -130,6 +132,36 @@ class DriverAssignment(BaseModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["driver"], condition=models.Q(is_active=True), name="driver_assignment_one_active_per_driver")]
+
+
+class DeliveryIssue(BaseModel):
+    """Persistent business incident; it never changes Order state by itself."""
+    order = models.ForeignKey("orders.Order", on_delete=models.CASCADE, related_name="delivery_issues")
+    assignment = models.ForeignKey(DriverAssignment, on_delete=models.PROTECT, related_name="issues")
+    reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="reported_delivery_issues")
+    issue_type = models.CharField(max_length=40, choices=DeliveryIssueType.choices)
+    status = models.CharField(max_length=20, choices=DeliveryIssueStatus.choices, default=DeliveryIssueStatus.OPEN)
+    note = models.TextField(blank=True, null=True)
+    resolved_at = models.DateTimeField(blank=True, null=True)
+    resolution = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["order", "status"], name="drv_issue_order_status_idx")]
+        constraints = [models.UniqueConstraint(fields=["assignment", "issue_type"], condition=models.Q(status=DeliveryIssueStatus.OPEN), name="delivery_issue_one_open_type")]
+
+
+class DriverLocationReminder(BaseModel):
+    driver = models.ForeignKey(DriverProfile, on_delete=models.CASCADE, related_name="location_reminders")
+    reason = models.CharField(max_length=40)
+    cycle_id = models.UUIDField()
+    reminder_count = models.PositiveIntegerField(default=0)
+    last_reminded_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    exhausted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["driver", "resolved_at", "updated_at"], name="driver_loc_reminder_idx")]
+        constraints = [models.UniqueConstraint(fields=["driver"], condition=models.Q(resolved_at__isnull=True, exhausted_at__isnull=True), name="driver_one_active_loc_reminder")]
 
 
 class DriverMatchingAttempt(BaseModel):

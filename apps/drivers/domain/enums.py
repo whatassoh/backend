@@ -44,3 +44,18 @@ class DriverOfferNotificationStatus(models.TextChoices):
     FAILED_RETRYABLE = "FAILED_RETRYABLE", "Failed retryable"
     FAILED_PERMANENT = "FAILED_PERMANENT", "Failed permanent"
     CANCELLED = "CANCELLED", "Cancelled"
+
+
+class DeliveryIssueType(models.TextChoices):
+    CUSTOMER_UNREACHABLE = "CUSTOMER_UNREACHABLE", "Customer unreachable"
+    ADDRESS_PROBLEM = "ADDRESS_PROBLEM", "Address problem"
+    PICKUP_PROBLEM = "PICKUP_PROBLEM", "Pickup problem"
+    VEHICLE_PROBLEM = "VEHICLE_PROBLEM", "Vehicle problem"
+    DELIVERY_IMPOSSIBLE = "DELIVERY_IMPOSSIBLE", "Delivery impossible"
+    OTHER = "OTHER", "Other"
+
+
+class DeliveryIssueStatus(models.TextChoices):
+    OPEN = "OPEN", "Open"
+    RESOLVED = "RESOLVED", "Resolved"
+    TERMINAL = "TERMINAL", "Terminal"

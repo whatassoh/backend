@@ -5,38 +5,45 @@ failed outbound message is therefore observable and retryable without looking
 like a store rejection.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
-import logging
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import Q
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from apps.conversations.application.services import get_or_create_active_conversation
-from apps.messaging.application.orchestration import send_conversation_text
 from apps.messaging.domain.enums import MessagingChannel
 from apps.messaging.domain.exceptions import (
-    MessagingAuthenticationError, MessagingConfigurationError, MessagingError,
-    MessagingPermanentError, MessagingRateLimitError, MessagingTemporaryError,
+    MessagingAuthenticationError,
+    MessagingConfigurationError,
+    MessagingError,
+    MessagingPermanentError,
+    MessagingRateLimitError,
+    MessagingTemporaryError,
 )
 from apps.stores.application.offer_actions import StoreRecipientResolver, present_offer
 from apps.stores.domain.enums import (
-    StoreOfferNotificationAttemptStatus, StoreOfferNotificationStatus,
+    StoreOfferNotificationAttemptStatus,
+    StoreOfferNotificationStatus,
     StoreOfferStatus,
 )
 from apps.stores.infrastructure.models import (
-    StoreOffer, StoreOfferNotification, StoreOfferNotificationAttempt,
+    StoreOffer,
+    StoreOfferNotification,
+    StoreOfferNotificationAttempt,
 )
 from apps.whatsapp.domain.enums import WhatsAppOutboundDecision, WhatsAppTemplateKey
 from apps.whatsapp.domain.exceptions import (
-    WhatsAppTemplateConfigurationError, WhatsAppTemplateRequired,
+    WhatsAppTemplateConfigurationError,
+    WhatsAppTemplateRequired,
     WhatsAppTemplateValidationError,
 )
 from apps.whatsapp.domain.outbound_policy import WhatsAppOutboundPolicy
+from common.async_tasks import enqueue_after_commit
 
 logger = logging.getLogger(__name__)
 
@@ -146,20 +153,16 @@ class StoreOfferNotificationService:
             # The task is queued only once the persistent intent is committed;
             # a broker restart can later be repaired from this row.
             if notification.status == StoreOfferNotificationStatus.PENDING:
-                transaction.on_commit(self._enqueue(notification.id, correlation_id))
+                self._enqueue(notification.id, correlation_id)
         return tuple(notifications)
 
     @staticmethod
     def _enqueue(notification_id, correlation_id):
-        def callback():
+        def enqueue():
             from apps.stores.tasks import deliver_store_offer_notification
-            try:
-                deliver_store_offer_notification.delay(str(notification_id), correlation_id)
-            except Exception:
-                # The committed PENDING row is the recovery source of truth;
-                # broker enqueue failure must not undo the business transaction.
-                logger.exception("store_offer_notification_enqueue_failed", extra={"notification_id": str(notification_id)})
-        return callback
+            deliver_store_offer_notification.delay(str(notification_id), correlation_id)
+        enqueue_after_commit(enqueue, task_name="stores.deliver_store_offer_notification",
+                             entity_id=str(notification_id), correlation_id=correlation_id)
 
     def cancel_unsent_for_offer(self, offer: StoreOffer) -> int:
         return StoreOfferNotification.objects.filter(

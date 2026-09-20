@@ -28,6 +28,38 @@ services:
       redis:
         condition: service_healthy
 
+  worker:
+    image: ${WEB_IMAGE}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    command: celery -A config worker --loglevel=INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Run exactly one replica: django-celery-beat persists schedules in Postgres
+  # but does not coordinate multiple simultaneous schedulers.
+  beat:
+    image: ${WEB_IMAGE}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    command: celery -A config beat --loglevel=INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: postgis/postgis:17-3.5
 

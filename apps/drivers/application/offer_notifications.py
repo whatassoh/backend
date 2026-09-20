@@ -1,11 +1,11 @@
 """Persistent notification intent for one DriverOffer; provider delivery is outer work."""
 from dataclasses import dataclass
-from django.db import transaction
-from django.utils import timezone
+
 from apps.conversations.application.services import get_or_create_active_conversation
 from apps.drivers.domain.enums import DriverOfferNotificationStatus, DriverOfferStatus
 from apps.drivers.infrastructure.models import DriverOfferNotification
 from apps.messaging.infrastructure.models import ChannelIdentity
+from common.async_tasks import enqueue_after_commit
 
 
 class DriverRecipientResolver:
@@ -37,12 +37,16 @@ class DriverOfferNotificationService:
         key = f"driver-offer:{offer.id}:identity:{identity.id}"
         notification, _ = DriverOfferNotification.objects.get_or_create(idempotency_key=key, defaults={"offer": offer, "recipient": offer.driver.user, "channel_identity": identity, "conversation": conversation, "channel": identity.channel, "presentation_snapshot": snapshot})
         if notification.status in (DriverOfferNotificationStatus.PENDING, DriverOfferNotificationStatus.FAILED_RETRYABLE):
-            transaction.on_commit(lambda: self.enqueue(notification.id, correlation_id))
+            self.enqueue(notification.id, correlation_id)
         return notification
     def enqueue(self, notification_id, correlation_id=None):
         from apps.drivers.tasks import deliver_driver_offer_notification
-        try: deliver_driver_offer_notification.delay(str(notification_id), correlation_id)
-        except Exception: pass
+        enqueue_after_commit(
+            lambda: deliver_driver_offer_notification.delay(str(notification_id), correlation_id),
+            task_name="drivers.deliver_driver_offer_notification",
+            entity_id=str(notification_id),
+            correlation_id=correlation_id,
+        )
     @staticmethod
     def _snapshot(offer):
         store = offer.order.store_offers.filter(status="ACCEPTED").select_related("store").first()

@@ -6,6 +6,9 @@ from apps.messaging.domain.enums import (
     MessageStatus,
     MessageType,
     MessagingChannel,
+    NotificationAttemptOutcome,
+    NotificationKind,
+    NotificationStatus,
 )
 from common.models import BaseModel
 
@@ -100,3 +103,48 @@ class MessageEvent(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.channel}:{self.direction}:{self.external_message_id or self.id}"
+
+
+class OperationalNotification(BaseModel):
+    """A DB-backed operational delivery intent, never a business transition."""
+
+    kind = models.CharField(max_length=50, choices=NotificationKind.choices)
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    channel_identity = models.ForeignKey(ChannelIdentity, on_delete=models.PROTECT)
+    conversation = models.ForeignKey(
+        "conversations.Conversation", on_delete=models.SET_NULL, null=True, blank=True
+    )
+    channel = models.CharField(max_length=20, choices=MessagingChannel.choices)
+    business_entity_type = models.CharField(max_length=80)
+    business_entity_id = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=30, choices=NotificationStatus.choices, default=NotificationStatus.PENDING)
+    idempotency_key = models.CharField(max_length=180, unique=True)
+    correlation_id = models.CharField(max_length=100, blank=True, null=True)
+    delivered_at = models.DateTimeField(blank=True, null=True)
+    failed_at = models.DateTimeField(blank=True, null=True)
+    next_retry_at = models.DateTimeField(blank=True, null=True)
+    last_error_category = models.CharField(max_length=40, blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "created_at"], name="msg_notif_status_idx"),
+            models.Index(fields=["business_entity_type", "business_entity_id"], name="msg_notif_business_idx"),
+        ]
+
+
+class OperationalNotificationAttempt(BaseModel):
+    notification = models.ForeignKey(OperationalNotification, on_delete=models.CASCADE, related_name="attempts")
+    attempt_number = models.PositiveIntegerField()
+    channel = models.CharField(max_length=20, choices=MessagingChannel.choices)
+    provider = models.CharField(max_length=40)
+    outcome = models.CharField(max_length=20, choices=NotificationAttemptOutcome.choices, default=NotificationAttemptOutcome.STARTED)
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    provider_message_id = models.CharField(max_length=255, blank=True, null=True)
+    error_category = models.CharField(max_length=40, blank=True, null=True)
+    retry_after_seconds = models.PositiveIntegerField(blank=True, null=True)
+    message_event = models.ForeignKey(MessageEvent, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["notification", "attempt_number"], name="msg_notif_attempt_number_unique")]
