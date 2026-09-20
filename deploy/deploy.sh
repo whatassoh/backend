@@ -470,6 +470,35 @@ restore_nginx() {
 # n'est supprimé.
 # ----------------------------------------------------------
 
+
+# Supprime uniquement les anciens conteneurs runtime WHATASSOH.
+# Nécessaire avec docker-compose 1.29.2 + Docker récent afin
+# d'éviter l'erreur KeyError: 'ContainerConfig' lors d'un recreate.
+# Aucun volume, réseau, PostgreSQL ou Redis n'est supprimé.
+remove_whatassoh_runtime_containers() {
+    remove_whatassoh_web_containers
+
+    local service ids cid
+
+    for service in worker beat; do
+        ids="$(
+            docker ps -aq \
+                --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
+                --filter "label=com.docker.compose.service=${service}" \
+                2>/dev/null || true
+        )"
+
+        [[ -n "$ids" ]] || continue
+
+        log "Suppression de l'ancien conteneur ${service} whatassoh uniquement"
+
+        while IFS= read -r cid; do
+            [[ -n "$cid" ]] || continue
+            docker rm -f "$cid"
+        done <<< "$ids"
+    done
+}
+
 remove_whatassoh_web_containers() {
 
     local ids
@@ -519,7 +548,7 @@ rollback_web() {
         "$OLD_WEB_IMAGE"
 
 
-    remove_whatassoh_web_containers
+    remove_whatassoh_runtime_containers
 
     "${COMPOSE[@]}" up \
         -d \
@@ -1232,7 +1261,7 @@ log "collectstatic"
 log "Démarrage du nouveau web"
 
 
-remove_whatassoh_web_containers
+remove_whatassoh_runtime_containers
 
 "${COMPOSE[@]}" up \
     -d \
