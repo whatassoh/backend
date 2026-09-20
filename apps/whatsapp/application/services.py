@@ -32,11 +32,25 @@ def process_whatsapp_webhook(payload: dict) -> dict[str, int]:
             message_event.status = MessageStatus.PROCESSED
             message_event.processed_at = timezone.now()
             message_event.save(update_fields=["status", "processed_at", "updated_at"])
-        process_inbound_conversation(
+        outcome = process_inbound_conversation(
             inbound.conversation,
             message,
             correlation_id=str(message_event.id),
         )
+        # Existing customer replies are handled by their established delivery path.
+        # This lot needs an immediate interactive presentation only for routing.
+        if (
+            outcome.response.metadata.get("journey_selection")
+            or outcome.response.metadata.get("seller_onboarding")
+            or outcome.response.metadata.get("seller_workspace")
+            or outcome.response.metadata.get("seller_catalog")
+            or outcome.response.metadata.get("driver_onboarding")
+            or outcome.response.metadata.get("driver_profile_ready")
+            or outcome.response.metadata.get("driver_availability")
+            or outcome.response.metadata.get("driver_location")
+        ):
+            from apps.conversations.application.responding import send_response_plan
+            send_response_plan(conversation=inbound.conversation, response=outcome.response, correlation_id=str(message_event.id))
         processed += 1
 
         logger.info(

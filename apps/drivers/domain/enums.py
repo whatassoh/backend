@@ -19,3 +19,28 @@ class VehicleType(models.TextChoices):
     CAR = "CAR", "Car"
     VAN = "VAN", "Van"
     OTHER = "OTHER", "Other"
+
+
+class DriverOfferStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    ACCEPTED = "ACCEPTED", "Accepted"
+    REJECTED = "REJECTED", "Rejected"
+    EXPIRED = "EXPIRED", "Expired"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class DriverMatchingAttemptStatus(models.TextChoices):
+    RUNNING = "RUNNING", "Running"
+    SUCCEEDED = "SUCCEEDED", "Succeeded"
+    EXHAUSTED = "EXHAUSTED", "Exhausted"
+    CANCELLED = "CANCELLED", "Cancelled"
+    FAILED_TECHNICAL = "FAILED_TECHNICAL", "Failed technical"
+
+
+class DriverOfferNotificationStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    SENDING = "SENDING", "Sending"
+    SENT = "SENT", "Sent"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE", "Failed retryable"
+    FAILED_PERMANENT = "FAILED_PERMANENT", "Failed permanent"
+    CANCELLED = "CANCELLED", "Cancelled"

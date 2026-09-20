@@ -35,3 +35,12 @@ class OrderRetryRequested(DomainEvent):
     order_id: uuid.UUID
     failure_code: str
     retry_target_status: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class OrderReadyForPickup(DomainEvent):
+    """Boundary event for Phase 9; it deliberately does not start matching."""
+
+    order_id: uuid.UUID
+    store_id: uuid.UUID
+    customer_id: uuid.UUID

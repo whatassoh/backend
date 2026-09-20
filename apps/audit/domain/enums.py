@@ -12,9 +12,15 @@ class AuditEntityType(models.TextChoices):
     STORE_OFFER = "STORE_OFFER", "Store offer"
     DRIVER_OFFER = "DRIVER_OFFER", "Driver offer"
     DELIVERY = "DELIVERY", "Delivery"
+    SELLER_DASHBOARD_ACCESS = "SELLER_DASHBOARD_ACCESS", "Seller dashboard access"
 
 
 class AuditEventType(models.TextChoices):
+    DRIVER_OFFER_CREATED = "DRIVER_OFFER_CREATED", "Driver offer created"
+    DRIVER_OFFER_ACCEPTED = "DRIVER_OFFER_ACCEPTED", "Driver offer accepted"
+    DRIVER_OFFER_REJECTED = "DRIVER_OFFER_REJECTED", "Driver offer rejected"
+    DRIVER_OFFER_EXPIRED = "DRIVER_OFFER_EXPIRED", "Driver offer expired"
+    DRIVER_OFFER_CANCELLED = "DRIVER_OFFER_CANCELLED", "Driver offer cancelled"
     ORDER_CREATED = "ORDER_CREATED", "Order created"
     ORDER_ITEM_ADDED = "ORDER_ITEM_ADDED", "Order item added"
     ORDER_ITEM_UPDATED = "ORDER_ITEM_UPDATED", "Order item updated"
@@ -32,3 +38,6 @@ class AuditEventType(models.TextChoices):
     ORDER_FAILED = "ORDER_FAILED", "Order failed"
     ORDER_RETRY_REQUESTED = "ORDER_RETRY_REQUESTED", "Order retry requested"
     ORDER_STATUS_CHANGED = "ORDER_STATUS_CHANGED", "Order status changed"
+    SELLER_DASHBOARD_ACCESS_ISSUED = "SELLER_DASHBOARD_ACCESS_ISSUED", "Seller dashboard access issued"
+    SELLER_DASHBOARD_ACCESS_CONSUMED = "SELLER_DASHBOARD_ACCESS_CONSUMED", "Seller dashboard access consumed"
+    SELLER_DASHBOARD_ACCESS_REJECTED = "SELLER_DASHBOARD_ACCESS_REJECTED", "Seller dashboard access rejected"

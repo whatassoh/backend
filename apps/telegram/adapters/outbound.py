@@ -48,4 +48,15 @@ def outbound_message_to_method_and_payload(
                 location=message.location,
             ),
         )
+    if message.message_type == MessageType.INTERACTIVE and message.text:
+        actions = message.metadata.get("actions", [])
+        return (
+            "sendMessage",
+            {
+                **build_text_payload(chat_id=message.recipient_external_id, text=message.text),
+                "reply_markup": {
+                    "inline_keyboard": [[{"text": item["label"], "callback_data": item["id"]}] for item in actions]
+                },
+            },
+        )
     raise ValueError("Unsupported Telegram outbound message.")
