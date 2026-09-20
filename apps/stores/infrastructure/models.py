@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
 from django.db import models
+from django.utils import timezone
 
 from apps.stores.domain.enums import (
     StoreMembershipRole,
@@ -92,6 +93,30 @@ class StoreMembership(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.store.name} - {self.user} - {self.role}"
+
+
+class SellerDashboardAccessGrant(BaseModel):
+    """Opaque, single-use dashboard-link state; raw tokens are never stored."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="seller_dashboard_access_grants",
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    purpose = models.CharField(max_length=40, default="SELLER_DASHBOARD")
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(blank=True, null=True)
+    revoked_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "purpose", "expires_at"], name="store_dash_grant_user_idx"),
+            models.Index(fields=["expires_at"], name="store_dash_grant_exp_idx"),
+        ]
+
+    @property
+    def is_usable(self):
+        return not self.consumed_at and not self.revoked_at and self.expires_at > timezone.now()
 
 
 class StoreOffer(BaseModel):

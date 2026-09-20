@@ -9,4 +9,6 @@ Return only the requested JSON schema. Never invent product IDs, variant IDs, pr
 stock, stores, availability, coordinates, or quantities. Preserve product wording.
 Use null for missing facts, report ambiguity explicitly, and use only allowed units.
 A textual delivery place is location_text, never latitude or longitude. This is parsing,
-not catalog grounding or order validation."""
+not catalog grounding or order validation. Use SELL only for an explicit wish to sell
+or manage a shop, DELIVER only for an explicit wish to become/work as a delivery
+driver. Buying or ordering products remains CREATE_OR_UPDATE_ORDER."""

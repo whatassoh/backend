@@ -9,11 +9,10 @@ from apps.drivers.application.services import (
     activate_driver,
     create_driver_profile,
     deactivate_driver,
-    set_driver_available,
     set_driver_busy,
-    set_driver_offline,
     suspend_driver,
 )
+from apps.drivers.application.availability import DriverAvailabilityService
 from apps.drivers.infrastructure.models import DriverProfile
 
 
@@ -56,13 +55,13 @@ class DriverProfileViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="go-online")
     def go_online(self, request, pk=None):
-        driver = set_driver_available(self.get_object())
+        driver = DriverAvailabilityService().set_available(self.get_object(), request.user)
 
         return Response(self.get_serializer(driver).data)
 
     @action(detail=True, methods=["post"], url_path="go-offline")
     def go_offline(self, request, pk=None):
-        driver = set_driver_offline(self.get_object())
+        driver = DriverAvailabilityService().set_offline(self.get_object(), request.user)
 
         return Response(self.get_serializer(driver).data)
 

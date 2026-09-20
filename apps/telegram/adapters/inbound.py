@@ -62,6 +62,7 @@ def _parse_message(
             location = MessageLocation(
                 latitude=float(location_payload["latitude"]),
                 longitude=float(location_payload["longitude"]),
+                accuracy_meters=(float(location_payload["horizontal_accuracy"]) if location_payload.get("horizontal_accuracy") is not None else None),
             )
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise TelegramInvalidPayloadError(
@@ -123,6 +124,7 @@ def _parse_callback_query(
         message_type=MessageType.INTERACTIVE,
         raw_payload=callback_query,
         metadata={
+            "action_id": callback_query.get("data"),
             "telegram": {
                 "update_id": update_id,
                 "update_type": "callback_query",

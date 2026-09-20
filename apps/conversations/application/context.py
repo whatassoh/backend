@@ -53,6 +53,11 @@ class ConversationContextService:
     ) -> Conversation:
         return self._mutate(conversation, lambda context: replace(context, flow=flow))
 
+    def set_active_journey(self, conversation: Conversation, journey) -> Conversation:
+        return self._mutate(
+            conversation, lambda context: replace(context, active_journey=journey)
+        )
+
     def set_pending_clarification(
         self,
         conversation: Conversation,
