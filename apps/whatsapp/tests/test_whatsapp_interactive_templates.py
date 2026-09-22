@@ -201,6 +201,7 @@ def test_parse_interactive_button_reply_normalizes_action_id():
     message = parse_whatsapp_webhook(payload)[0]
 
     assert message.message_type == MessageType.INTERACTIVE
+    assert message.metadata["action_id"] == "order.confirm"
     assert message.metadata["whatsapp"]["interaction_type"] == "button_reply"
     assert message.metadata["whatsapp"]["action_id"] == "order.confirm"
 
