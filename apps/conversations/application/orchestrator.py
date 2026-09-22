@@ -757,6 +757,62 @@ class ConversationalOrchestrator:
         return self._outcome(ConversationalOutcomeStatus.PROCESSED, text, context, metadata={"driver_location": True, "matchability": matchability.status.value})
 
     def _handle_action(self, conversation, context, action_id, correlation_id, metadata):
+        if action_id == "order.accept_partial_store_coverage":
+            from apps.stores.application.partial_coverage import PartialCoverageConsentService
+            proposal_id = metadata.get("partial_coverage_proposal_id")
+            try:
+                from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+                proposal = PartialStoreCoverageProposal.objects.filter(pk=proposal_id).first()
+                if proposal is None:
+                    raise ValueError("stale")
+                order, replay = PartialCoverageConsentService().accept(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+            except (ValueError, PermissionError):
+                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Votre commande a été ajustée et nous recherchons à nouveau une boutique.", context)
+        if action_id == "order.status":
+            from apps.orders.infrastructure.models import Order
+            from apps.orders.domain.enums import OrderStatus
+            order = Order.objects.filter(customer=conversation.user).exclude(status__in=[OrderStatus.DRAFT, OrderStatus.AWAITING_LOCATION]).order_by("-created_at").first()
+            messages = {
+                OrderStatus.CONFIRMED: "Votre demande est confirmée. Nous lançons la recherche d'une boutique.",
+                OrderStatus.MATCHING_STORES: "Nous recherchons une boutique pour votre commande.",
+                OrderStatus.AWAITING_PARTIAL_COVERAGE: "Nous attendons votre décision sur les produits disponibles.",
+                OrderStatus.STORE_OFFERED: "Une boutique est en cours de consultation.",
+                OrderStatus.STORE_ACCEPTED: "Une boutique a accepté votre commande. Elle va être préparée.",
+                OrderStatus.PREPARING: "Votre commande est en préparation.",
+                OrderStatus.READY_FOR_PICKUP: "Votre commande est prête. Nous recherchons un livreur.",
+                OrderStatus.MATCHING_DRIVERS: "Nous recherchons un livreur.",
+                OrderStatus.DRIVER_ASSIGNED: "Un livreur a été assigné à votre commande.",
+                OrderStatus.PICKED_UP: "Votre commande a été récupérée par le livreur.",
+                OrderStatus.IN_DELIVERY: "Votre commande est en route.",
+                OrderStatus.DELIVERED: "Votre commande a été livrée.",
+                OrderStatus.CANCELLED: "Votre commande est annulée.",
+                OrderStatus.FAILED: "Votre commande ne peut pas être traitée pour le moment.",
+            }
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, messages.get(order.status, "Aucune commande en cours.") if order else "Aucune commande en cours.", context)
+        if action_id == "order.modify":
+            # A partial proposal has no active draft context after confirmation;
+            # restore the existing editing flow, never a second editor.
+            from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+            proposal = PartialStoreCoverageProposal.objects.filter(order__customer=conversation.user, status="PENDING").select_related("order").first()
+            if proposal and proposal.order.status == "AWAITING_PARTIAL_COVERAGE":
+                from apps.stores.application.partial_coverage import PartialCoverageConsentService
+                try:
+                    order = PartialCoverageConsentService().return_to_editing(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+                    self.active_order_service.attach_order(conversation, str(order.id), correlation_id=correlation_id)
+                except ValueError:
+                    return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Que souhaitez-vous modifier dans votre commande ?", context)
+        if action_id == "order.cancel":
+            from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+            proposal = PartialStoreCoverageProposal.objects.filter(order__customer=conversation.user, status="PENDING").select_related("order").first()
+            if proposal and proposal.order.status == "AWAITING_PARTIAL_COVERAGE":
+                from apps.stores.application.partial_coverage import PartialCoverageConsentService
+                try:
+                    PartialCoverageConsentService().cancel(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+                except ValueError:
+                    return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Votre commande est annulée.", context)
         if action_id in {"store_order.start_preparation", "store_order.mark_ready"}:
             target = "PREPARING" if action_id == "store_order.start_preparation" else "READY_FOR_PICKUP"
             order_id = self.store_preparation_service.available_order_for(
@@ -927,7 +983,10 @@ class ConversationalOrchestrator:
         self.context_service.clear_context(conversation)
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
-            response=ResponsePlan(text="Votre commande est confirmée."),
+            response=ResponsePlan(
+                text="Demande confirmée ✅\nNous recherchons maintenant une boutique capable de fournir votre commande. Je vous tiendrai informé ici.",
+                actions=(ResponseAction(action_id="order.status", label="Suivre ma commande"),),
+            ),
             actions_performed=("order_confirmed",),
             active_order_id=str(order.id),
         )

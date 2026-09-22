@@ -67,7 +67,7 @@ class OrderReviewService:
         if any(item.resolution_status == OrderItemResolutionStatus.AMBIGUOUS for item in items):
             blockers.append("ambiguous_item")
         if any(item.resolution_status == OrderItemResolutionStatus.UNMATCHED for item in items):
-            warnings.append("unmatched_items")
+            blockers.append("unmatched_items")
         readiness = OrderConfirmationReadiness(
             ready=not blockers,
             blocking_issues=tuple(blockers),

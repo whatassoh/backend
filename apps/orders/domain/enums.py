@@ -6,6 +6,7 @@ class OrderStatus(models.TextChoices):
     AWAITING_LOCATION = "AWAITING_LOCATION", "Awaiting location"
     CONFIRMED = "CONFIRMED", "Confirmed"
     MATCHING_STORES = "MATCHING_STORES", "Matching stores"
+    AWAITING_PARTIAL_COVERAGE = "AWAITING_PARTIAL_COVERAGE", "Awaiting partial coverage decision"
     STORE_OFFERED = "STORE_OFFERED", "Store offered"
     STORE_ACCEPTED = "STORE_ACCEPTED", "Store accepted"
     PREPARING = "PREPARING", "Preparing"

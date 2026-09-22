@@ -1,6 +1,7 @@
 import pytest
 from django.contrib.gis.geos import Point
 
+from apps.catalog.application.services import create_category, create_product
 from apps.catalog.domain.enums import ProductUnit
 from apps.identity.infrastructure.models import User
 from apps.orders.application.review import OrderReviewService
@@ -17,7 +18,8 @@ from apps.orders.domain.enums import OrderItemResolutionStatus
 def test_review_is_built_from_current_database_truth_and_is_ready():
     user = User.objects.create_user(whatsapp_phone="+237699887766")
     order = create_order_draft(customer=user)
-    item = add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    product = create_product(name="Riz", category=create_category(name="Food"))
+    item = add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG, product=product, resolution_status=OrderItemResolutionStatus.MATCHED)
     set_delivery_location(order=order, point=Point(9.7, 4.05, srid=4326))
     service = OrderReviewService()
     first = service.build_review(order)
@@ -31,7 +33,7 @@ def test_review_is_built_from_current_database_truth_and_is_ready():
 
 
 @pytest.mark.django_db
-def test_review_exposes_missing_location_and_unmatched_as_warning():
+def test_review_exposes_missing_location_and_unmatched_as_blocker():
     user = User.objects.create_user(whatsapp_phone="+237699887766")
     order = create_order_draft(customer=user)
     add_order_item(
@@ -46,5 +48,5 @@ def test_review_exposes_missing_location_and_unmatched_as_warning():
 
     assert review.readiness.ready is False
     assert "delivery_location_missing" in review.readiness.blocking_issues
-    assert "unmatched_items" in review.readiness.warnings
+    assert "unmatched_items" in review.readiness.blocking_issues
     assert "order.confirm" not in review.available_actions

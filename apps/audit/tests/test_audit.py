@@ -11,6 +11,7 @@ from apps.audit.domain.enums import AuditActorType, AuditEntityType, AuditEventT
 from apps.audit.domain.exceptions import AuditEventImmutableError
 from apps.audit.infrastructure.models import AuditEvent
 from apps.catalog.domain.enums import ProductUnit
+from apps.catalog.application.services import create_category, create_product
 from apps.identity.infrastructure.models import User
 from apps.orders.application.services import (
     add_order_item,
@@ -28,6 +29,7 @@ from apps.orders.domain.enums import (
     OrderCancellationCode,
     OrderFailureCode,
     OrderStatus,
+    OrderItemResolutionStatus,
 )
 from apps.orders.infrastructure.models import Order
 
@@ -42,7 +44,9 @@ def create_confirmable_order(user: User) -> Order:
     order = create_order_draft(
         customer=user, actor=user, actor_type=AuditActorType.USER
     )
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    product = create_product(name=f"Riz {order.id}", category=create_category(name=f"Food {order.id}"))
+    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
+                   product=product, resolution_status=OrderItemResolutionStatus.MATCHED)
     set_delivery_location(order=order, point=BONAMOUSSADI)
     return order
 

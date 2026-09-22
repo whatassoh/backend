@@ -58,5 +58,6 @@ def test_empty_catalog_location_builds_next_response_without_type_error(channel)
     assert (order.delivery_location.x, order.delivery_location.y) == (9.70, 4.05)
 
     conversation.refresh_from_db()
-    recap = app.process_message(conversation, inbound("4", channel=channel, action_id="order.skip_delivery_instructions"))
-    assert "Récapitulatif" in recap.response.text
+    review = app.process_message(conversation, inbound("4", channel=channel, action_id="order.skip_delivery_instructions"))
+    assert "Commande à compléter" in review.response.text
+    assert "order.confirm" not in [action.action_id for action in review.response.actions]

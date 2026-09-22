@@ -141,7 +141,7 @@ class StoreOfferNotificationService:
             )
             key = f"store-offer:{offer.id}:identity:{identity.id}"
             defaults = {
-                "recipient": identity.user, "channel_identity": identity,
+                "offer": offer, "recipient": identity.user, "channel_identity": identity,
                 "conversation": conversation, "channel": identity.channel,
                 "presentation_snapshot": self._snapshot(offer),
             }

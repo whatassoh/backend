@@ -3,7 +3,7 @@ import logging
 from django.db import transaction
 from django.utils import timezone
 
-from apps.orders.application.services import fail_order, start_store_matching
+from apps.orders.application.services import fail_order, start_store_matching, mark_awaiting_partial_coverage
 from apps.orders.domain.enums import OrderFailureCode
 from apps.orders.domain.enums import OrderStatus
 from apps.orders.infrastructure.models import Order
@@ -12,8 +12,8 @@ from apps.stores.application.fulfillment import StoreFulfillmentService
 from apps.stores.application.offers import StoreOfferService
 from apps.stores.application.offer_notifications import StoreOfferNotificationService
 from apps.stores.application.ranking import StoreRankingService
-from apps.stores.domain.enums import StoreMatchingAttemptStatus
-from apps.stores.infrastructure.models import Store, StoreMatchingAttempt, StoreOffer
+from apps.stores.domain.enums import StoreMatchingAttemptStatus, PartialStoreCoverageProposalStatus
+from apps.stores.infrastructure.models import Store, StoreMatchingAttempt, StoreOffer, PartialStoreCoverageProposal
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,20 @@ class StoreMatchingOrchestrator:
             locked = Order.objects.select_for_update().get(pk=order.pk)
             attempt = StoreMatchingAttempt.objects.select_for_update().filter(order=locked).first()
             if attempt:
-                logger.info("matching_start_duplicate", extra={"order_id": str(locked.id), "correlation_id": correlation_id})
-                return attempt
+                if attempt.status == StoreMatchingAttemptStatus.RUNNING:
+                    logger.info("matching_start_duplicate", extra={"order_id": str(locked.id), "correlation_id": correlation_id})
+                    return attempt
+                # A customer accepted a persisted partial proposal. Its old
+                # diagnostic attempt is no longer authoritative.
+                attempt.delete()
             if locked.status != OrderStatus.CONFIRMED:
                 raise ValueError("Order must be CONFIRMED to start store matching.")
             start_store_matching(locked, correlation_id=correlation_id)
             attempt = StoreMatchingAttempt.objects.create(order=locked, strategy_version="pending")
-        eligibility = self.eligibility.find_eligible_stores(Order.objects.get(pk=order.pk))
+        # Eligibility is explicitly defined for a confirmed order.  Keep the
+        # pre-transition snapshot for this pure evaluation: reloading here
+        # would see MATCHING_STORES and incorrectly produce no candidates.
+        eligibility = self.eligibility.find_eligible_stores(order)
         stores = list(Store.objects.filter(id__in=[item.store_id for item in eligibility.eligible_stores]))
         fulfillment = self.fulfillment.evaluate_candidates(order, stores)
         ranked = self.ranking.rank_candidates(order, eligibility.eligible_stores, fulfillment)
@@ -49,6 +56,37 @@ class StoreMatchingOrchestrator:
             attempt.strategy_version = str(ranked.strategy_version)
             attempt.candidate_snapshot = snapshot
             if not snapshot:
+                # A partial store is a customer proposal only.  It must never
+                # enter the StoreOffer path before consent.
+                partials = [c for c in ranked.diagnostics if c.coverage_ratio > 0 and not c.fully_covered]
+                if partials:
+                    selected = partials[0]  # diagnostics already uses ratio, distance, stable id.
+                    store = Store.objects.get(pk=selected.store_id)
+                    coverage = self.fulfillment.evaluate_store(locked, store)
+                    items = {str(item.id): item for item in locked.items.all()}
+                    covered = []
+                    uncovered = []
+                    for result in coverage.item_results:
+                        payload = {"order_item_id": result.order_item_id, "requested_name": items[result.order_item_id].requested_name}
+                        (covered if result.covered else uncovered).append(payload)
+                    proposal_snapshot = {
+                        "store_id": str(store.id), "coverage_ratio": str(coverage.coverage_ratio),
+                        "covered_items": covered, "uncovered_items": uncovered,
+                        "ranking": selected.snapshot(),
+                    }
+                    PartialStoreCoverageProposal.objects.update_or_create(
+                        order=locked,
+                        defaults={"matching_attempt": attempt, "store": store, "status": PartialStoreCoverageProposalStatus.PENDING,
+                                  "proposal_snapshot": proposal_snapshot, "consumed_at": None, "cancelled_at": None},
+                    )
+                    mark_awaiting_partial_coverage(locked, correlation_id=correlation_id)
+                    attempt.candidate_snapshot = [selected.snapshot()]
+                    attempt.status = StoreMatchingAttemptStatus.EXHAUSTED
+                    attempt.completed_at = timezone.now()
+                    attempt.failure_reason = "AWAITING_PARTIAL_COVERAGE"
+                    attempt.save(update_fields=["strategy_version", "candidate_snapshot", "status", "completed_at", "failure_reason", "updated_at"])
+                    transaction.on_commit(lambda: self._notify_partial_proposal(locked.id, correlation_id))
+                    return attempt
                 attempt.status = StoreMatchingAttemptStatus.EXHAUSTED
                 attempt.completed_at = timezone.now()
                 attempt.failure_reason = "NO_CANDIDATES"
@@ -67,6 +105,11 @@ class StoreMatchingOrchestrator:
             attempt.save(update_fields=["strategy_version", "candidate_snapshot", "current_position", "updated_at"])
             logger.info("first_candidate_selected", extra={"order_id": str(locked.id), "store_id": str(store.id), "correlation_id": correlation_id})
             return attempt
+
+    @staticmethod
+    def _notify_partial_proposal(order_id, correlation_id):
+        from apps.stores.tasks import deliver_partial_coverage_proposal
+        deliver_partial_coverage_proposal.delay(str(order_id), correlation_id)
 
     def advance_matching(self, attempt_id, outcome, correlation_id=None, offer_id=None):
         """Advance only after a terminal business outcome; provider failures retry elsewhere."""
