@@ -18,3 +18,7 @@ media/
 .vscode/
 
 .DS_Store
+# Production secrets
+.env.production
+.env.production.*
+.deploy-backups/

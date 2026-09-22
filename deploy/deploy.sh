@@ -65,7 +65,7 @@ ACME_WEBROOT="/var/www/letsencrypt"
 # ----------------------------------------------------------
 
 NGINX_TOUCHED=0
-WEB_REPLACED=0
+APP_SERVICES_REPLACED=0
 MIGRATIONS_APPLIED=0
 
 DB_BACKUP=""
@@ -470,17 +470,13 @@ restore_nginx() {
 # n'est supprimé.
 # ----------------------------------------------------------
 
+remove_whatassoh_app_containers() {
+    local service
 
-# Supprime uniquement les anciens conteneurs runtime WHATASSOH.
-# Nécessaire avec docker-compose 1.29.2 + Docker récent afin
-# d'éviter l'erreur KeyError: 'ContainerConfig' lors d'un recreate.
-# Aucun volume, réseau, PostgreSQL ou Redis n'est supprimé.
-remove_whatassoh_runtime_containers() {
-    remove_whatassoh_web_containers
+    local ids
 
-    local service ids cid
+    for service in web worker beat; do
 
-    for service in worker beat; do
         ids="$(
             docker ps -aq \
                 --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
@@ -488,73 +484,47 @@ remove_whatassoh_runtime_containers() {
                 2>/dev/null || true
         )"
 
-        [[ -n "$ids" ]] || continue
+        if [[ -z "$ids" ]]; then
+            continue
+        fi
 
-        log "Suppression de l'ancien conteneur ${service} whatassoh uniquement"
+        log "Suppression de l'ancien conteneur ${service} whatassoh"
 
         while IFS= read -r cid; do
             [[ -n "$cid" ]] || continue
             docker rm -f "$cid"
         done <<< "$ids"
+
     done
-}
-
-remove_whatassoh_web_containers() {
-
-    local ids
-
-    ids="$(
-        docker ps -aq \
-            --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
-            --filter "label=com.docker.compose.service=web" \
-            2>/dev/null || true
-    )"
-
-    if [[ -z "$ids" ]]; then
-        return 0
-    fi
-
-    log "Suppression de l'ancien conteneur web whatassoh uniquement"
-
-    while IFS= read -r cid; do
-
-        [[ -n "$cid" ]] || continue
-
-        docker rm -f "$cid"
-
-    done <<< "$ids"
 }
 
 # ----------------------------------------------------------
 # APPLICATION ROLLBACK
 # ----------------------------------------------------------
 
-rollback_web() {
-
+rollback_app_services() {
     if [[ -z "$OLD_WEB_IMAGE" ]]; then
-
         warn "Premier déploiement."
         warn "Aucune ancienne image whatassoh disponible."
-
         return 0
     fi
 
-
-    warn "Rollback web -> ${OLD_WEB_IMAGE}"
-
+    warn "Rollback application -> ${OLD_WEB_IMAGE}"
 
     env_set \
         "WEB_IMAGE" \
         "$OLD_WEB_IMAGE"
 
+    remove_whatassoh_app_containers
 
-    remove_whatassoh_runtime_containers
 
     "${COMPOSE[@]}" up \
         -d \
         --no-deps \
         web \
-        || warn "Le rollback du conteneur web a échoué."
+        worker \
+        beat \
+        || warn "Le rollback des services applicatifs a échoué."
 }
 
 
@@ -580,10 +550,10 @@ on_error() {
     fi
 
 
-    # Web uniquement whatassoh
-    if [[ "$WEB_REPLACED" -eq 1 ]]; then
+    # Services applicatifs whatassoh : web + worker + beat
+    if [[ "$APP_SERVICES_REPLACED" -eq 1 ]]; then
 
-        rollback_web || true
+        rollback_app_services || true
 
     elif [[ -n "$OLD_WEB_IMAGE" ]]; then
 
@@ -1066,7 +1036,7 @@ SERVICES="$(
 )"
 
 
-for service in web postgres redis; do
+for service in web worker beat postgres redis; do
 
     grep -qx "$service" <<<"$SERVICES" || \
         die "
@@ -1255,36 +1225,57 @@ log "collectstatic"
 
 
 # ==========================================================
-# 12. PROMOTION DU NOUVEAU WEB
+# 12. PROMOTION DE LA RELEASE APPLICATIVE
 # ==========================================================
 
-log "Démarrage du nouveau web"
+log "
+Promotion de la nouvelle release :
 
+web
+worker
+beat
+"
 
-remove_whatassoh_runtime_containers
+# À partir de maintenant, toute erreur doit restaurer
+# les trois services avec l'ancienne image.
+APP_SERVICES_REPLACED=1
+
+remove_whatassoh_app_containers
+
 
 "${COMPOSE[@]}" up \
     -d \
     --no-deps \
-    web
+    web \
+    worker \
+    beat
 
+# ----------------------------------------------------------
+# Vérification des trois runtimes applicatifs
+# ----------------------------------------------------------
 
-WEB_REPLACED=1
+for service in web worker beat; do
 
+    wait_for_service "$service" 90 || {
 
-wait_for_service web 90 || {
+        "${COMPOSE[@]}" logs \
+            --tail=150 \
+            "$service" \
+            >&2 || true
 
-    "${COMPOSE[@]}" logs \
-        --tail=150 \
-        web \
-        >&2 || true
-
-    die "
-Le conteneur web ne reste pas
-en état running.
+        die "
+Le service ${service}
+ne reste pas en état running.
 "
-}
+    }
 
+    log "${service} : running"
+
+done
+
+# ----------------------------------------------------------
+# Le web doit également répondre en HTTP
+# ----------------------------------------------------------
 
 if ! wait_for_http 90; then
 
@@ -1300,9 +1291,8 @@ Health check HTTP échoué :
 "
 fi
 
-
+log "Release applicative opérationnelle : web + worker + beat."
 log "Django répond correctement en local."
-
 
 # ==========================================================
 # 13. NGINX BACKUP
@@ -1343,6 +1333,10 @@ server {
         default_type "text/plain";
     }
 
+
+    location ^~ /internal/ {
+        return 404;
+    }
 
     location / {
 
@@ -1393,6 +1387,10 @@ server {
     }
 
 
+    location ^~ /internal/ {
+        return 404;
+    }
+
     location / {
 
         return 301 https://\$host\$request_uri;
@@ -1418,6 +1416,10 @@ server {
 
     client_max_body_size 20M;
 
+
+    location ^~ /internal/ {
+        return 404;
+    }
 
     location / {
 
