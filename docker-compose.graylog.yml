@@ -1,0 +1,85 @@
+services:
+
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    volumes:
+      - graylog_mongodb_data:/data/db
+      - graylog_mongodb_config:/data/configdb
+
+  datanode:
+    image: graylog/graylog-datanode:7.1.9
+    hostname: datanode
+    restart: unless-stopped
+
+    environment:
+      GRAYLOG_DATANODE_NODE_ID_FILE: /var/lib/graylog-datanode/node-id
+      GRAYLOG_DATANODE_PASSWORD_SECRET: ${GRAYLOG_PASSWORD_SECRET}
+      GRAYLOG_DATANODE_MONGODB_URI: mongodb://mongodb:27017/graylog
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    volumes:
+      - graylog_datanode_data:/var/lib/graylog-datanode
+
+    ports:
+      - "127.0.0.1:8999:8999"
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9300:9300"
+
+    depends_on:
+      - mongodb
+
+  graylog:
+    image: graylog/graylog:7.1.9
+    hostname: graylog
+    restart: unless-stopped
+
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /docker-entrypoint.sh
+
+    environment:
+      GRAYLOG_NODE_ID_FILE: /usr/share/graylog/data/data/node-id
+
+      GRAYLOG_PASSWORD_SECRET: ${GRAYLOG_PASSWORD_SECRET}
+      GRAYLOG_ROOT_PASSWORD_SHA2: ${GRAYLOG_ROOT_PASSWORD_SHA2}
+
+      GRAYLOG_HTTP_BIND_ADDRESS: 0.0.0.0:9000
+      GRAYLOG_HTTP_EXTERNAL_URI: http://127.0.0.1:9000/
+
+      GRAYLOG_MONGODB_URI: mongodb://mongodb:27017/graylog
+
+      GRAYLOG_ROOT_TIMEZONE: Africa/Douala
+
+    volumes:
+      - graylog_data:/usr/share/graylog/data
+
+    ports:
+      # Interface Graylog
+      - "127.0.0.1:9000:9000"
+
+      # GELF - utilisé ensuite par web / worker / beat
+      - "127.0.0.1:12201:12201/tcp"
+      - "127.0.0.1:12201:12201/udp"
+
+    depends_on:
+      - mongodb
+      - datanode
+
+volumes:
+
+  graylog_mongodb_data:
+  graylog_mongodb_config:
+
+  graylog_datanode_data:
+
+  graylog_data:
