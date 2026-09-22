@@ -120,6 +120,54 @@ def test_edit_cancel_resume_and_double_confirm_are_persistent_and_idempotent():
 
 
 @pytest.mark.django_db
+def test_completed_onboarding_rejects_old_review_actions_and_catalog_alternative():
+    convo = conversation()
+    app = ConversationalOrchestrator(understanding_service=NoLLM())
+    app.process_message(convo, message("1", action_id="journey.select.sell"))
+    convo.refresh_from_db()
+    app.process_message(convo, message("2", text="Boutique"))
+    convo.refresh_from_db()
+    app.process_message(convo, message("3", location=MessageLocation(latitude=4, longitude=9)))
+    convo.refresh_from_db()
+    app.process_message(convo, message("4", text="Douala"))
+    convo.refresh_from_db()
+    app.process_message(convo, message("5", action_id="seller_onboarding.confirm"))
+    assert Store.objects.count() == 1
+
+    for message_id, action_id in (("6", "seller_onboarding.edit"), ("7", "seller_onboarding.cancel")):
+        stale = app.process_message(convo, message(message_id, action_id=action_id))
+        assert stale.metadata["stale_action"] is True
+    convo.refresh_from_db()
+    assert ConversationContext.from_payload(convo.context).seller_onboarding.stage == SellerOnboardingStage.COMPLETED
+
+    committed = app.process_message(convo, message("8", action_id="seller.catalog.chat"))
+    assert committed.metadata["catalog_setup_choice"] == "chat"
+    stale = app.process_message(convo, message("9", action_id="seller.catalog.dashboard"))
+    assert stale.metadata["stale_action"] is True
+    convo.refresh_from_db()
+    assert ConversationContext.from_payload(convo.context).catalog_setup_choice == "chat"
+    assert Store.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_cancel_returns_journey_selector_and_old_confirm_is_non_mutating():
+    convo = conversation(MessagingChannel.TELEGRAM)
+    app = ConversationalOrchestrator(understanding_service=NoLLM())
+    app.process_message(convo, message("1", action_id="journey.select.sell", channel=MessagingChannel.TELEGRAM))
+    convo.refresh_from_db()
+    app.process_message(convo, message("2", text="Boutique", channel=MessagingChannel.TELEGRAM))
+    convo.refresh_from_db()
+    app.process_message(convo, message("3", location=MessageLocation(latitude=4, longitude=9), channel=MessagingChannel.TELEGRAM))
+    convo.refresh_from_db()
+    app.process_message(convo, message("4", text="Douala", channel=MessagingChannel.TELEGRAM))
+    convo.refresh_from_db()
+    cancelled = app.process_message(convo, message("5", action_id="seller_onboarding.cancel", channel=MessagingChannel.TELEGRAM))
+    assert [action.action_id for action in cancelled.response.actions] == ["journey.select.buy", "journey.select.sell", "journey.select.deliver"]
+    app.process_message(convo, message("6", action_id="seller_onboarding.confirm", channel=MessagingChannel.TELEGRAM))
+    assert Store.objects.count() == 0
+
+
+@pytest.mark.django_db
 def test_existing_store_does_not_start_or_create_another_store():
     convo = conversation()
     Store.objects.create(

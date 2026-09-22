@@ -120,5 +120,9 @@ def _interactive_metadata(
     if not whatsapp_metadata.get("action_id"):
         raise WhatsAppInvalidPayloadError("WhatsApp interactive reply is invalid.")
 
+    # The normalized inbound contract exposes stable actions at the generic level.
+    # Keep the provider copy for diagnostics, but never make channel-neutral routing
+    # understand WhatsApp's nested metadata.
+    enriched["action_id"] = whatsapp_metadata["action_id"]
     enriched["whatsapp"] = whatsapp_metadata
     return enriched

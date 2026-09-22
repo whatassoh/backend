@@ -30,6 +30,7 @@ def deliver_outcome_response(*, conversation, outcome, correlation_id=None) -> b
         return False
 
     try:
+        logger.info("outbound_requested", extra={"channel": conversation.channel, "correlation_id": correlation_id, "interactive": bool(response.actions)})
         send_response_plan(
             conversation=conversation,
             response=response,
@@ -41,6 +42,7 @@ def deliver_outcome_response(*, conversation, outcome, correlation_id=None) -> b
             extra={"channel": conversation.channel, "correlation_id": correlation_id},
         )
         return False
+    logger.info("outbound_sent", extra={"channel": conversation.channel, "correlation_id": correlation_id, "interactive": bool(response.actions)})
     return True
 
 

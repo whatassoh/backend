@@ -98,11 +98,6 @@ class SellerOnboardingService:
         # Journey selection is global navigation, never an onboarding command.
         if action_id in {"journey.select.buy", "journey.select.sell", "journey.select.deliver"}:
             return None
-        if draft.stage == SellerOnboardingStage.COMPLETED and action_id not in {
-            self.catalog_chat_action,
-            self.catalog_dashboard_action,
-        }:
-            return None
         if action_id:
             return self.handle_action(conversation, context, action_id)
         if draft.stage == SellerOnboardingStage.NAME and message.text is not None:
@@ -159,31 +154,83 @@ class SellerOnboardingService:
         self._save_draft(conversation, context, draft)
         return self.review(draft)
 
+    @transaction.atomic
     def handle_action(self, conversation, context, action_id: str) -> SellerOnboardingOutcome:
+        from apps.conversations.infrastructure.models import Conversation
+
+        locked = Conversation.objects.select_for_update().get(pk=conversation.pk)
+        context = ConversationContext.from_payload(locked.context)
+        draft = context.seller_onboarding
+        review_actions = {self.confirm_action, self.edit_action, self.cancel_action}
+        catalog_actions = {self.catalog_chat_action, self.catalog_dashboard_action}
+        if action_id in review_actions and (
+            draft is None or draft.stage != SellerOnboardingStage.REVIEW
+        ):
+            return self._stale_action()
+        if action_id in catalog_actions and (
+            draft is None
+            or draft.stage != SellerOnboardingStage.COMPLETED
+            or context.catalog_setup_choice is not None
+        ):
+            return self._stale_action()
         if action_id == self.confirm_action:
-            return self.confirm(conversation)
+            return self.confirm(locked)
         if action_id == self.edit_action:
             draft = SellerOnboardingDraft(stage=SellerOnboardingStage.NAME)
-            self._save_draft(conversation, context, draft)
+            self._save_draft(locked, context, draft)
             return self._prompt_for(draft)
         if action_id == self.cancel_action:
             self.context_service.update_context(
-                conversation,
+                locked,
                 replace(context, flow=ConversationFlow.IDLE, seller_onboarding=None),
             )
             return SellerOnboardingOutcome(
                 status=SellerOnboardingStatus.CANCELLED,
-                text="Création de boutique annulée.",
-                metadata={"seller_onboarding": True},
+                text="Création de boutique annulée. Que souhaitez-vous faire ?",
+                actions=(
+                    SellerOnboardingAction(action_id="journey.select.buy", label="Acheter"),
+                    SellerOnboardingAction(action_id="journey.select.sell", label="Vendre"),
+                    SellerOnboardingAction(action_id="journey.select.deliver", label="Livrer"),
+                ),
+                metadata={"seller_onboarding": True, "journey_selection": True},
             )
         if action_id in {self.catalog_chat_action, self.catalog_dashboard_action}:
             choice = "chat" if action_id == self.catalog_chat_action else "dashboard"
+            if not self._consume_catalog_choice(conversation, choice):
+                return self._stale_action()
             return SellerOnboardingOutcome(
                 status=SellerOnboardingStatus.COMPLETED,
                 text="Votre choix de configuration du catalogue est enregistré.",
                 metadata={"seller_onboarding": True, "catalog_setup_choice": choice},
             )
         return self._prompt_for(context.seller_onboarding)
+
+    @transaction.atomic
+    def _consume_catalog_choice(self, conversation, choice: str) -> bool:
+        from apps.conversations.infrastructure.models import Conversation
+
+        locked = Conversation.objects.select_for_update().get(pk=conversation.pk)
+        context = ConversationContext.from_payload(locked.context)
+        draft = context.seller_onboarding
+        if (
+            context.active_journey != ActiveJourney.SELL
+            or draft is None
+            or draft.stage != SellerOnboardingStage.COMPLETED
+            or context.catalog_setup_choice is not None
+        ):
+            return False
+        locked.context = replace(context, catalog_setup_choice=choice).to_payload()
+        locked.save(update_fields=["context", "updated_at"])
+        self._audit("seller_catalog_setup_choice_committed", locked, choice=choice)
+        return True
+
+    @staticmethod
+    def _stale_action() -> SellerOnboardingOutcome:
+        return SellerOnboardingOutcome(
+            status=SellerOnboardingStatus.INVALID,
+            text="Cette action n'est plus disponible.",
+            metadata={"seller_onboarding": True, "stale_action": True},
+        )
 
     @transaction.atomic
     def confirm(self, conversation) -> SellerOnboardingOutcome:
