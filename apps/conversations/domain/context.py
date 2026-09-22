@@ -121,6 +121,7 @@ class ConversationContext:
     processed_message_ids: tuple[str, ...] = ()
     active_journey: ActiveJourney | None = None
     seller_onboarding: SellerOnboardingDraft | None = None
+    catalog_setup_choice: str | None = None
     driver_onboarding: DriverOnboardingDraft | None = None
     pending_seller_catalog_mutation: PendingSellerCatalogMutation | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -213,6 +214,7 @@ class ConversationContext:
                 else None
             ),
             seller_onboarding=onboarding,
+            catalog_setup_choice=payload.get("catalog_setup_choice"),
             driver_onboarding=driver_onboarding,
             pending_seller_catalog_mutation=pending_catalog,
             metadata=dict(payload.get("metadata", {})),
