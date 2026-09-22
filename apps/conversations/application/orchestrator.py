@@ -1,4 +1,5 @@
 import re
+import logging
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
@@ -38,6 +39,8 @@ from apps.orders.application.services import (
 )
 from apps.orders.application.review import OrderReviewService
 from apps.stores.application.preparation import StorePreparationResult, StorePreparationService
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationalOutcomeStatus(StrEnum):
@@ -169,6 +172,7 @@ class ConversationalOrchestrator:
             )
         action_id = message.metadata.get("action_id")
         if action_id:
+            logger.info("structured_action_resolved", extra={"correlation_id": correlation_id, "channel": message.channel, "action_id": action_id, "journey": context.active_journey, "flow": context.flow})
             driver_offer = self._driver_offer_action(conversation, context, action_id, correlation_id)
             if driver_offer is not None:
                 return driver_offer
@@ -682,6 +686,7 @@ class ConversationalOrchestrator:
         )
 
     def _handle_location(self, conversation, context, message, correlation_id):
+        logger.info("location_received", extra={"correlation_id": correlation_id, "channel": message.channel, "journey": context.active_journey, "flow": context.flow})
         order = self._active_order(conversation, context)
         if order is None or message.location is None:
             return self._outcome(
@@ -697,9 +702,11 @@ class ConversationalOrchestrator:
             actor=conversation.user,
             correlation_id=correlation_id,
         )
+        logger.info("location_persisted", extra={"correlation_id": correlation_id, "order_id": str(order.id), "order_status": order.status})
         context = replace(
             context,
             flow=ConversationFlow.ORDER_BUILDING,
+            active_order_id=str(order.id),
             pending_clarification=None,
             metadata={
                 **context.metadata,
@@ -713,7 +720,7 @@ class ConversationalOrchestrator:
                 text="Position enregistrée. Souhaitez-vous ajouter une indication pour le livreur ?",
                 actions=(
                     ResponseAction(
-                        "order.skip_delivery_instructions", "Non, continuer"
+                        action_id="order.skip_delivery_instructions", label="Non, continuer"
                     ),
                 ),
             ),
@@ -852,7 +859,7 @@ class ConversationalOrchestrator:
                         text="Vous avez déjà une commande en cours. Souhaitez-vous l'abandonner ?",
                         actions=(
                             ResponseAction(
-                                "order.abandon_and_start_new", "Abandonner et recommencer"
+                                action_id="order.abandon_and_start_new", label="Abandonner et recommencer"
                             ),
                         ),
                     ),
@@ -990,8 +997,8 @@ class ConversationalOrchestrator:
                 response=ResponsePlan(
                     text="Vous avez une commande en cours. Souhaitez-vous la reprendre ?",
                     actions=(
-                        ResponseAction("order.resume", "Reprendre"),
-                        ResponseAction("order.start_new", "Nouvelle commande"),
+                        ResponseAction(action_id="order.resume", label="Reprendre"),
+                        ResponseAction(action_id="order.start_new", label="Nouvelle commande"),
                     ),
                 ),
                 active_order_id=recovery.order_id,
@@ -1070,8 +1077,8 @@ class ConversationalOrchestrator:
             return ResponsePlan(
                 text="Commande à compléter :\n" + "\n".join(lines) + f"\nÀ corriger : {blockers}",
                 actions=(
-                    ResponseAction("order.modify", "Modifier"),
-                    ResponseAction("order.cancel", "Annuler"),
+                    ResponseAction(action_id="order.modify", label="Modifier"),
+                    ResponseAction(action_id="order.cancel", label="Annuler"),
                 ),
                 metadata={"review_fingerprint": review.fingerprint},
             )
@@ -1082,10 +1089,10 @@ class ConversationalOrchestrator:
                 + f"\nLivraison : {delivery}\nConfirmez-vous ?"
             ),
             actions=(
-                ResponseAction("order.confirm", "Confirmer"),
-                ResponseAction("order.modify", "Modifier"),
-                ResponseAction("order.change_location", "Modifier l'adresse"),
-                ResponseAction("order.cancel", "Annuler"),
+                ResponseAction(action_id="order.confirm", label="Confirmer"),
+                ResponseAction(action_id="order.modify", label="Modifier"),
+                ResponseAction(action_id="order.change_location", label="Modifier l'adresse"),
+                ResponseAction(action_id="order.cancel", label="Annuler"),
             ),
             metadata={"review_fingerprint": review.fingerprint},
         )
@@ -1104,7 +1111,7 @@ class ConversationalOrchestrator:
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
             response=ResponsePlan(
-                text,
+                text=text,
                 request_location=str(clarification.response_instruction)
                 == "REQUEST_LOCATION",
             ),
