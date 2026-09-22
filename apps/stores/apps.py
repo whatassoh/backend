@@ -7,8 +7,11 @@ class StoresConfig(AppConfig):
     verbose_name = "Stores"
 
     def ready(self):
-        from apps.orders.domain.events import OrderConfirmed
+        from apps.orders.domain.events import OrderConfirmed, OrderFailed, OrderCancelled
+        from apps.orders.application.customer_notifications import notify_order_failed, notify_order_cancelled
         from apps.stores.application.order_confirmed import enqueue_store_matching
         from common.events import subscribe
 
         subscribe(OrderConfirmed, enqueue_store_matching)
+        subscribe(OrderFailed, notify_order_failed)
+        subscribe(OrderCancelled, notify_order_cancelled)

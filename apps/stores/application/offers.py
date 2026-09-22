@@ -48,6 +48,8 @@ class StoreOfferService:
             locked.status, locked.accepted_at = StoreOfferStatus.ACCEPTED, timezone.now()
             locked.save(update_fields=["status", "accepted_at", "updated_at"])
             mark_store_accepted(order)
+            from apps.orders.application.customer_notifications import notify_store_accepted
+            transaction.on_commit(lambda: notify_store_accepted(order_id=order.id))
             remaining = list(StoreOffer.objects.filter(order=order, status=StoreOfferStatus.PENDING).exclude(pk=locked.pk))
             StoreOffer.objects.filter(pk__in=[item.pk for item in remaining]).update(status=StoreOfferStatus.CANCELLED, cancelled_at=timezone.now())
             from apps.stores.application.offer_notifications import (
