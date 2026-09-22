@@ -178,6 +178,8 @@ def ensure_order_confirmable(order: object) -> None:
 
     for item in items:
         item.full_clean()
+        if item.resolution_status != OrderItemResolutionStatus.MATCHED or not item.product_id:
+            raise OrderNotConfirmable("All order items must match a catalog product.")
 
 
 def ensure_failure_code_allowed(
