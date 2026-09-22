@@ -1,6 +1,7 @@
 """Celery delivery for persistent StoreOffer notifications."""
 from celery import shared_task
 from django.conf import settings
+from django.db import InterfaceError, OperationalError
 
 from apps.messaging.application.orchestration import send_conversation_text
 from apps.stores.application.offer_notifications import (
@@ -11,7 +12,69 @@ from apps.stores.application.offer_notifications import (
 )
 from apps.stores.domain.enums import StoreOfferNotificationStatus, StoreOfferStatus
 from apps.stores.infrastructure.models import StoreOffer, StoreOfferNotification
+from apps.orders.domain.enums import OrderStatus
+from apps.orders.infrastructure.models import Order
 from common.async_tasks import WhatassohTask
+
+
+@shared_task(
+    bind=True,
+    base=WhatassohTask,
+    name="stores.start_store_matching",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    autoretry_for=(OperationalError, InterfaceError),
+    retry_backoff=True,
+    retry_jitter=True,
+)
+def start_store_matching_for_order(self, order_id, correlation_id=None):
+    """At-least-once-safe entry point; business exhaustion stays in the orchestrator."""
+    order = Order.objects.filter(pk=order_id).only("id", "status").first()
+    if order is None:
+        return {"status": "NOOP", "reason": "ORDER_NOT_FOUND"}
+    if order.status != OrderStatus.CONFIRMED:
+        return {"status": "NOOP", "reason": f"ORDER_{order.status}"}
+    from apps.stores.application.matching import StoreMatchingOrchestrator
+
+    attempt = StoreMatchingOrchestrator().start_matching(order.id, correlation_id=correlation_id)
+    order.refresh_from_db(fields=["status"])
+    return {
+        "status": "STARTED",
+        "attempt_id": str(attempt.id),
+        "resulting_status": order.status,
+    }
+
+
+@shared_task(bind=True, base=WhatassohTask, name="stores.deliver_partial_coverage_proposal", acks_late=True, reject_on_worker_lost=True)
+def deliver_partial_coverage_proposal(self, order_id, correlation_id=None):
+    """Channel-neutral interactive rendering; no seller is contacted here."""
+    from apps.conversations.infrastructure.models import Conversation
+    from apps.conversations.domain.enums import ConversationStatus
+    from apps.stores.domain.enums import PartialStoreCoverageProposalStatus
+    from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+    proposal = PartialStoreCoverageProposal.objects.select_related("order", "store").filter(
+        order_id=order_id, status=PartialStoreCoverageProposalStatus.PENDING
+    ).first()
+    if proposal is None or proposal.order.status != OrderStatus.AWAITING_PARTIAL_COVERAGE:
+        return {"status": "NOOP"}
+    conversation = Conversation.objects.filter(user=proposal.order.customer, status=ConversationStatus.ACTIVE).order_by("-last_activity_at").first()
+    if conversation is None:
+        return {"status": "NOOP", "reason": "NO_ACTIVE_CONVERSATION"}
+    snapshot = proposal.proposal_snapshot
+    covered = "\n".join("✓ " + row["requested_name"] for row in snapshot.get("covered_items", []))
+    uncovered = "\n".join("✗ " + row["requested_name"] for row in snapshot.get("uncovered_items", []))
+    text = f"Aucune boutique ne peut fournir toute votre commande. {proposal.store.name} peut fournir :\n{covered}\n\nElle ne propose pas :\n{uncovered}\n\nVoulez-vous continuer sans ces produits ?"
+    metadata = {"partial_coverage_proposal_id": str(proposal.id), "actions": [
+        {"id": "order.accept_partial_store_coverage", "label": "Continuer"},
+        {"id": "order.modify", "label": "Modifier ma commande"},
+        {"id": "order.cancel", "label": "Annuler"},
+    ]}
+    if conversation.channel == "WHATSAPP":
+        from apps.whatsapp.application.outbound import send_whatsapp_interactive_reply_buttons
+        from apps.whatsapp.domain.dtos import WhatsAppReplyButton
+        return send_whatsapp_interactive_reply_buttons(conversation=conversation, body=text,
+            buttons=[WhatsAppReplyButton(action_id=x["id"], label=x["label"]) for x in metadata["actions"]], metadata=metadata)
+    return send_conversation_text(conversation=conversation, text=text, metadata=metadata, correlation_id=correlation_id)
 
 
 def _dispatch(notification, instruction, correlation_id):

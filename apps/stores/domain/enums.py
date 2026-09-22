@@ -21,6 +21,12 @@ class StoreMatchingAttemptStatus(models.TextChoices):
     SUCCEEDED = "SUCCEEDED", "Succeeded"
 
 
+class PartialStoreCoverageProposalStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    ACCEPTED = "ACCEPTED", "Accepted"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
 class StoreOfferNotificationStatus(models.TextChoices):
     PENDING = "PENDING", "Pending"
     SENDING = "SENDING", "Sending"

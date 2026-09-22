@@ -70,6 +70,14 @@ def create_catalog_product(name: str):
     return create_product(name=name, category=category)
 
 
+def add_matched_rice(order):
+    product = create_catalog_product(f"Riz {order.id}")
+    return add_order_item(
+        order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
+        product=product, resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
+
+
 @pytest.mark.django_db
 def test_create_order_draft_defaults():
     customer = create_user()
@@ -346,7 +354,7 @@ def test_update_remove_and_delivery_instructions_require_mutable_draft():
 def test_order_items_are_deleted_with_order_but_customer_is_protected():
     customer = create_user()
     order = create_order_draft(customer=customer)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    add_matched_rice(order)
 
     with pytest.raises(ProtectedError):
         customer.delete()
@@ -360,7 +368,7 @@ def test_order_items_are_deleted_with_order_but_customer_is_protected():
 def test_confirm_order_with_items_and_location():
     customer = create_user()
     order = create_order_draft(customer=customer)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    add_matched_rice(order)
     set_delivery_location(order=order, point=BONAMOUSSADI)
 
     confirmed = confirm_order(order)
@@ -373,7 +381,7 @@ def test_confirm_order_with_items_and_location():
 def test_confirm_order_is_idempotent_once_confirmed():
     customer = create_user()
     order = create_order_draft(customer=customer)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    add_matched_rice(order)
     set_delivery_location(order=order, point=BONAMOUSSADI)
     confirmed = confirm_order(order)
     confirmed_at = confirmed.confirmed_at
@@ -399,7 +407,7 @@ def test_confirm_order_requires_items_and_location():
 
 
 @pytest.mark.django_db
-def test_confirm_order_allows_unmatched_and_ambiguous_items():
+def test_confirm_order_rejects_unmatched_and_ambiguous_items():
     customer = create_user()
     order = create_order_draft(customer=customer)
     add_order_item(
@@ -418,9 +426,8 @@ def test_confirm_order_allows_unmatched_and_ambiguous_items():
     )
     set_delivery_location(order=order, point=BONAMOUSSADI)
 
-    confirmed = confirm_order(order)
-
-    assert confirmed.status == OrderStatus.CONFIRMED
+    with pytest.raises(OrderNotConfirmable):
+        confirm_order(order)
 
 
 @pytest.mark.django_db
@@ -441,9 +448,9 @@ def test_content_editing_is_blocked_after_confirmation():
     order = create_order_draft(customer=customer)
     item = add_order_item(
         order=order,
-        requested_name="Riz",
-        quantity=5,
-        unit=ProductUnit.KG,
+        requested_name="Riz", quantity=5, unit=ProductUnit.KG,
+        product=create_catalog_product("Riz editing"),
+        resolution_status=OrderItemResolutionStatus.MATCHED,
     )
     set_delivery_location(order=order, point=BONAMOUSSADI)
     confirmed = confirm_order(order)
@@ -467,7 +474,7 @@ def test_content_editing_is_blocked_after_confirmation():
 def test_happy_path_and_retry_definition_of_done():
     customer = create_user()
     order = create_order_draft(customer=customer)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    add_matched_rice(order)
     set_delivery_location(order=order, point=BONAMOUSSADI)
 
     order = confirm_order(order)
@@ -497,7 +504,7 @@ def test_happy_path_and_retry_definition_of_done():
 def test_transition_matrix_allows_expected_progression_to_delivered():
     customer = create_user()
     order = create_order_draft(customer=customer)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    add_matched_rice(order)
     set_delivery_location(order=order, point=BONAMOUSSADI)
 
     order = confirm_order(order)

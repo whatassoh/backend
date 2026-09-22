@@ -10,6 +10,7 @@ from apps.stores.domain.enums import (
     StoreMatchingAttemptStatus,
     StoreOfferNotificationStatus,
     StoreOfferNotificationAttemptStatus,
+    PartialStoreCoverageProposalStatus,
     StoreStatus,
 )
 from apps.stores.domain.rules import (
@@ -157,6 +158,20 @@ class StoreMatchingAttempt(BaseModel):
 
     class Meta:
         indexes = [models.Index(fields=["status", "updated_at"], name="store_match_attempt_scan_idx")]
+
+
+class PartialStoreCoverageProposal(BaseModel):
+    """Customer-side proposal. It is intentionally not a seller StoreOffer."""
+    order = models.OneToOneField("orders.Order", on_delete=models.CASCADE, related_name="partial_store_coverage_proposal")
+    matching_attempt = models.ForeignKey(StoreMatchingAttempt, on_delete=models.SET_NULL, null=True, related_name="partial_proposals")
+    store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name="partial_coverage_proposals")
+    status = models.CharField(max_length=20, choices=PartialStoreCoverageProposalStatus.choices, default=PartialStoreCoverageProposalStatus.PENDING)
+    proposal_snapshot = models.JSONField(default=dict)
+    consumed_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "updated_at"], name="partial_proposal_scan_idx")]
 
 
 class StoreOfferNotification(BaseModel):
