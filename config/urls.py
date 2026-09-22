@@ -25,6 +25,7 @@ from drf_spectacular.views import (
 from common.health.views import health_check
 
 urlpatterns = [
+    path("internal/", include("django_prometheus.urls")),
     path(
         "admin/",
         admin.site.urls,

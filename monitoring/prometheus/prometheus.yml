@@ -1,0 +1,36 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets:
+          - "prometheus:9090"
+
+  - job_name: "whatassoh-django"
+    metrics_path: /internal/metrics
+    static_configs:
+      - targets:
+          - "web:8000"
+
+  - job_name: "whatassoh-node"
+    static_configs:
+      - targets:
+          - "node-exporter:9100"
+
+  - job_name: "whatassoh-containers"
+    static_configs:
+      - targets:
+          - "cadvisor:8080"
+
+  - job_name: "whatassoh-postgres"
+    static_configs:
+      - targets:
+          - "postgres-exporter:9187"
+
+  - job_name: "whatassoh-redis"
+    static_configs:
+      - targets:
+          - "redis-exporter:9121"

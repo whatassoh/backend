@@ -63,6 +63,7 @@ DJANGO_APPS = [
 ]
 
 THIRD_PARTY_APPS = [
+    "django_prometheus",
     "rest_framework",
     "rest_framework_simplejwt",
     "django_filters",
@@ -100,6 +101,7 @@ INSTALLED_APPS = [
 # ---------------------------------------------------------------------
 
 MIDDLEWARE = [
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "common.middleware.CorrelationIdMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -109,6 +111,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 
@@ -448,3 +451,9 @@ structlog.configure(
         structlog.processors.JSONRenderer(),
     ],
 )
+
+
+# ---------------------------------------------------------------------
+# Prometheus
+# ---------------------------------------------------------------------
+PROMETHEUS_METRIC_NAMESPACE = "whatassoh"
