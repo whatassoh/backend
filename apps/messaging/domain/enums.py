@@ -34,6 +34,9 @@ class MessageStatus(models.TextChoices):
 
 class NotificationKind(models.TextChoices):
     ORDER_CONFIRMED = "ORDER_CONFIRMED", "Order confirmed"
+    ORDER_STORE_ACCEPTED = "ORDER_STORE_ACCEPTED", "Store accepted order"
+    ORDER_NO_STORE_AVAILABLE = "ORDER_NO_STORE_AVAILABLE", "No store available"
+    ORDER_CANCELLED = "ORDER_CANCELLED", "Order cancelled"
     STORE_OFFER = "STORE_OFFER", "Store offer"
     STORE_PREPARATION_STARTED = "STORE_PREPARATION_STARTED", "Store preparation started"
     ORDER_READY_FOR_PICKUP = "ORDER_READY_FOR_PICKUP", "Order ready for pickup"
