@@ -28,6 +28,16 @@ services:
       redis:
         condition: service_healthy
 
+
+    # Logs centralisés WhatAssoh -> Graylog
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://127.0.0.1:12201"
+        gelf-compression-type: "none"
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        tag: "whatassoh-{{.Name}}"
   worker:
     image: ${WEB_IMAGE}
     build:
@@ -45,6 +55,16 @@ services:
 
   # Run exactly one replica: django-celery-beat persists schedules in Postgres
   # but does not coordinate multiple simultaneous schedulers.
+
+    # Logs centralisés WhatAssoh -> Graylog
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://127.0.0.1:12201"
+        gelf-compression-type: "none"
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        tag: "whatassoh-{{.Name}}"
   beat:
     image: ${WEB_IMAGE}
     build:
@@ -60,6 +80,16 @@ services:
       redis:
         condition: service_healthy
 
+
+    # Logs centralisés WhatAssoh -> Graylog
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://127.0.0.1:12201"
+        gelf-compression-type: "none"
+        mode: "non-blocking"
+        max-buffer-size: "4m"
+        tag: "whatassoh-{{.Name}}"
   postgres:
     image: postgis/postgis:17-3.5
 

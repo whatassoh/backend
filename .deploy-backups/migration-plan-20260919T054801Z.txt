@@ -1,0 +1,27 @@
+[1mPlanned operations:
+[0m[36;1midentity.0004_user_whatsapp_phone_optional
+[0m    Alter field whatsapp_phone on user
+[36;1mstores.0003_storeoffer
+[0m    Create model StoreOffer
+    Create constraint store_offer_order_store_unique on model storeoffer
+    Create constraint store_offer_one_accepted_per_order on model storeoffer
+    Create constraint store_offer_status_valid on model storeoffer
+[36;1mstores.0004_storematchingattempt
+[0m    Create model StoreMatchingAttempt
+[36;1mstores.0005_storeoffernotification
+[0m    Create model StoreOfferNotification
+    Create model StoreOfferNotificationAttempt
+    Create constraint store_offer_notif_attempt_unique on model storeoffernotificationattempt
+    Create index store_offer_notif_retry_idx on field(s) status, next_retry_at of model storeoffernotification
+    Create index store_offer_notif_offer_idx on field(s) offer, status of model storeoffernotification
+[36;1mstores.0006_storeoffernotification_delivery_state
+[0m    Alter field status on storeoffernotification
+    Alter field status on storeoffernotificationattempt
+    Add field sent_at to storeoffernotification
+    Add field failed_at to storeoffernotification
+    Add field channel to storeoffernotificationattempt
+    Add field correlation_id to storeoffernotificationattempt
+    Add field metadata to storeoffernotificationattempt
+    Add field message_event to storeoffernotificationattempt
+[36;1mstores.0007_storematchingattempt_reconciliation_index
+[0m    Create index store_match_attempt_scan_idx on field(s) status, updated_at of model storematchingattempt

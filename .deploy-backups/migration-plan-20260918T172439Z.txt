@@ -1,0 +1,23 @@
+[1mPlanned operations:
+[0m[36;1mcatalog.0004_catalog_trigram
+[0m    Creates extension pg_trgm
+    Create index catalog_product_name_trgm on field(s) normalized_name of model product
+    Create index catalog_alias_name_trgm on field(s) normalized_alias of model productalias
+[36;1mevaluation.0001_initial
+[0m    Create model DatasetVersion
+    Create model DatasetCandidate
+    Create model DatasetExample
+    Create model DatasetVersionExample
+    Add field examples to datasetversion
+    Create model EvaluationRun
+    Create model EvaluationResult
+    Create constraint evaluation_version_example_unique on model datasetversionexample
+    Create constraint evaluation_dataset_version_unique on model datasetversion
+[36;1mknowledge.0001_initial
+[0m    Create model KnowledgeSource
+    Create model KnowledgeChunk
+    Create constraint knowledge_source_key_version_unique on model knowledgesource
+    Create constraint knowledge_chunk_source_index_unique on model knowledgechunk
+    Create index knowledge_src_key_status_idx on field(s) key, status of model knowledgesource
+    Create index knowledge_src_status_lang_idx on field(s) status, language of model knowledgesource
+    Create index knowledge_chunk_source_idx on field(s) source, chunk_index of model knowledgechunk

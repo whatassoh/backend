@@ -1,0 +1,67 @@
+[1mPlanned operations:
+[0m[36;1maudit.0002_seller_dashboard_access_audit
+[0m    Remove constraint audit_entity_type_valid from model auditevent
+    Remove constraint audit_event_type_valid from model auditevent
+    Create constraint audit_entity_type_valid on model auditevent
+    Create constraint audit_event_type_valid on model auditevent
+[36;1maudit.0003_alter_auditevent_dashboard_choices
+[0m    Alter field entity_type on auditevent
+    Alter field event_type on auditevent
+[36;1maudit.0004_driver_offer_audit
+[0m    Alter field event_type on auditevent
+[36;1maudit.0005_driver_offer_audit_constraint
+[0m    Remove constraint audit_event_type_valid from model auditevent
+    Create constraint audit_event_type_valid on model auditevent
+[36;1morders.0002_order_picked_up_at
+[0m    Add field picked_up_at to order
+[36;1morders.0003_order_delivery_started_at
+[0m    Add field delivery_started_at to order
+[36;1morders.0004_order_delivered_at
+[0m    Add field delivered_at to order
+[36;1mdrivers.0002_driverprofile_last_location_at
+[0m    Add field last_location_at to driverprofile
+[36;1mdrivers.0003_driverprofile_last_location
+[0m    Add field last_location to driverprofile
+[36;1mdrivers.0004_driveroffer_driverassignment
+[0m    Create model DriverOffer
+    Create model DriverAssignment
+    Create index driver_offer_order_status_idx on field(s) order, status of model driveroffer
+    Create index driver_offer_driver_status_idx on field(s) driver, status of model driveroffer
+    Create index driver_offer_status_exp_idx on field(s) status, expires_at of model driveroffer
+    Create constraint driver_offer_order_driver_unique on model driveroffer
+    Create constraint driver_offer_one_pending_per_order on model driveroffer
+    Create constraint driver_offer_one_accepted_per_order on model driveroffer
+    Create constraint driver_offer_status_valid on model driveroffer
+    Create constraint driver_assignment_one_active_per_driver on model driverassignment
+[36;1mdrivers.0005_drivermatchingattempt
+[0m    Create model DriverMatchingAttempt
+[36;1mdrivers.0006_driveroffernotification
+[0m    Create model DriverOfferNotification
+    Create index driver_offer_notif_retry_idx on field(s) status, next_retry_at of model driveroffernotification
+[36;1mdrivers.0007_driver_location_reminders
+[0m    Create model DriverLocationReminder
+[36;1mdrivers.0008_deliveryissue
+[0m    Create model DeliveryIssue
+    Create constraint delivery_issue_one_open_type on model deliveryissue
+[36;1mmessaging.0004_operational_notifications
+[0m    Create model OperationalNotification
+    Create model OperationalNotificationAttempt
+    Create index msg_notif_status_idx on field(s) status, created_at of model operationalnotification
+    Create index msg_notif_business_idx on field(s) business_entity_type, business_entity_id of model operationalnotification
+    Create constraint msg_notif_attempt_number_unique on model operationalnotificationattempt
+[36;1mmessaging.0005_notification_retry_metadata
+[0m    Add field last_error_category to operationalnotification
+    Add field next_retry_at to operationalnotification
+    Add field retry_after_seconds to operationalnotificationattempt
+[36;1mmessaging.0006_location_reminder_notification_kinds
+[0m    Alter field kind on operationalnotification
+[36;1mmessaging.0007_order_picked_up_notification_kind
+[0m    Alter field kind on operationalnotification
+[36;1mmessaging.0008_order_in_delivery_notification_kind
+[0m    Alter field kind on operationalnotification
+[36;1mmessaging.0009_order_delivered_notification_kind
+[0m    Alter field kind on operationalnotification
+[36;1mstores.0008_seller_dashboard_access_grant
+[0m    Create model SellerDashboardAccessGrant
+    Create index store_dash_grant_user_idx on field(s) user, purpose, expires_at of model sellerdashboardaccessgrant
+    Create index store_dash_grant_exp_idx on field(s) expires_at of model sellerdashboardaccessgrant
