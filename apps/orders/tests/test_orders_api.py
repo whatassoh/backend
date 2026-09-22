@@ -58,6 +58,7 @@ def create_catalog_product(name: str):
 def test_orders_api_main_draft_to_confirm_flow():
     user = create_user()
     mayor = create_catalog_product("Huile Mayor")
+    rice = create_catalog_product("Riz parfumé")
     client = auth_client(user)
     confirmed_events = []
     subscribe(OrderConfirmed, confirmed_events.append)
@@ -74,9 +75,9 @@ def test_orders_api_main_draft_to_confirm_flow():
             "requested_name": "riz parfumé de bonne qualité",
             "quantity": "5",
             "unit": ProductUnit.KG,
-            "product_id": None,
+            "product_id": str(rice.id),
             "product_variant_id": None,
-            "resolution_status": OrderItemResolutionStatus.UNMATCHED,
+            "resolution_status": OrderItemResolutionStatus.MATCHED,
         },
         format="json",
     )
@@ -164,11 +165,14 @@ def test_orders_api_blocks_content_mutation_after_confirmation():
     user = create_user()
     client = auth_client(user)
     order = create_order_draft(customer=user)
+    rice = create_catalog_product("Riz mutation")
     item = add_order_item(
         order=order,
         requested_name="Riz",
         quantity=5,
         unit=ProductUnit.KG,
+        product=rice,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
     )
     set_delivery_location(order=order, point=BONAMOUSSADI)
     confirm_order(order)
@@ -228,7 +232,9 @@ def test_orders_api_cancel_creates_audit_and_event():
 def test_orders_api_retry_failed_order_uses_domain_target():
     user = create_user()
     order = create_order_draft(customer=user)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    rice = create_catalog_product("Riz retry")
+    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
+                   product=rice, resolution_status=OrderItemResolutionStatus.MATCHED)
     set_delivery_location(order=order, point=BONAMOUSSADI)
     order = start_store_matching(confirm_order(order))
     failed = fail_order(order, OrderFailureCode.NO_STORE_AVAILABLE)
@@ -267,7 +273,9 @@ def test_orders_api_retry_non_retryable_failure_returns_conflict():
 def test_orders_api_confirm_idempotence_publishes_once():
     user = create_user()
     order = create_order_draft(customer=user)
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG)
+    rice = create_catalog_product("Riz idempotence")
+    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
+                   product=rice, resolution_status=OrderItemResolutionStatus.MATCHED)
     set_delivery_location(order=order, point=BONAMOUSSADI)
     client = auth_client(user)
     confirmed_events = []
