@@ -37,7 +37,13 @@ ALLOWED_TRANSITIONS = {
     },
     OrderStatus.MATCHING_STORES: {
         OrderStatus.STORE_OFFERED,
+        OrderStatus.AWAITING_PARTIAL_COVERAGE,
         OrderStatus.FAILED,
+        OrderStatus.CANCELLED,
+    },
+    OrderStatus.AWAITING_PARTIAL_COVERAGE: {
+        OrderStatus.CONFIRMED,
+        OrderStatus.DRAFT,
         OrderStatus.CANCELLED,
     },
     OrderStatus.STORE_OFFERED: {
@@ -172,6 +178,11 @@ def ensure_order_confirmable(order: object) -> None:
     if order.delivery_location is None:
         raise OrderNotConfirmable("Delivery location is required to confirm an order.")
 
+    ensure_order_items_confirmable(order)
+
+
+def ensure_order_items_confirmable(order: object) -> None:
+    """Validate persisted lines independently of the order lifecycle state."""
     items = list(order.items.all())
     if not items:
         raise OrderNotConfirmable("At least one order item is required.")

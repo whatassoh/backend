@@ -1,4 +1,4 @@
-from apps.stores.infrastructure.models import SellerDashboardAccessGrant, Store, StoreMembership, StoreOffer, StoreMatchingAttempt, StoreOfferNotification, StoreOfferNotificationAttempt
+from apps.stores.infrastructure.models import SellerDashboardAccessGrant, Store, StoreMembership, StoreOffer, StoreMatchingAttempt, StoreOfferNotification, StoreOfferNotificationAttempt, PartialStoreCoverageProposal
 
 __all__ = [
     "Store",
@@ -8,4 +8,5 @@ __all__ = [
     "StoreMatchingAttempt",
     "StoreOfferNotification",
     "StoreOfferNotificationAttempt",
+    "PartialStoreCoverageProposal",
 ]

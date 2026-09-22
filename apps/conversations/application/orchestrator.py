@@ -757,6 +757,41 @@ class ConversationalOrchestrator:
         return self._outcome(ConversationalOutcomeStatus.PROCESSED, text, context, metadata={"driver_location": True, "matchability": matchability.status.value})
 
     def _handle_action(self, conversation, context, action_id, correlation_id, metadata):
+        if action_id == "order.accept_partial_store_coverage":
+            from apps.stores.application.partial_coverage import PartialCoverageConsentService
+            proposal_id = metadata.get("partial_coverage_proposal_id")
+            try:
+                from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+                proposal = PartialStoreCoverageProposal.objects.filter(pk=proposal_id).first()
+                if proposal is None:
+                    raise ValueError("stale")
+                order, replay = PartialCoverageConsentService().accept(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+            except (ValueError, PermissionError):
+                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Votre commande a été ajustée et nous recherchons à nouveau une boutique.", context)
+        if action_id == "order.modify":
+            # A partial proposal has no active draft context after confirmation;
+            # restore the existing editing flow, never a second editor.
+            from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+            proposal = PartialStoreCoverageProposal.objects.filter(order__customer=conversation.user, status="PENDING").select_related("order").first()
+            if proposal and proposal.order.status == "AWAITING_PARTIAL_COVERAGE":
+                from apps.stores.application.partial_coverage import PartialCoverageConsentService
+                try:
+                    order = PartialCoverageConsentService().return_to_editing(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+                    self.active_order_service.attach_order(conversation, str(order.id), correlation_id=correlation_id)
+                except ValueError:
+                    return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Que souhaitez-vous modifier dans votre commande ?", context)
+        if action_id == "order.cancel":
+            from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+            proposal = PartialStoreCoverageProposal.objects.filter(order__customer=conversation.user, status="PENDING").select_related("order").first()
+            if proposal and proposal.order.status == "AWAITING_PARTIAL_COVERAGE":
+                from apps.stores.application.partial_coverage import PartialCoverageConsentService
+                try:
+                    PartialCoverageConsentService().cancel(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+                except ValueError:
+                    return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Votre commande est annulée.", context)
         if action_id in {"store_order.start_preparation", "store_order.mark_ready"}:
             target = "PREPARING" if action_id == "store_order.start_preparation" else "READY_FOR_PICKUP"
             order_id = self.store_preparation_service.available_order_for(

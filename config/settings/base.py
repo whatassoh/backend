@@ -75,7 +75,7 @@ THIRD_PARTY_APPS = [
 
 LOCAL_APPS = [
     "apps.identity",
-    "apps.stores",
+    "apps.stores.apps.StoresConfig",
     "apps.drivers",
     "apps.catalog",
     "apps.orders",
