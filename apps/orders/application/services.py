@@ -694,6 +694,15 @@ def start_store_matching(
     )
 
 
+def mark_awaiting_partial_coverage(order: Order, *, correlation_id: str | None = None) -> Order:
+    """Matching remains active, but the next decision belongs to the customer."""
+    return _semantic_transition(
+        order, OrderStatus.AWAITING_PARTIAL_COVERAGE,
+        idempotent_from={OrderStatus.AWAITING_PARTIAL_COVERAGE},
+        correlation_id=correlation_id,
+    )
+
+
 def mark_store_offered(
     order: Order,
     *,

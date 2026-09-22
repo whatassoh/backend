@@ -1,7 +1,9 @@
 import pytest
 from django.contrib.gis.geos import Point
 
+from apps.catalog.application.services import create_category, create_product
 from apps.catalog.domain.enums import ProductUnit
+from apps.orders.domain.enums import OrderItemResolutionStatus
 from apps.identity.infrastructure.models import User
 from apps.orders.application.services import (
     add_order_item,
@@ -17,7 +19,8 @@ from apps.stores.domain.enums import StoreStatus
 def confirmed_order():
     user = User.objects.create_user(whatsapp_phone="+237699887766")
     order = create_order_draft(customer=user)
-    add_order_item(order=order, requested_name="Riz", quantity=1, unit=ProductUnit.KG)
+    product = create_product(name="Riz", category=create_category(name="Food"))
+    add_order_item(order=order, requested_name="Riz", quantity=1, unit=ProductUnit.KG, product=product, resolution_status=OrderItemResolutionStatus.MATCHED)
     set_delivery_location(order=order, point=Point(9.7357, 4.0907, srid=4326))
     return confirm_order(order)
 

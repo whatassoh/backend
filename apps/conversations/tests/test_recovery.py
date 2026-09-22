@@ -16,6 +16,8 @@ from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.enums import MessagingChannel
 from apps.orders.application.services import add_order_item, set_delivery_location
+from apps.catalog.application.services import create_category, create_product
+from apps.orders.domain.enums import OrderItemResolutionStatus
 
 
 def conversation():
@@ -64,7 +66,9 @@ def test_recovery_resumes_clarification_before_review():
 def test_recovery_rebuilds_ready_review_from_order_rows():
     convo = conversation()
     active = ActiveCustomerOrderService().get_or_create_draft(convo)
-    add_order_item(order=active.order, requested_name="Riz", quantity=1, unit="KG")
+    product = create_product(name="Riz recovery", category=create_category(name="Food recovery"))
+    add_order_item(order=active.order, requested_name="Riz", quantity=1, unit="KG", product=product,
+                   resolution_status=OrderItemResolutionStatus.MATCHED)
     set_delivery_location(active.order, Point(9.7, 4.05, srid=4326))
     convo.refresh_from_db()
 

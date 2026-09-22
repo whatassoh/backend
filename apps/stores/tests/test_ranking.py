@@ -45,3 +45,22 @@ def test_equal_candidates_have_stable_store_id_tie_break_and_limit():
 
     assert [candidate.store_id for candidate in result.ranked_candidates] == ["a"]
     assert result.ranked_candidates[0].snapshot()["rank"] == 1
+
+
+def test_partial_diagnostics_rank_by_coverage_then_distance_then_store_id():
+    result = StoreRankingService().rank_candidates(
+        SimpleNamespace(id="order-1"),
+        (
+            EligibleStore(store_id="z", distance_meters=10),
+            EligibleStore(store_id="b", distance_meters=5),
+            EligibleStore(store_id="a", distance_meters=5),
+            EligibleStore(store_id="low", distance_meters=1),
+        ),
+        (
+            fulfillment("z", 2, 3, "0.666"), fulfillment("b", 2, 3, "0.666"),
+            fulfillment("a", 2, 3, "0.666"), fulfillment("low", 1, 3, "0.333"),
+        ),
+    )
+
+    assert result.ranked_candidates == ()
+    assert [candidate.store_id for candidate in result.diagnostics] == ["a", "b", "z", "low"]
