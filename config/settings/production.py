@@ -15,3 +15,10 @@ SECURE_PROXY_SSL_HEADER = (
     "HTTP_X_FORWARDED_PROTO",
     "https",
 )
+
+# Internal Prometheus scrape endpoint.
+# Nginx blocks /internal/ from public access; Prometheus reaches it
+# directly through the private Docker network over HTTP.
+SECURE_REDIRECT_EXEMPT = [
+    r"^internal/metrics$",
+]
