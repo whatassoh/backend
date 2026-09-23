@@ -15,10 +15,14 @@ from apps.orders.domain.exceptions import (
     OrderNotRetryable,
 )
 
-DRAFT_MUTABLE_STATUSES = {
+# A building order is the slot protected by the MVP one-order-per-customer invariant.
+# It happens to equal editable draft states today, but is a separate concept.
+BUILDING_ORDER_STATUSES = {
     OrderStatus.DRAFT,
     OrderStatus.AWAITING_LOCATION,
 }
+
+DRAFT_MUTABLE_STATUSES = BUILDING_ORDER_STATUSES
 
 ALLOWED_TRANSITIONS = {
     OrderStatus.DRAFT: {
@@ -189,7 +193,10 @@ def ensure_order_items_confirmable(order: object) -> None:
 
     for item in items:
         item.full_clean()
-        if item.resolution_status != OrderItemResolutionStatus.MATCHED or not item.product_id:
+        if (
+            item.resolution_status != OrderItemResolutionStatus.MATCHED
+            or not item.product_id
+        ):
             raise OrderNotConfirmable("All order items must match a catalog product.")
 
 

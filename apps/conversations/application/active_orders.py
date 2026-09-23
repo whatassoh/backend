@@ -5,7 +5,7 @@ pointer and is consequently validated on every read.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import UUID
 
@@ -15,8 +15,8 @@ from apps.conversations.domain.context import ConversationContext, ConversationF
 from apps.conversations.domain.enums import ConversationStatus
 from apps.conversations.infrastructure.models import Conversation
 from apps.orders.application.services import cancel_order, create_order_draft
-from apps.orders.domain.enums import OrderCancellationCode, OrderStatus
-from apps.orders.domain.rules import DRAFT_MUTABLE_STATUSES
+from apps.orders.domain.enums import OrderCancellationCode
+from apps.orders.domain.rules import BUILDING_ORDER_STATUSES
 from apps.orders.infrastructure.models import Order
 
 logger = logging.getLogger(__name__)
@@ -47,9 +47,9 @@ class ActiveOrderDecision:
 
 
 class ActiveCustomerOrderService:
-    """Serializes draft selection per conversation and enforces ownership."""
+    """Resolves the one building order per user; context is only a cache."""
 
-    active_statuses = frozenset(DRAFT_MUTABLE_STATUSES)
+    active_statuses = frozenset(BUILDING_ORDER_STATUSES)
 
     def _trace(self, event: str, conversation, order=None, correlation_id=None, **data):
         logger.info(
@@ -77,9 +77,14 @@ class ActiveCustomerOrderService:
             return None
 
     def _detach_locked(self, conversation: Conversation, context: ConversationContext):
-        conversation.context = ConversationContext(
-            processed_message_ids=context.processed_message_ids,
-            metadata=context.metadata,
+        conversation.context = replace(context, active_order_id=None).to_payload()
+        conversation.save(update_fields=["context", "updated_at"])
+
+    def _attach_locked(
+        self, conversation: Conversation, context: ConversationContext, order: Order
+    ):
+        conversation.context = replace(
+            context, flow=ConversationFlow.ORDER_BUILDING, active_order_id=str(order.id)
         ).to_payload()
         conversation.save(update_fields=["context", "updated_at"])
 
@@ -87,29 +92,87 @@ class ActiveCustomerOrderService:
         self, conversation: Conversation, *, correlation_id: str | None = None
     ) -> ActiveOrderDecision:
         context = self._context(conversation)
-        raw_context = conversation.context if isinstance(conversation.context, dict) else {}
+        raw_context = (
+            conversation.context if isinstance(conversation.context, dict) else {}
+        )
         active_order_id = raw_context.get("active_order_id", context.active_order_id)
         order_id = self._valid_uuid(active_order_id)
         if order_id is None:
             if active_order_id:
                 self._detach_locked(conversation, context)
-                self._trace("stale_active_order", conversation, correlation_id=correlation_id, reason="invalid_uuid")
-                return ActiveOrderDecision(status=ActiveOrderDecisionStatus.STALE_CONTEXT, reason="invalid_uuid", stale_context_detected=True)
+                self._trace(
+                    "stale_active_order",
+                    conversation,
+                    correlation_id=correlation_id,
+                    reason="invalid_uuid",
+                )
+                return ActiveOrderDecision(
+                    status=ActiveOrderDecisionStatus.STALE_CONTEXT,
+                    reason="invalid_uuid",
+                    stale_context_detected=True,
+                )
             return ActiveOrderDecision(status=ActiveOrderDecisionStatus.NO_ACTIVE_ORDER)
         order = Order.objects.select_for_update().filter(pk=order_id).first()
-        if order is None or order.customer_id != conversation.user_id or order.status not in self.active_statuses:
-            reason = "missing" if order is None else "wrong_owner" if order.customer_id != conversation.user_id else "inactive_status"
+        if (
+            order is None
+            or order.customer_id != conversation.user_id
+            or order.status not in self.active_statuses
+        ):
+            reason = (
+                "missing"
+                if order is None
+                else "wrong_owner"
+                if order.customer_id != conversation.user_id
+                else "inactive_status"
+            )
             self._detach_locked(conversation, context)
-            self._trace("stale_active_order", conversation, order, correlation_id, reason=reason)
-            return ActiveOrderDecision(status=ActiveOrderDecisionStatus.STALE_CONTEXT, reason=reason, stale_context_detected=True)
+            self._trace(
+                "stale_active_order", conversation, order, correlation_id, reason=reason
+            )
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.STALE_CONTEXT,
+                reason=reason,
+                stale_context_detected=True,
+            )
         return ActiveOrderDecision(status=ActiveOrderDecisionStatus.ACTIVE, order=order)
 
+    def _resolve_building_locked(
+        self, conversation: Conversation, *, correlation_id: str | None = None
+    ) -> ActiveOrderDecision:
+        """Validate the pointer, then fall back to the user-owned DB state."""
+        pointer = self._validate_locked(conversation, correlation_id=correlation_id)
+        if pointer.order:
+            return pointer
+        order = (
+            Order.objects.select_for_update()
+            .filter(customer_id=conversation.user_id, status__in=self.active_statuses)
+            .order_by("created_at")
+            .first()
+        )
+        if order is None:
+            return pointer
+        self._attach_locked(conversation, self._context(conversation), order)
+        return ActiveOrderDecision(
+            status=ActiveOrderDecisionStatus.ACTIVE,
+            order=order,
+            stale_context_detected=pointer.stale_context_detected,
+        )
+
     @transaction.atomic
-    def get_active_order(self, conversation: Conversation, *, correlation_id: str | None = None) -> ActiveOrderDecision:
-        locked = Conversation.objects.select_for_update().select_related("user").get(pk=conversation.pk)
+    def get_active_order(
+        self, conversation: Conversation, *, correlation_id: str | None = None
+    ) -> ActiveOrderDecision:
+        locked = (
+            Conversation.objects.select_for_update()
+            .select_related("user")
+            .get(pk=conversation.pk)
+        )
         if locked.status == ConversationStatus.CLOSED:
-            return ActiveOrderDecision(status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION, reason="conversation_closed")
-        return self._validate_locked(locked, correlation_id=correlation_id)
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION,
+                reason="conversation_closed",
+            )
+        return self._resolve_building_locked(locked, correlation_id=correlation_id)
 
     def validate_active_order(
         self, conversation: Conversation, *, correlation_id: str | None = None
@@ -173,18 +236,31 @@ class ActiveCustomerOrderService:
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._trace("draft_resumed", locked, order, correlation_id)
-        return ActiveOrderDecision(status=ActiveOrderDecisionStatus.RESUMED, order=order)
+        return ActiveOrderDecision(
+            status=ActiveOrderDecisionStatus.RESUMED, order=order
+        )
 
     @transaction.atomic
-    def get_or_create_draft(self, conversation: Conversation, *, correlation_id: str | None = None) -> ActiveOrderDecision:
-        locked = Conversation.objects.select_for_update().select_related("user").get(pk=conversation.pk)
+    def get_or_create_draft(
+        self, conversation: Conversation, *, correlation_id: str | None = None
+    ) -> ActiveOrderDecision:
+        locked = (
+            Conversation.objects.select_for_update()
+            .select_related("user")
+            .get(pk=conversation.pk)
+        )
         if locked.status == ConversationStatus.CLOSED:
-            return ActiveOrderDecision(status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION, reason="conversation_closed")
-        decision = self._validate_locked(locked, correlation_id=correlation_id)
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION,
+                reason="conversation_closed",
+            )
+        decision = self._resolve_building_locked(locked, correlation_id=correlation_id)
         if decision.order:
             self._trace("draft_resumed", locked, decision.order, correlation_id)
             return decision
-        order = create_order_draft(customer=locked.user, actor=locked.user, correlation_id=correlation_id)
+        order = create_order_draft(
+            customer=locked.user, actor=locked.user, correlation_id=correlation_id
+        )
         context = self._context(locked)
         locked.context = ConversationContext(
             flow=ConversationFlow.ORDER_BUILDING,
@@ -194,31 +270,63 @@ class ActiveCustomerOrderService:
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._trace("draft_created", locked, order, correlation_id)
-        return ActiveOrderDecision(status=ActiveOrderDecisionStatus.CREATED, order=order, stale_context_detected=decision.stale_context_detected)
-
-    @transaction.atomic
-    def resume_order(self, conversation: Conversation, order_id: str, *, correlation_id: str | None = None) -> ActiveOrderDecision:
-        return self.attach_order(
-            conversation, order_id, correlation_id=correlation_id
+        return ActiveOrderDecision(
+            status=ActiveOrderDecisionStatus.CREATED,
+            order=order,
+            stale_context_detected=decision.stale_context_detected,
         )
 
     @transaction.atomic
-    def abandon_order(self, conversation: Conversation, *, correlation_id: str | None = None) -> ActiveOrderDecision:
-        locked = Conversation.objects.select_for_update().select_related("user").get(pk=conversation.pk)
+    def resume_order(
+        self,
+        conversation: Conversation,
+        order_id: str,
+        *,
+        correlation_id: str | None = None,
+    ) -> ActiveOrderDecision:
+        return self.attach_order(conversation, order_id, correlation_id=correlation_id)
+
+    @transaction.atomic
+    def abandon_order(
+        self, conversation: Conversation, *, correlation_id: str | None = None
+    ) -> ActiveOrderDecision:
+        locked = (
+            Conversation.objects.select_for_update()
+            .select_related("user")
+            .get(pk=conversation.pk)
+        )
         if locked.status == ConversationStatus.CLOSED:
-            return ActiveOrderDecision(status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION, reason="conversation_closed")
-        decision = self._validate_locked(locked, correlation_id=correlation_id)
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION,
+                reason="conversation_closed",
+            )
+        decision = self._resolve_building_locked(locked, correlation_id=correlation_id)
         if not decision.order:
             return decision
-        order = cancel_order(decision.order, OrderCancellationCode.CUSTOMER_REQUEST, actor=locked.user, correlation_id=correlation_id)
+        order = cancel_order(
+            decision.order,
+            OrderCancellationCode.CUSTOMER_REQUEST,
+            actor=locked.user,
+            correlation_id=correlation_id,
+        )
         self._detach_locked(locked, self._context(locked))
         self._trace("draft_abandoned", locked, order, correlation_id)
-        return ActiveOrderDecision(status=ActiveOrderDecisionStatus.ABANDONED, order=order)
+        return ActiveOrderDecision(
+            status=ActiveOrderDecisionStatus.ABANDONED, order=order
+        )
 
-    def start_new(self, conversation: Conversation, *, correlation_id: str | None = None) -> ActiveOrderDecision:
+    def start_new(
+        self, conversation: Conversation, *, correlation_id: str | None = None
+    ) -> ActiveOrderDecision:
         """Never creates an empty draft; an existing one needs explicit abandonment."""
         decision = self.get_active_order(conversation, correlation_id=correlation_id)
         if decision.order:
-            self._trace("active_order_conflict", conversation, decision.order, correlation_id)
-            return ActiveOrderDecision(status=ActiveOrderDecisionStatus.REQUIRES_USER_CHOICE, order=decision.order, requires_user_choice=True)
+            self._trace(
+                "active_order_conflict", conversation, decision.order, correlation_id
+            )
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.REQUIRES_USER_CHOICE,
+                order=decision.order,
+                requires_user_choice=True,
+            )
         return decision
