@@ -64,9 +64,15 @@ class OrderReviewService:
             blockers.append("delivery_location_missing")
         if has_pending_clarification:
             blockers.append("clarification_pending")
-        if any(item.resolution_status == OrderItemResolutionStatus.AMBIGUOUS for item in items):
+        if any(
+            item.resolution_status == OrderItemResolutionStatus.AMBIGUOUS
+            for item in items
+        ):
             blockers.append("ambiguous_item")
-        if any(item.resolution_status == OrderItemResolutionStatus.UNMATCHED for item in items):
+        if any(
+            item.resolution_status == OrderItemResolutionStatus.UNMATCHED
+            for item in items
+        ):
             blockers.append("unmatched_items")
         readiness = OrderConfirmationReadiness(
             ready=not blockers,
@@ -111,12 +117,21 @@ class OrderReviewService:
         payload = {
             "order_id": str(order.id),
             "status": order.status,
-            "location": order.delivery_location.ewkt if order.delivery_location else None,
+            "location": order.delivery_location.ewkt
+            if order.delivery_location
+            else None,
             "address": order.delivery_address_label,
             "instructions": order.delivery_instructions,
             "items": [
-                (item.order_item_id, item.quantity, item.unit, item.resolution_status,
-                 item.product_name, item.variant_name, item.requested_name)
+                (
+                    item.order_item_id,
+                    item.quantity,
+                    item.unit,
+                    item.resolution_status,
+                    item.product_name,
+                    item.variant_name,
+                    item.requested_name,
+                )
                 for item in items
             ],
         }

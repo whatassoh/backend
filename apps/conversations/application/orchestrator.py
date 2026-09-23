@@ -1,15 +1,25 @@
 import re
 import logging
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
+from uuid import UUID
 from enum import StrEnum
 from typing import Any
 
 from django.contrib.gis.geos import Point
 
 from apps.ai.domain.exceptions import AIError
-from apps.ai.domain.understanding import ExtractedItem, MessageIntent
+from apps.ai.domain.understanding import ExtractedItem, MessageIntent, OrderAction
 from apps.catalog.application.grounding import CatalogGroundingService
 from apps.conversations.application.active_orders import ActiveCustomerOrderService
+from apps.conversations.application.capabilities import (
+    NOT_IMPLEMENTED_RESPONSES,
+    OUT_OF_SCOPE_RESPONSE,
+    SOCIAL_RESPONSE,
+    UNKNOWN_RESPONSE,
+    CapabilityStatus,
+    classify_capability,
+)
 from apps.conversations.application.clarification import ClarificationEngine
 from apps.conversations.application.context import ConversationContextService
 from apps.conversations.application.order_building import (
@@ -23,10 +33,19 @@ from apps.conversations.application.recovery import (
 )
 from apps.conversations.application.seller_onboarding import SellerOnboardingService
 from apps.conversations.application.driver_onboarding import DriverOnboardingService
-from apps.conversations.application.seller_catalog_conversation import SellerCatalogConversationService
-from apps.conversations.domain.context import ConversationFlow
+from apps.conversations.application.seller_catalog_conversation import (
+    SellerCatalogConversationService,
+)
+from apps.conversations.domain.context import (
+    ClarificationKind,
+    ConversationFlow,
+    PendingClarification,
+)
 from apps.conversations.domain.context import ActiveJourney
-from apps.conversations.application.journey import JourneyRoutingService, JourneyRoutingStatus
+from apps.conversations.application.journey import (
+    JourneyRoutingService,
+    JourneyRoutingStatus,
+)
 from apps.conversations.infrastructure.models import Conversation
 from apps.messaging.domain.dtos import NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType
@@ -38,7 +57,14 @@ from apps.orders.application.services import (
     set_delivery_location,
 )
 from apps.orders.application.review import OrderReviewService
-from apps.stores.application.preparation import StorePreparationResult, StorePreparationService
+from apps.orders.domain.enums import OrderItemResolutionStatus
+from apps.catalog.infrastructure.models import Product
+from apps.catalog.domain.enums import ProductStatus
+from apps.orders.application.selectors import get_customer_orders
+from apps.stores.application.preparation import (
+    StorePreparationResult,
+    StorePreparationService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,14 +138,18 @@ class ConversationalOrchestrator:
         self.journey_routing_service = journey_routing_service or JourneyRoutingService(
             context_service=self.context_service
         )
-        self.seller_onboarding_service = seller_onboarding_service or SellerOnboardingService(
-            context_service=self.context_service
+        self.seller_onboarding_service = (
+            seller_onboarding_service
+            or SellerOnboardingService(context_service=self.context_service)
         )
-        self.driver_onboarding_service = driver_onboarding_service or DriverOnboardingService(
-            context_service=self.context_service
+        self.driver_onboarding_service = (
+            driver_onboarding_service
+            or DriverOnboardingService(context_service=self.context_service)
         )
         self.seller_catalog_conversation_service = seller_catalog_conversation_service
-        self.store_preparation_service = store_preparation_service or StorePreparationService()
+        self.store_preparation_service = (
+            store_preparation_service or StorePreparationService()
+        )
 
     def process_message(
         self,
@@ -128,6 +158,8 @@ class ConversationalOrchestrator:
         *,
         correlation_id: str | None = None,
     ) -> ConversationalOutcome:
+        if getattr(conversation, "pk", None):
+            conversation.refresh_from_db()
         context = self.context_service.get_context(conversation)
         if message.external_message_id in context.processed_message_ids:
             return self._outcome(
@@ -140,9 +172,22 @@ class ConversationalOrchestrator:
         except AIError:
             return self._outcome(
                 ConversationalOutcomeStatus.RECOVERABLE_FAILURE,
-                "Je n'arrive pas à traiter votre demande pour le moment. Réessayez.",
+                "Je n’arrive pas à traiter votre demande pour le moment. Réessayez.",
                 context,
             )
+        except Exception:
+            logger.exception(
+                "conversation_orchestration_unexpected",
+                extra={"correlation_id": correlation_id, "channel": message.channel, "normalized_message_type": message.message_type, "action_id_present": bool(message.metadata.get("action_id")), "flow_before": context.flow},
+            )
+            raise
+        # Mark only after a complete, successful decision; failures remain retryable.
+        self.context_service.mark_message_processed(conversation, message.external_message_id)
+        logger.info(
+            "conversation_turn_completed",
+            extra={"correlation_id": correlation_id, "channel": message.channel, "normalized_message_type": message.message_type, "action_id_present": bool(message.metadata.get("action_id")), "flow_before": context.flow, "flow_after": self.context_service.get_context(conversation).flow, "outcome_type": outcome.status, "outbound_type": "response_plan"},
+        )
+        return outcome
         # Mark only after a complete, successful decision; failures remain retryable.
         self.context_service.mark_message_processed(
             conversation, message.external_message_id
@@ -150,10 +195,19 @@ class ConversationalOrchestrator:
         return outcome
 
     def _process(self, conversation, context, message, correlation_id):
-        onboarding = self.seller_onboarding_service.handle(conversation, context, message)
+        universal = self._try_universal_interrupt(
+            conversation, context, message, correlation_id
+        )
+        if universal is not None:
+            return universal
+        onboarding = self.seller_onboarding_service.handle(
+            conversation, context, message
+        )
         if onboarding is not None:
             return self._from_seller_onboarding(onboarding, context)
-        driver_onboarding = self.driver_onboarding_service.handle(conversation, context, message)
+        driver_onboarding = self.driver_onboarding_service.handle(
+            conversation, context, message
+        )
         if driver_onboarding is not None:
             return self._from_driver_onboarding(driver_onboarding, context)
         if self.seller_catalog_conversation_service:
@@ -163,7 +217,10 @@ class ConversationalOrchestrator:
             if catalog is not None:
                 return self._from_seller_catalog(catalog, context)
         if message.message_type == MessageType.LOCATION:
-            if context.active_journey == ActiveJourney.DELIVER and message.location is not None:
+            if (
+                context.active_journey == ActiveJourney.DELIVER
+                and message.location is not None
+            ):
                 return self._handle_driver_location(conversation, context, message)
             return self._handle_location(conversation, context, message, correlation_id)
         if context.metadata.get("awaiting_delivery_instructions") and message.text:
@@ -172,23 +229,45 @@ class ConversationalOrchestrator:
             )
         action_id = message.metadata.get("action_id")
         if action_id:
-            logger.info("structured_action_resolved", extra={"correlation_id": correlation_id, "channel": message.channel, "action_id": action_id, "journey": context.active_journey, "flow": context.flow})
-            driver_offer = self._driver_offer_action(conversation, context, action_id, correlation_id)
+            logger.info(
+                "structured_action_resolved",
+                extra={
+                    "correlation_id": correlation_id,
+                    "channel": message.channel,
+                    "action_id": action_id,
+                    "journey": context.active_journey,
+                    "flow": context.flow,
+                },
+            )
+            choice = self._clarification_choice_action(
+                conversation, context, action_id, correlation_id
+            )
+            if choice is not None:
+                return choice
+            driver_offer = self._driver_offer_action(
+                conversation, context, action_id, correlation_id
+            )
             if driver_offer is not None:
                 return driver_offer
-            delivery = self._delivery_action(conversation, context, action_id, correlation_id)
+            delivery = self._delivery_action(
+                conversation, context, action_id, correlation_id
+            )
             if delivery is not None:
                 return delivery
             journey = self.journey_routing_service.journey_for_action(action_id)
             if journey:
                 return self._select_journey(conversation, context, journey)
-            availability = self._driver_availability_action(conversation, context, action_id)
+            availability = self._driver_availability_action(
+                conversation, context, action_id
+            )
             if availability is not None:
                 return availability
             return self._handle_action(
                 conversation, context, action_id, correlation_id, message.metadata
             )
-        availability = self._natural_driver_availability(conversation, context, message.text)
+        availability = self._natural_driver_availability(
+            conversation, context, message.text
+        )
         if availability is not None:
             return availability
         understanding = self.understanding_service.understand_normalized(
@@ -200,8 +279,27 @@ class ConversationalOrchestrator:
                 "Cette action n'est pas disponible.",
                 context,
             )
+        replacement = self._complete_unmatched_replacement(
+            conversation, context, understanding, correlation_id
+        )
+        if replacement is not None:
+            return replacement
+        capability = classify_capability(understanding.intent)
+        logger.info(
+            "conversation_capability_classified",
+            extra={
+                "correlation_id": correlation_id,
+                "channel": message.channel,
+                "intent": understanding.intent,
+                "confidence": str(understanding.confidence),
+                "capability": capability.name,
+                "capability_status": capability.status,
+            },
+        )
         if float(understanding.confidence) < self.confidence_threshold:
-            return self._ask_journey(conversation, context)
+            return self._capability_outcome(context, None)
+        if capability.status != CapabilityStatus.SUPPORTED:
+            return self._capability_outcome(context, capability)
         if understanding.intent == MessageIntent.SELL:
             return self._select_journey(conversation, context, ActiveJourney.SELL)
         if understanding.intent == MessageIntent.DELIVER:
@@ -210,22 +308,11 @@ class ConversationalOrchestrator:
             if context.active_journey != ActiveJourney.BUY:
                 self.journey_routing_service.select(conversation, ActiveJourney.BUY)
                 context = replace(context, active_journey=ActiveJourney.BUY)
-        if understanding.intent == MessageIntent.GREETING:
-            # Lightweight/unit callers can use an in-memory conversation stub;
-            # recovery is persistence-backed and only applies to real rows.
-            if not getattr(conversation, "pk", None):
-                return self._ask_journey(conversation, context)
-            recovery = self.recovery_service.recover(
-                conversation, context, correlation_id=correlation_id
-            )
-            if recovery.status != RecoveryStatus.NO_ACTIVE_FLOW:
-                return self._recovery_outcome(conversation, context, recovery)
-            if context.active_journey is None:
-                return self._ask_journey(conversation, context)
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Bonjour ! Que souhaitez-vous faire ?", context)
-        if understanding.intent in {MessageIntent.HELP, MessageIntent.UNKNOWN}:
-            if context.active_journey is None:
-                return self._ask_journey(conversation, context)
+        if understanding.intent == MessageIntent.ORDER_RESUME:
+            return self._resume_workflow(conversation, context, correlation_id)
+        if understanding.intent == MessageIntent.ORDER_HISTORY:
+            return self._order_history_outcome(conversation, context)
+        if understanding.intent == MessageIntent.HELP:
             return self._handle_knowledge_or_unknown(
                 conversation,
                 context,
@@ -233,10 +320,28 @@ class ConversationalOrchestrator:
                 understanding.intent,
                 correlation_id,
             )
-        if understanding.intent == MessageIntent.CANCEL:
+        if (
+            understanding.intent == MessageIntent.CANCEL
+            or understanding.order_action == OrderAction.CANCEL
+        ):
             return self._cancel_active_order(conversation, context, correlation_id)
-        if understanding.intent == MessageIntent.CONFIRM:
+        if (
+            understanding.intent == MessageIntent.CONFIRM
+            or understanding.order_action == OrderAction.CONFIRM
+        ):
+            # A textual yes is meaningful only after this conversation presented a review.
+            if context.flow != ConversationFlow.AWAITING_CONFIRMATION:
+                return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+
+                    "Je peux confirmer une commande après son récapitulatif. Que souhaitez-vous commander ?",
+                    context,
+                )
             return self._confirm_active_order(conversation, context, correlation_id)
+        if understanding.order_action == OrderAction.RESUME:
+            return self._resume_workflow(conversation, context, correlation_id)
+        if understanding.order_action == OrderAction.CHANGE_LOCATION:
+            return self._start_location_change(conversation, context)
         if understanding.location_text and not understanding.items:
             return self._handle_text_address(
                 conversation, context, understanding.location_text, correlation_id
@@ -278,31 +383,67 @@ class ConversationalOrchestrator:
         decision = self.journey_routing_service.select(conversation, journey)
         context = replace(context, active_journey=journey)
         if decision.status == JourneyRoutingStatus.SELLER_ONBOARDING_REQUIRED:
-            return self._with_journey_metadata(self._from_seller_onboarding(
-                self.seller_onboarding_service.start(conversation), context
-            ), journey, decision)
+            return self._with_journey_metadata(
+                self._from_seller_onboarding(
+                    self.seller_onboarding_service.start(conversation), context
+                ),
+                journey,
+                decision,
+            )
         if decision.status == JourneyRoutingStatus.DRIVER_ONBOARDING_REQUIRED:
-            return self._with_journey_metadata(self._from_driver_onboarding(self.driver_onboarding_service.start(conversation), context), journey, decision)
+            return self._with_journey_metadata(
+                self._from_driver_onboarding(
+                    self.driver_onboarding_service.start(conversation), context
+                ),
+                journey,
+                decision,
+            )
         if journey == ActiveJourney.BUY:
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Parfait. Que souhaitez-vous commander ?", context, metadata={"journey": journey.value, "journey_status": decision.status.value})
+            return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                "Parfait. Que souhaitez-vous commander ?",
+                context,
+                metadata={
+                    "journey": journey.value,
+                    "journey_status": decision.status.value,
+                },
+            )
         text = (
-            "Votre parcours vendeur est prêt." if decision.status == JourneyRoutingStatus.SELLER_JOURNEY_READY
-            else "Pour vendre, l'onboarding vendeur est requis."
-        ) if journey == ActiveJourney.SELL else (
-            "Votre parcours livreur est prêt." if decision.status == JourneyRoutingStatus.DRIVER_JOURNEY_READY
-            else "Pour livrer, l'onboarding livreur est requis."
+            (
+                "Votre parcours vendeur est prêt."
+                if decision.status == JourneyRoutingStatus.SELLER_JOURNEY_READY
+                else "Pour vendre, l'onboarding vendeur est requis."
+            )
+            if journey == ActiveJourney.SELL
+            else (
+                "Votre parcours livreur est prêt."
+                if decision.status == JourneyRoutingStatus.DRIVER_JOURNEY_READY
+                else "Pour livrer, l'onboarding livreur est requis."
+            )
         )
-        if journey == ActiveJourney.SELL and decision.status == JourneyRoutingStatus.SELLER_JOURNEY_READY:
-            return self._with_journey_metadata(ConversationalOutcome(
-                status=ConversationalOutcomeStatus.PROCESSED,
-                response=ResponsePlan(
-                    text=text,
-                    actions=(ResponseAction(action_id="seller.dashboard.open", label="Ouvrir mon espace vendeur"),),
+        if (
+            journey == ActiveJourney.SELL
+            and decision.status == JourneyRoutingStatus.SELLER_JOURNEY_READY
+        ):
+            return self._with_journey_metadata(
+                ConversationalOutcome(
+                    status=ConversationalOutcomeStatus.PROCESSED,
+                    response=ResponsePlan(
+                        text=text,
+                        actions=(
+                            ResponseAction(
+                                action_id="seller.dashboard.open",
+                                label="Ouvrir mon espace vendeur",
+                            ),
+                        ),
+                        metadata={"seller_workspace": True},
+                    ),
+                    active_order_id=context.active_order_id,
                     metadata={"seller_workspace": True},
                 ),
-                active_order_id=context.active_order_id,
-                metadata={"seller_workspace": True},
-            ), journey, decision)
+                journey,
+                decision,
+            )
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
             text,
@@ -316,8 +457,19 @@ class ConversationalOrchestrator:
 
     @staticmethod
     def _with_journey_metadata(outcome, journey, decision):
-        metadata = {**outcome.metadata, "journey": journey.value, "journey_status": decision.status.value}
-        response = replace(outcome.response, metadata={**outcome.response.metadata, "journey": journey.value, "journey_status": decision.status.value})
+        metadata = {
+            **outcome.metadata,
+            "journey": journey.value,
+            "journey_status": decision.status.value,
+        }
+        response = replace(
+            outcome.response,
+            metadata={
+                **outcome.response.metadata,
+                "journey": journey.value,
+                "journey_status": decision.status.value,
+            },
+        )
         return replace(outcome, response=response, metadata=metadata)
 
     def _from_seller_onboarding(self, onboarding, context):
@@ -339,57 +491,132 @@ class ConversationalOrchestrator:
     def _from_driver_onboarding(self, onboarding, context):
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
-            response=ResponsePlan(text=onboarding.text, actions=tuple(ResponseAction(action_id=action.action_id, label=action.label) for action in onboarding.actions), metadata=dict(onboarding.metadata)),
+            response=ResponsePlan(
+                text=onboarding.text,
+                actions=tuple(
+                    ResponseAction(action_id=action.action_id, label=action.label)
+                    for action in onboarding.actions
+                ),
+                metadata=dict(onboarding.metadata),
+            ),
             active_order_id=context.active_order_id,
             metadata=dict(onboarding.metadata),
         )
 
     def _driver_availability_action(self, conversation, context, action_id):
-        if action_id not in {"driver.availability.available", "driver.availability.offline"}:
+        if action_id not in {
+            "driver.availability.available",
+            "driver.availability.offline",
+        }:
             return None
         if context.active_journey != ActiveJourney.DELIVER:
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette action est réservée au parcours livreur.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette action est réservée au parcours livreur.",
+                context,
+            )
         from apps.drivers.application.availability import DriverAvailabilityService
         from apps.drivers.application.selectors import get_driver_by_user
+
         driver = get_driver_by_user(conversation.user)
         if driver is None:
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Créez d'abord votre profil livreur.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Créez d'abord votre profil livreur.",
+                context,
+            )
         service = DriverAvailabilityService()
-        driver = service.set_available(driver, conversation.user) if action_id.endswith("available") else service.set_offline(driver, conversation.user)
+        driver = (
+            service.set_available(driver, conversation.user)
+            if action_id.endswith("available")
+            else service.set_offline(driver, conversation.user)
+        )
         matchability = service.get_matchability(driver)
-        text = "Vous êtes disponible." if action_id.endswith("available") else "Vous êtes hors ligne pour les nouvelles livraisons."
+        text = (
+            "Vous êtes disponible."
+            if action_id.endswith("available")
+            else "Vous êtes hors ligne pour les nouvelles livraisons."
+        )
         if matchability.status.value == "LOCATION_REQUIRED":
             text += " Partagez votre position pour recevoir des livraisons."
         elif matchability.status.value == "LOCATION_REFRESH_REQUIRED":
             text += " Actualisez votre position pour recevoir des livraisons."
-        return self._outcome(ConversationalOutcomeStatus.PROCESSED, text, context, metadata={"driver_availability": True, "matchability": matchability.status.value})
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            text,
+            context,
+            metadata={
+                "driver_availability": True,
+                "matchability": matchability.status.value,
+            },
+        )
 
     def _driver_offer_action(self, conversation, context, action_id, correlation_id):
         if action_id not in {"driver_offer.accept", "driver_offer.reject"}:
             return None
-        offer_id = context.metadata.get("driver_offer_id") if hasattr(context, "metadata") else None
+        offer_id = (
+            context.metadata.get("driver_offer_id")
+            if hasattr(context, "metadata")
+            else None
+        )
         if not offer_id:
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette proposition n'est plus disponible.",
+                context,
+            )
         from apps.drivers.application.dispatch import DriverMatchingOrchestrator
         from apps.drivers.infrastructure.models import DriverOffer
+
         offer = DriverOffer.objects.filter(pk=offer_id).first()
         if offer is None or offer.driver.user_id != conversation.user_id:
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est pas autorisée.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette proposition n'est pas autorisée.",
+                context,
+            )
         try:
             if action_id == "driver_offer.accept":
-                DriverMatchingOrchestrator().handle_accept(offer, actor=conversation.user, correlation_id=correlation_id)
-                from apps.drivers.application.delivery_execution import DeliveryExecutionService
-                mission = DeliveryExecutionService().get_active_mission(conversation.user)
-                return self._outcome(
-                    ConversationalOutcomeStatus.PROCESSED,
-                    f"Livraison acceptée. Retrait : {mission.pickup.display_name}.", context,
-                    metadata={"driver_offer": "ACCEPTED", "assignment_id": mission.assignment_id},
-                    actions=(ResponseAction(action_id="delivery.confirm_pickup", label="Commande récupérée"),),
+                DriverMatchingOrchestrator().handle_accept(
+                    offer, actor=conversation.user, correlation_id=correlation_id
                 )
-            DriverMatchingOrchestrator().handle_reject(offer, actor=conversation.user, correlation_id=correlation_id)
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Proposition refusée.", context, metadata={"driver_offer": "REJECTED"})
+                from apps.drivers.application.delivery_execution import (
+                    DeliveryExecutionService,
+                )
+
+                mission = DeliveryExecutionService().get_active_mission(
+                    conversation.user
+                )
+                return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                    f"Livraison acceptée. Retrait : {mission.pickup.display_name}.",
+                    context,
+                    metadata={
+                        "driver_offer": "ACCEPTED",
+                        "assignment_id": mission.assignment_id,
+                    },
+                    actions=(
+                        ResponseAction(
+                            action_id="delivery.confirm_pickup",
+                            label="Commande récupérée",
+                        ),
+                    ),
+                )
+            DriverMatchingOrchestrator().handle_reject(
+                offer, actor=conversation.user, correlation_id=correlation_id
+            )
+            return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                "Proposition refusée.",
+                context,
+                metadata={"driver_offer": "REJECTED"},
+            )
         except (ValueError, PermissionError):
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette proposition n'est plus disponible.",
+                context,
+            )
 
     def _delivery_action(self, conversation, context, action_id, correlation_id):
         issue_actions = {
@@ -399,78 +626,188 @@ class ConversationalOrchestrator:
             "delivery.issue.other": "OTHER",
         }
         if action_id == "delivery.report_issue":
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Quel problème rencontrez-vous ?", context, actions=tuple(
-                ResponseAction(action_id=key, label=label) for key, label in (
-                    ("delivery.issue.customer_unreachable", "Client injoignable"),
-                    ("delivery.issue.address_problem", "Problème d'adresse"),
-                    ("delivery.issue.vehicle_problem", "Problème de véhicule"),
-                    ("delivery.issue.other", "Autre problème"),
-                )
-            ))
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Quel problème rencontrez-vous ?",
+                context,
+                actions=tuple(
+                    ResponseAction(action_id=key, label=label)
+                    for key, label in (
+                        ("delivery.issue.customer_unreachable", "Client injoignable"),
+                        ("delivery.issue.address_problem", "Problème d'adresse"),
+                        ("delivery.issue.vehicle_problem", "Problème de véhicule"),
+                        ("delivery.issue.other", "Autre problème"),
+                    )
+                ),
+            )
         if action_id in issue_actions:
-            from apps.drivers.application.delivery_execution import DeliveryExecutionService, DeliveryMissionAuthorizationError
+            from apps.drivers.application.delivery_execution import (
+                DeliveryExecutionService,
+                DeliveryMissionAuthorizationError,
+            )
+
             try:
-                mission = DeliveryExecutionService().get_active_mission(conversation.channel_identity)
-                issue, _ = DeliveryExecutionService().report_issue(conversation.channel_identity, assignment_id=mission.assignment_id, issue_type=issue_actions[action_id], correlation_id=correlation_id)
+                mission = DeliveryExecutionService().get_active_mission(
+                    conversation.channel_identity
+                )
+                issue, _ = DeliveryExecutionService().report_issue(
+                    conversation.channel_identity,
+                    assignment_id=mission.assignment_id,
+                    issue_type=issue_actions[action_id],
+                    correlation_id=correlation_id,
+                )
             except (DeliveryMissionAuthorizationError, ValueError):
-                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Ce signalement n'est plus disponible.", context)
-            self.context_service.update_context(conversation, replace(context, metadata={**context.metadata, "delivery_issue_id": str(issue.id)}))
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Incident enregistré.", context, actions=(ResponseAction(action_id="delivery.confirm_failure", label="Confirmer l'impossibilité"),))
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Ce signalement n'est plus disponible.",
+                    context,
+                )
+            self.context_service.update_context(
+                conversation,
+                replace(
+                    context,
+                    metadata={**context.metadata, "delivery_issue_id": str(issue.id)},
+                ),
+            )
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Incident enregistré.",
+                context,
+                actions=(
+                    ResponseAction(
+                        action_id="delivery.confirm_failure",
+                        label="Confirmer l'impossibilité",
+                    ),
+                ),
+            )
         if action_id == "delivery.confirm_failure":
             issue_id = context.metadata.get("delivery_issue_id")
             if not issue_id:
-                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Aucun incident à confirmer.", context)
-            from apps.drivers.application.delivery_execution import DeliveryExecutionService, DeliveryMissionAuthorizationError
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Aucun incident à confirmer.",
+                    context,
+                )
+            from apps.drivers.application.delivery_execution import (
+                DeliveryExecutionService,
+                DeliveryMissionAuthorizationError,
+            )
+
             try:
-                mission = DeliveryExecutionService().get_active_mission(conversation.channel_identity)
-                _, duplicate = DeliveryExecutionService().confirm_failure(conversation.channel_identity, assignment_id=mission.assignment_id, issue_id=issue_id, correlation_id=correlation_id)
+                mission = DeliveryExecutionService().get_active_mission(
+                    conversation.channel_identity
+                )
+                _, duplicate = DeliveryExecutionService().confirm_failure(
+                    conversation.channel_identity,
+                    assignment_id=mission.assignment_id,
+                    issue_id=issue_id,
+                    correlation_id=correlation_id,
+                )
             except (DeliveryMissionAuthorizationError, ValueError):
-                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette confirmation n'est plus disponible.", context)
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Échec de livraison déjà confirmé." if duplicate else "Échec de livraison confirmé.", context)
-        if action_id not in {"delivery.confirm_pickup", "delivery.start_delivery", "delivery.confirm_delivered"}:
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Cette confirmation n'est plus disponible.",
+                    context,
+                )
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Échec de livraison déjà confirmé."
+                if duplicate
+                else "Échec de livraison confirmé.",
+                context,
+            )
+        if action_id not in {
+            "delivery.confirm_pickup",
+            "delivery.start_delivery",
+            "delivery.confirm_delivered",
+        }:
             return None
         from apps.drivers.application.delivery_execution import (
             DeliveryExecutionService,
             DeliveryMissionAuthorizationError,
             DeliveryMissionNotFound,
         )
+
         try:
             service = DeliveryExecutionService()
             result = (
-                service.confirm_pickup(conversation.channel_identity, correlation_id=correlation_id)
+                service.confirm_pickup(
+                    conversation.channel_identity, correlation_id=correlation_id
+                )
                 if action_id == "delivery.confirm_pickup"
-                else service.start_delivery(conversation.channel_identity, correlation_id=correlation_id)
+                else service.start_delivery(
+                    conversation.channel_identity, correlation_id=correlation_id
+                )
                 if action_id == "delivery.start_delivery"
-                else service.confirm_delivered(conversation.channel_identity, correlation_id=correlation_id)
+                else service.confirm_delivered(
+                    conversation.channel_identity, correlation_id=correlation_id
+                )
             )
         except (DeliveryMissionAuthorizationError, DeliveryMissionNotFound, ValueError):
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
-                "Cette confirmation de retrait n'est plus disponible.", context,
+                "Cette confirmation de retrait n'est plus disponible.",
+                context,
             )
         if action_id == "delivery.start_delivery":
-            text = "Livraison déjà en cours." if result.duplicate else "Livraison démarrée."
+            text = (
+                "Livraison déjà en cours."
+                if result.duplicate
+                else "Livraison démarrée."
+            )
             return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED, text, context,
-                metadata={"delivery_start": "DUPLICATE" if result.duplicate else "CONFIRMED"},
+                ConversationalOutcomeStatus.PROCESSED,
+                text,
+                context,
+                metadata={
+                    "delivery_start": "DUPLICATE" if result.duplicate else "CONFIRMED"
+                },
                 actions=(
-                    ResponseAction(action_id="delivery.confirm_delivered", label="Commande livrée"),
-                    ResponseAction(action_id="delivery.report_issue", label="Signaler un problème"),
+                    ResponseAction(
+                        action_id="delivery.confirm_delivered", label="Commande livrée"
+                    ),
+                    ResponseAction(
+                        action_id="delivery.report_issue", label="Signaler un problème"
+                    ),
                 ),
             )
         if action_id == "delivery.confirm_delivered":
-            text = "Livraison déjà terminée." if result.duplicate else "Livraison terminée."
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED, text, context,
-                metadata={"delivery_completion": "DUPLICATE" if result.duplicate else "CONFIRMED"},
+            text = (
+                "Livraison déjà terminée."
+                if result.duplicate
+                else "Livraison terminée."
             )
-        destination = result.mission.destination.address_label or "Destination enregistrée"
-        prefix = "Retrait déjà confirmé." if result.duplicate else "Commande récupérée confirmée."
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                text,
+                context,
+                metadata={
+                    "delivery_completion": "DUPLICATE"
+                    if result.duplicate
+                    else "CONFIRMED"
+                },
+            )
+        destination = (
+            result.mission.destination.address_label or "Destination enregistrée"
+        )
+        prefix = (
+            "Retrait déjà confirmé."
+            if result.duplicate
+            else "Commande récupérée confirmée."
+        )
         text = f"{prefix}\nDestination : {destination}"
         return self._outcome(
-            ConversationalOutcomeStatus.PROCESSED, text, context,
-            metadata={"delivery_pickup": "DUPLICATE" if result.duplicate else "CONFIRMED"},
-            actions=(ResponseAction(action_id="delivery.start_delivery", label="Démarrer la livraison"),),
+            ConversationalOutcomeStatus.PROCESSED,
+            text,
+            context,
+            metadata={
+                "delivery_pickup": "DUPLICATE" if result.duplicate else "CONFIRMED"
+            },
+            actions=(
+                ResponseAction(
+                    action_id="delivery.start_delivery", label="Démarrer la livraison"
+                ),
+            ),
         )
 
     def _natural_driver_availability(self, conversation, context, text):
@@ -482,7 +819,11 @@ class ConversationalOrchestrator:
             action = "driver.availability.available"
         elif normalized in {"je suis hors ligne", "hors ligne", "indisponible"}:
             action = "driver.availability.offline"
-        return self._driver_availability_action(conversation, context, action) if action else None
+        return (
+            self._driver_availability_action(conversation, context, action)
+            if action
+            else None
+        )
 
     def _from_seller_catalog(self, catalog, context):
         return ConversationalOutcome(
@@ -542,10 +883,43 @@ class ConversationalOrchestrator:
                 )
         if unresolved:
             item, resolution, reason = unresolved[0]
+            if reason == "ambiguous":
+                pending = PendingClarification(
+                    kind=ClarificationKind.AMBIGUOUS_PRODUCT,
+                    field="product",
+                    item_reference=item.requested_name,
+                    candidate_ids=tuple(
+                        str(candidate.product_id) for candidate in resolution.candidates
+                    ),
+                    metadata={
+                        "operation": OrderAction.ADD_ITEM.value,
+                        "order_id": str(order.id),
+                        "item": {
+                            "requested_name": item.requested_name,
+                            "quantity": str(item.quantity),
+                            "unit": item.unit.value,
+                            "notes": item.notes,
+                        },
+                    },
+                )
+                self.context_service.set_pending_clarification(
+                    conversation, pending, flow=ConversationFlow.AWAITING_CLARIFICATION
+                )
+                return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                    "Plusieurs produits correspondent. Lequel souhaitez-vous ?",
+                    context,
+                    actions=tuple(
+                        ResponseAction(
+                            action_id=f"clarification.select_product.{candidate.product_id}",
+                            label=candidate.canonical_name,
+                        )
+                        for candidate in resolution.candidates
+                    ),
+                    metadata={"pending_operation": "ADD_ITEM"},
+                )
             clarification = self.clarification_engine.decide(
-                context=context,
-                understanding=understanding if reason == "missing" else None,
-                resolutions=(resolution,) if reason == "ambiguous" else (),
+                context=context, understanding=understanding
             )
             self.context_service.set_pending_clarification(
                 conversation,
@@ -555,6 +929,9 @@ class ConversationalOrchestrator:
             return self._from_clarification(
                 clarification, context, actions=("order_draft_updated",)
             )
+        unmatched = self._unmatched_outcome(conversation, context, order)
+        if unmatched is not None:
+            return unmatched
         mark_awaiting_location(
             order, actor=conversation.user, correlation_id=correlation_id
         )
@@ -570,13 +947,49 @@ class ConversationalOrchestrator:
             location_decision, context, actions=("order_draft_updated",)
         )
 
-    def _handle_modify(self, conversation, context, understanding, text, correlation_id):
+    def _handle_modify(
+        self, conversation, context, understanding, text, correlation_id
+    ):
         """Only mutate when a backend target resolution is unique."""
         order = self._active_order(conversation, context)
         if order is None:
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
                 "Aucune commande active à modifier.",
+                context,
+            )
+        if understanding.order_action == OrderAction.ADD_ITEM:
+            return self._handle_order_items(
+                conversation, context, understanding, correlation_id
+            )
+        if understanding.order_action in {
+            OrderAction.REMOVE_ITEM,
+            OrderAction.REPLACE_ITEM,
+        }:
+            return self._handle_typed_item_action(
+                conversation, context, order, understanding, correlation_id
+            )
+        if understanding.order_action == OrderAction.MODIFY_QUANTITY:
+            return self._handle_quantity_change(
+                conversation, context, order, understanding, correlation_id
+            )
+        if understanding.order_action == OrderAction.CHANGE_LOCATION:
+            return self._start_location_change(conversation, context)
+        if understanding.order_action == OrderAction.MODIFY and not understanding.items:
+            pending = PendingClarification(
+                kind=ClarificationKind.OTHER,
+                field="order_item",
+                metadata={
+                    "operation": OrderAction.MODIFY.value,
+                    "order_id": str(order.id),
+                },
+            )
+            self.context_service.set_pending_clarification(
+                conversation, pending, flow=ConversationFlow.AWAITING_CLARIFICATION
+            )
+            return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                "Que souhaitez-vous modifier dans votre commande ?",
                 context,
             )
         lowered = text.casefold()
@@ -596,7 +1009,7 @@ class ConversationalOrchestrator:
             resolution = self.grounding_service.ground_item(replacement_item)
             if resolution.status == "AMBIGUOUS":
                 return self._outcome(
-                    ConversationalOutcomeStatus.PROCESSED,
+                ConversationalOutcomeStatus.PROCESSED,
                     "Plusieurs produits correspondent. Lequel souhaitez-vous ?",
                     context,
                 )
@@ -647,6 +1060,54 @@ class ConversationalOrchestrator:
         target = self.order_building_service.target(order, ItemReference())
         return self._ask_item_target(context, target)
 
+    def _handle_quantity_change(
+        self, conversation, context, order, understanding, correlation_id
+    ):
+        """Resolve the spoken line inside this order, then use the domain service."""
+        target = self.order_building_service.target(
+            order, ItemReference(requested_name=understanding.target_reference.text)
+        )
+        if target.status != ItemTargetStatus.FOUND:
+            return self._ask_item_target(context, target)
+        requested = understanding.items[0] if understanding.items else None
+        if requested is None or (requested.quantity is None and requested.unit is None):
+            return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                f"Quelle quantité ou unité souhaitez-vous pour {target.item.requested_name} ?",
+                context,
+            )
+        self.order_building_service.update(
+            target.item,
+            quantity=requested.quantity,
+            unit=requested.unit,
+            actor=conversation.user,
+            correlation_id=correlation_id,
+        )
+        self.context_service.clear_pending_clarification(
+            conversation, flow=ConversationFlow.ORDER_BUILDING
+        )
+        return self._modified_outcome(conversation, order, "order_item_updated")
+
+    def _start_location_change(self, conversation, context):
+        if self._active_order(conversation, context) is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Aucune commande active à localiser.",
+                context,
+            )
+        context = replace(
+            context,
+            flow=ConversationFlow.AWAITING_LOCATION,
+            pending_clarification=None,
+            metadata={**context.metadata, "awaiting_delivery_instructions": False},
+        )
+        self.context_service.update_context(conversation, context)
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            "Partagez votre nouvelle position pour mettre à jour la livraison.",
+            context,
+        )
+
     def _ask_item_target(self, context, target):
         if target.status == ItemTargetStatus.AMBIGUOUS:
             labels = ", ".join(item.requested_name for item in target.candidates)
@@ -661,8 +1122,58 @@ class ConversationalOrchestrator:
             context,
         )
 
+    def _unmatched_outcome(self, conversation, context, order, action="order_item_unmatched"):
+        item = (
+            self.order_building_service.target(order, ItemReference()).item
+            if False else None
+        )
+        from apps.orders.infrastructure.models import OrderItem
+        item = OrderItem.objects.filter(
+            order=order, resolution_status=OrderItemResolutionStatus.UNMATCHED
+        ).order_by("created_at", "id").first()
+        if item is None:
+            return None
+        pending = PendingClarification(
+            kind=ClarificationKind.OTHER, field="unmatched_item",
+            item_reference=item.requested_name,
+            metadata={"operation": "UNMATCHED_ITEM", "order_id": str(order.id), "target_order_item_id": str(item.id)},
+        )
+        self.context_service.set_pending_clarification(
+            conversation, pending, flow=ConversationFlow.AWAITING_CLARIFICATION
+        )
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=ResponsePlan(
+                text=f"{item.requested_name} n’est pas disponible dans le catalogue Whatassoh. Voulez-vous le remplacer ou continuer sans cet article ?",
+                actions=(
+                    ResponseAction(action_id="order.unmatched.remove", label="Continuer sans"),
+                    ResponseAction(action_id="order.unmatched.replace", label="Remplacer"),
+                ),
+            ),
+            actions_performed=(action,), active_order_id=str(order.id), requires_followup=True,
+        )
+
+    def _handle_unmatched_action(self, conversation, context, action_id, correlation_id):
+        if action_id not in {"order.unmatched.remove", "order.unmatched.replace"}:
+            return None
+        pending = context.pending_clarification
+        if not pending or pending.metadata.get("operation") != "UNMATCHED_ITEM":
+            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette action n’est plus disponible.", context)
+        order = self._active_order(conversation, context)
+        target = self.order_building_service.target(order, ItemReference(order_item_id=pending.metadata.get("target_order_item_id"))) if order else None
+        if not target or target.status != ItemTargetStatus.FOUND or target.item.resolution_status != OrderItemResolutionStatus.UNMATCHED:
+            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette action n’est plus disponible.", context)
+        if action_id == "order.unmatched.remove":
+            self.order_building_service.remove(target.item, actor=conversation.user, correlation_id=correlation_id)
+            return self._modified_outcome(conversation, order, "unmatched_item_removed")
+        self.context_service.set_pending_clarification(conversation, replace(pending, metadata={**pending.metadata, "operation": "UNMATCHED_ITEM_REPLACE"}), flow=ConversationFlow.AWAITING_CLARIFICATION)
+        return self._outcome(ConversationalOutcomeStatus.PROCESSED, f"Par quel produit souhaitez-vous remplacer {target.item.requested_name} ?", context)
+
     def _modified_outcome(self, conversation, order, action):
         order.refresh_from_db()
+        unmatched = self._unmatched_outcome(conversation, self.context_service.get_context(conversation), order)
+        if unmatched is not None:
+            return unmatched
         summary = self.order_building_service.summary(order)
         if not summary:
             self.context_service.clear_pending_clarification(
@@ -686,7 +1197,15 @@ class ConversationalOrchestrator:
         )
 
     def _handle_location(self, conversation, context, message, correlation_id):
-        logger.info("location_received", extra={"correlation_id": correlation_id, "channel": message.channel, "journey": context.active_journey, "flow": context.flow})
+        logger.info(
+            "location_received",
+            extra={
+                "correlation_id": correlation_id,
+                "channel": message.channel,
+                "journey": context.active_journey,
+                "flow": context.flow,
+            },
+        )
         order = self._active_order(conversation, context)
         if order is None or message.location is None:
             return self._outcome(
@@ -702,7 +1221,14 @@ class ConversationalOrchestrator:
             actor=conversation.user,
             correlation_id=correlation_id,
         )
-        logger.info("location_persisted", extra={"correlation_id": correlation_id, "order_id": str(order.id), "order_status": order.status})
+        logger.info(
+            "location_persisted",
+            extra={
+                "correlation_id": correlation_id,
+                "order_id": str(order.id),
+                "order_status": order.status,
+            },
+        )
         context = replace(
             context,
             flow=ConversationFlow.ORDER_BUILDING,
@@ -720,7 +1246,8 @@ class ConversationalOrchestrator:
                 text="Position enregistrée. Souhaitez-vous ajouter une indication pour le livreur ?",
                 actions=(
                     ResponseAction(
-                        action_id="order.skip_delivery_instructions", label="Non, continuer"
+                        action_id="order.skip_delivery_instructions",
+                        label="Non, continuer",
                     ),
                 ),
             ),
@@ -732,12 +1259,19 @@ class ConversationalOrchestrator:
     def _handle_driver_location(self, conversation, context, message):
         from django.utils import timezone
         from apps.drivers.application.availability import DriverAvailabilityService
-        from apps.drivers.application.location import DriverLocationService, DriverLocationUpdate
+        from apps.drivers.application.location import (
+            DriverLocationService,
+            DriverLocationUpdate,
+        )
         from apps.drivers.application.selectors import get_driver_by_user
 
         driver = get_driver_by_user(conversation.user)
         if driver is None:
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Créez d'abord votre profil livreur.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Créez d'abord votre profil livreur.",
+                context,
+            )
         received_at = timezone.now()
         result = DriverLocationService().update_location(
             driver,
@@ -753,26 +1287,71 @@ class ConversationalOrchestrator:
         )
         driver.refresh_from_db()
         matchability = DriverAvailabilityService().get_matchability(driver)
-        text = "Position enregistrée." if result.status.value == "UPDATED" else "Cette position était déjà enregistrée ou plus ancienne."
-        return self._outcome(ConversationalOutcomeStatus.PROCESSED, text, context, metadata={"driver_location": True, "matchability": matchability.status.value})
+        text = (
+            "Position enregistrée."
+            if result.status.value == "UPDATED"
+            else "Cette position était déjà enregistrée ou plus ancienne."
+        )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            text,
+            context,
+            metadata={
+                "driver_location": True,
+                "matchability": matchability.status.value,
+            },
+        )
 
-    def _handle_action(self, conversation, context, action_id, correlation_id, metadata):
+    def _handle_action(
+        self, conversation, context, action_id, correlation_id, metadata
+    ):
+        unmatched = self._handle_unmatched_action(
+            conversation, context, action_id, correlation_id
+        )
+        if unmatched is not None:
+            return unmatched
         if action_id == "order.accept_partial_store_coverage":
-            from apps.stores.application.partial_coverage import PartialCoverageConsentService
+            from apps.stores.application.partial_coverage import (
+                PartialCoverageConsentService,
+            )
+
             proposal_id = metadata.get("partial_coverage_proposal_id")
             try:
-                from apps.stores.infrastructure.models import PartialStoreCoverageProposal
-                proposal = PartialStoreCoverageProposal.objects.filter(pk=proposal_id).first()
+                from apps.stores.infrastructure.models import (
+                    PartialStoreCoverageProposal,
+                )
+
+                proposal = PartialStoreCoverageProposal.objects.filter(
+                    pk=proposal_id
+                ).first()
                 if proposal is None:
                     raise ValueError("stale")
-                order, replay = PartialCoverageConsentService().accept(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+                order, replay = PartialCoverageConsentService().accept(
+                    order_id=proposal.order_id,
+                    customer=conversation.user,
+                    correlation_id=correlation_id,
+                )
             except (ValueError, PermissionError):
-                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Votre commande a été ajustée et nous recherchons à nouveau une boutique.", context)
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Cette proposition n'est plus disponible.",
+                    context,
+                )
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Votre commande a été ajustée et nous recherchons à nouveau une boutique.",
+                context,
+            )
         if action_id == "order.status":
             from apps.orders.infrastructure.models import Order
             from apps.orders.domain.enums import OrderStatus
-            order = Order.objects.filter(customer=conversation.user).exclude(status__in=[OrderStatus.DRAFT, OrderStatus.AWAITING_LOCATION]).order_by("-created_at").first()
+
+            order = (
+                Order.objects.filter(customer=conversation.user)
+                .exclude(status__in=[OrderStatus.DRAFT, OrderStatus.AWAITING_LOCATION])
+                .order_by("-created_at")
+                .first()
+            )
             messages = {
                 OrderStatus.CONFIRMED: "Votre demande est confirmée. Nous lançons la recherche d'une boutique.",
                 OrderStatus.MATCHING_STORES: "Nous recherchons une boutique pour votre commande.",
@@ -789,44 +1368,130 @@ class ConversationalOrchestrator:
                 OrderStatus.CANCELLED: "Votre commande est annulée.",
                 OrderStatus.FAILED: "Votre commande ne peut pas être traitée pour le moment.",
             }
-            return self._outcome(ConversationalOutcomeStatus.PROCESSED, messages.get(order.status, "Aucune commande en cours.") if order else "Aucune commande en cours.", context)
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                messages.get(order.status, "Aucune commande en cours.")
+                if order
+                else "Aucune commande en cours.",
+                context,
+            )
         if action_id == "order.modify":
             # A partial proposal has no active draft context after confirmation;
             # restore the existing editing flow, never a second editor.
             from apps.stores.infrastructure.models import PartialStoreCoverageProposal
-            proposal = PartialStoreCoverageProposal.objects.filter(order__customer=conversation.user, status="PENDING").select_related("order").first()
+
+            proposal = (
+                PartialStoreCoverageProposal.objects.filter(
+                    order__customer=conversation.user, status="PENDING"
+                )
+                .select_related("order")
+                .first()
+            )
             if proposal and proposal.order.status == "AWAITING_PARTIAL_COVERAGE":
-                from apps.stores.application.partial_coverage import PartialCoverageConsentService
+                from apps.stores.application.partial_coverage import (
+                    PartialCoverageConsentService,
+                )
+
                 try:
-                    order = PartialCoverageConsentService().return_to_editing(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
-                    self.active_order_service.attach_order(conversation, str(order.id), correlation_id=correlation_id)
+                    order = PartialCoverageConsentService().return_to_editing(
+                        order_id=proposal.order_id,
+                        customer=conversation.user,
+                        correlation_id=correlation_id,
+                    )
+                    self.active_order_service.attach_order(
+                        conversation, str(order.id), correlation_id=correlation_id
+                    )
                 except ValueError:
-                    return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
-                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Que souhaitez-vous modifier dans votre commande ?", context)
+                    return self._outcome(
+                        ConversationalOutcomeStatus.REJECTED,
+                        "Cette proposition n'est plus disponible.",
+                        context,
+                    )
+                return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                    "Que souhaitez-vous modifier dans votre commande ?",
+                    context,
+                )
         if action_id == "order.cancel":
             from apps.stores.infrastructure.models import PartialStoreCoverageProposal
-            proposal = PartialStoreCoverageProposal.objects.filter(order__customer=conversation.user, status="PENDING").select_related("order").first()
+
+            proposal = (
+                PartialStoreCoverageProposal.objects.filter(
+                    order__customer=conversation.user, status="PENDING"
+                )
+                .select_related("order")
+                .first()
+            )
             if proposal and proposal.order.status == "AWAITING_PARTIAL_COVERAGE":
-                from apps.stores.application.partial_coverage import PartialCoverageConsentService
+                from apps.stores.application.partial_coverage import (
+                    PartialCoverageConsentService,
+                )
+
                 try:
-                    PartialCoverageConsentService().cancel(order_id=proposal.order_id, customer=conversation.user, correlation_id=correlation_id)
+                    PartialCoverageConsentService().cancel(
+                        order_id=proposal.order_id,
+                        customer=conversation.user,
+                        correlation_id=correlation_id,
+                    )
                 except ValueError:
-                    return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette proposition n'est plus disponible.", context)
-                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Votre commande est annulée.", context)
+                    return self._outcome(
+                        ConversationalOutcomeStatus.REJECTED,
+                        "Cette proposition n'est plus disponible.",
+                        context,
+                    )
+                return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                    "Votre commande est annulée.",
+                    context,
+                )
         if action_id in {"store_order.start_preparation", "store_order.mark_ready"}:
-            target = "PREPARING" if action_id == "store_order.start_preparation" else "READY_FOR_PICKUP"
+            target = (
+                "PREPARING"
+                if action_id == "store_order.start_preparation"
+                else "READY_FOR_PICKUP"
+            )
             order_id = self.store_preparation_service.available_order_for(
                 actor=conversation.user, target=target
             )
             if order_id is None:
-                return self._outcome(ConversationalOutcomeStatus.REJECTED, "Aucune commande de boutique unique ne correspond à cette action.", context)
-            operation = self.store_preparation_service.start_preparation if target == "PREPARING" else self.store_preparation_service.mark_ready_for_pickup
-            result = operation(actor=conversation.user, order_id=order_id, correlation_id=correlation_id)
-            if result in {StorePreparationResult.STARTED, StorePreparationResult.ALREADY_PREPARING}:
-                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Préparation démarrée.", context)
-            if result in {StorePreparationResult.READY, StorePreparationResult.ALREADY_READY}:
-                return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Commande marquée comme prête.", context)
-            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette commande ne peut plus être préparée.", context)
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Aucune commande de boutique unique ne correspond à cette action.",
+                    context,
+                )
+            operation = (
+                self.store_preparation_service.start_preparation
+                if target == "PREPARING"
+                else self.store_preparation_service.mark_ready_for_pickup
+            )
+            result = operation(
+                actor=conversation.user,
+                order_id=order_id,
+                correlation_id=correlation_id,
+            )
+            if result in {
+                StorePreparationResult.STARTED,
+                StorePreparationResult.ALREADY_PREPARING,
+            }:
+                return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                    "Préparation démarrée.",
+                    context,
+                )
+            if result in {
+                StorePreparationResult.READY,
+                StorePreparationResult.ALREADY_READY,
+            }:
+                return self._outcome(
+                    ConversationalOutcomeStatus.PROCESSED,
+                    "Commande marquée comme prête.",
+                    context,
+                )
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette commande ne peut plus être préparée.",
+                context,
+            )
         if action_id == "order.confirm":
             return self._confirm_active_order(
                 conversation,
@@ -838,7 +1503,7 @@ class ConversationalOrchestrator:
             return self._cancel_active_order(conversation, context, correlation_id)
         if action_id == "order.modify":
             return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
+                    ConversationalOutcomeStatus.PROCESSED,
                 "Que souhaitez-vous modifier dans votre commande ?",
                 context,
             )
@@ -915,7 +1580,8 @@ class ConversationalOrchestrator:
                         text="Vous avez déjà une commande en cours. Souhaitez-vous l'abandonner ?",
                         actions=(
                             ResponseAction(
-                                action_id="order.abandon_and_start_new", label="Abandonner et recommencer"
+                                action_id="order.abandon_and_start_new",
+                                label="Abandonner et recommencer",
                             ),
                         ),
                     ),
@@ -985,7 +1651,11 @@ class ConversationalOrchestrator:
             status=ConversationalOutcomeStatus.PROCESSED,
             response=ResponsePlan(
                 text="Demande confirmée ✅\nNous recherchons maintenant une boutique capable de fournir votre commande. Je vous tiendrai informé ici.",
-                actions=(ResponseAction(action_id="order.status", label="Suivre ma commande"),),
+                actions=(
+                    ResponseAction(
+                        action_id="order.status", label="Suivre ma commande"
+                    ),
+                ),
             ),
             actions_performed=("order_confirmed",),
             active_order_id=str(order.id),
@@ -1057,7 +1727,9 @@ class ConversationalOrchestrator:
                     text="Vous avez une commande en cours. Souhaitez-vous la reprendre ?",
                     actions=(
                         ResponseAction(action_id="order.resume", label="Reprendre"),
-                        ResponseAction(action_id="order.start_new", label="Nouvelle commande"),
+                        ResponseAction(
+                            action_id="order.start_new", label="Nouvelle commande"
+                        ),
                     ),
                 ),
                 active_order_id=recovery.order_id,
@@ -1095,7 +1767,9 @@ class ConversationalOrchestrator:
             context,
         )
 
-    def _handle_delivery_instructions(self, conversation, context, text, correlation_id):
+    def _handle_delivery_instructions(
+        self, conversation, context, text, correlation_id
+    ):
         order = self._active_order(conversation, context)
         if order is None:
             return self._outcome(
@@ -1134,7 +1808,9 @@ class ConversationalOrchestrator:
         if not review.readiness.ready:
             blockers = ", ".join(review.readiness.blocking_issues)
             return ResponsePlan(
-                text="Commande à compléter :\n" + "\n".join(lines) + f"\nÀ corriger : {blockers}",
+                text="Commande à compléter :\n"
+                + "\n".join(lines)
+                + f"\nÀ corriger : {blockers}",
                 actions=(
                     ResponseAction(action_id="order.modify", label="Modifier"),
                     ResponseAction(action_id="order.cancel", label="Annuler"),
@@ -1150,7 +1826,9 @@ class ConversationalOrchestrator:
             actions=(
                 ResponseAction(action_id="order.confirm", label="Confirmer"),
                 ResponseAction(action_id="order.modify", label="Modifier"),
-                ResponseAction(action_id="order.change_location", label="Modifier l'adresse"),
+                ResponseAction(
+                    action_id="order.change_location", label="Modifier l'adresse"
+                ),
                 ResponseAction(action_id="order.cancel", label="Annuler"),
             ),
             metadata={"review_fingerprint": review.fingerprint},
@@ -1186,3 +1864,449 @@ class ConversationalOrchestrator:
             active_order_id=context.active_order_id,
             metadata=metadata or {},
         )
+
+    def _capability_outcome(self, context, capability):
+        status = capability.status if capability else CapabilityStatus.UNKNOWN
+        if status == CapabilityStatus.SOCIAL:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                SOCIAL_RESPONSE,
+                context,
+                metadata={"capability": "greeting", "capability_status": status.value},
+            )
+        if status == CapabilityStatus.OUT_OF_SCOPE:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                OUT_OF_SCOPE_RESPONSE,
+                context,
+                metadata={"capability_status": status.value},
+            )
+        if status == CapabilityStatus.NOT_IMPLEMENTED:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                NOT_IMPLEMENTED_RESPONSES.get(
+                    capability.name,
+                    "J'ai compris votre demande, mais cette fonctionnalité n'est pas encore disponible.",
+                ),
+                context,
+                metadata={
+                    "capability": capability.name,
+                    "capability_status": status.value,
+                },
+            )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            UNKNOWN_RESPONSE,
+            context,
+            metadata={"capability_status": CapabilityStatus.UNKNOWN.value},
+        )
+
+    def _order_history_outcome(self, conversation, context):
+        orders = list(
+            get_customer_orders(conversation.user).order_by("-created_at")[:5]
+        )
+        if not orders:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous n'avez encore aucune commande.",
+                context,
+                metadata={
+                    "capability": "order_history",
+                    "capability_status": CapabilityStatus.SUPPORTED.value,
+                },
+            )
+        lines = ["Vos commandes récentes :"]
+        lines.extend(
+            f"{order.reference} — {order.get_status_display()}" for order in orders
+        )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            "\n".join(lines),
+            context,
+            metadata={
+                "capability": "order_history",
+                "capability_status": CapabilityStatus.SUPPORTED.value,
+            },
+        )
+
+    @staticmethod
+    def _has_pending_task(context):
+        return bool(
+            context.pending_clarification
+            or context.active_order_id
+            or context.metadata.get("awaiting_delivery_instructions")
+        )
+
+    def _try_universal_interrupt(self, conversation, context, message, correlation_id):
+        """Handle safe conversational detours without consuming the pending task.
+
+        Structured callbacks and native locations remain deterministic and never enter
+        this pre-read. A non-universal text is intentionally left for its current
+        workflow handler, preserving the existing state-machine routing.
+        """
+        if (
+            not self._has_pending_task(context)
+            or not message.text
+            or message.metadata.get("action_id")
+            or message.message_type == MessageType.LOCATION
+        ):
+            return None
+        understanding = self.understanding_service.understand_normalized(
+            message, correlation_id=correlation_id
+        )
+        if understanding is None:
+            return None
+        replacement = self._complete_unmatched_replacement(
+            conversation, context, understanding, correlation_id
+        )
+        if replacement is not None:
+            return replacement
+        capability = classify_capability(understanding.intent)
+        is_universal = (
+            float(understanding.confidence) < self.confidence_threshold
+            or capability.status
+            in {
+                CapabilityStatus.SOCIAL,
+                CapabilityStatus.OUT_OF_SCOPE,
+                CapabilityStatus.UNKNOWN,
+                CapabilityStatus.NOT_IMPLEMENTED,
+            }
+            or understanding.intent
+            in {
+                MessageIntent.HELP,
+                MessageIntent.ORDER_HISTORY,
+                MessageIntent.CANCEL,
+                MessageIntent.ORDER_RESUME,
+            }
+        )
+        if not is_universal:
+            return None
+        logger.info(
+            "conversation_universal_interrupt",
+            extra={
+                "correlation_id": correlation_id,
+                "channel": message.channel,
+                "intent": understanding.intent,
+                "confidence": str(understanding.confidence),
+                "capability": capability.name,
+                "capability_status": capability.status,
+                "route_selected": "universal_interrupt",
+            },
+        )
+        if float(understanding.confidence) < self.confidence_threshold:
+            return self._capability_outcome(context, None)
+        if capability.status != CapabilityStatus.SUPPORTED:
+            return self._capability_outcome(context, capability)
+        if understanding.intent == MessageIntent.ORDER_HISTORY:
+            return self._order_history_outcome(conversation, context)
+        if understanding.intent == MessageIntent.CANCEL:
+            return self._cancel_active_order(conversation, context, correlation_id)
+        if understanding.intent == MessageIntent.ORDER_RESUME:
+            return self._resume_workflow(conversation, context, correlation_id)
+        if understanding.intent == MessageIntent.HELP:
+            return self._handle_knowledge_or_unknown(
+                conversation,
+                context,
+                message.text,
+                understanding.intent,
+                correlation_id,
+            )
+        return None
+
+    def _resume_workflow(self, conversation, context, correlation_id):
+        if context.metadata.get("awaiting_delivery_instructions"):
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Souhaitez-vous ajouter une indication pour le livreur ?",
+                context,
+                metadata={
+                    "capability": "order_resume",
+                    "pending_task": "delivery_instructions",
+                },
+            )
+        if not getattr(conversation, "pk", None):
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Aucune commande en cours à reprendre.",
+                context,
+            )
+        recovery = self.recovery_service.recover(
+            conversation, context, correlation_id=correlation_id
+        )
+        if recovery.status == RecoveryStatus.NO_ACTIVE_FLOW:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Aucune commande en cours à reprendre.",
+                context,
+            )
+        return self._recovery_outcome(conversation, context, recovery)
+
+    def _complete_unmatched_replacement(self, conversation, context, understanding, correlation_id):
+        pending = context.pending_clarification
+        if not pending or pending.metadata.get("operation") != "UNMATCHED_ITEM_REPLACE":
+            return None
+        order = self._active_order(conversation, context)
+        target = self.order_building_service.target(order, ItemReference(order_item_id=pending.metadata.get("target_order_item_id"))) if order else None
+        if not target or target.status != ItemTargetStatus.FOUND or target.item.resolution_status != OrderItemResolutionStatus.UNMATCHED:
+            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette modification n’est plus disponible.", context)
+        replacement = understanding.replacement or (understanding.items[0] if understanding.items else None)
+        if replacement is None or replacement.quantity is None or replacement.unit is None:
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Indiquez le produit de remplacement avec sa quantité.", context)
+        resolution = self.grounding_service.ground_item(replacement)
+        if resolution.status == OrderItemResolutionStatus.UNMATCHED:
+            return self._unmatched_outcome(conversation, context, order, "replacement_unavailable")
+        if resolution.status == OrderItemResolutionStatus.AMBIGUOUS:
+            pending = PendingClarification(
+                kind=ClarificationKind.AMBIGUOUS_PRODUCT, field="product",
+                item_reference=replacement.requested_name,
+                candidate_ids=tuple(str(candidate.product_id) for candidate in resolution.candidates),
+                metadata={"operation": OrderAction.REPLACE_ITEM.value, "order_id": str(order.id), "target_order_item_id": str(target.item.id), "replacement": {"requested_name": replacement.requested_name, "quantity": str(replacement.quantity), "unit": replacement.unit.value, "notes": replacement.notes}},
+            )
+            self.context_service.set_pending_clarification(conversation, pending, flow=ConversationFlow.AWAITING_CLARIFICATION)
+            return self._outcome(ConversationalOutcomeStatus.PROCESSED, "Plusieurs produits correspondent. Lequel souhaitez-vous ?", context, actions=tuple(ResponseAction(action_id=f"clarification.select_product.{candidate.product_id}", label=candidate.canonical_name) for candidate in resolution.candidates))
+        if resolution.status != OrderItemResolutionStatus.MATCHED:
+            return self._unmatched_outcome(conversation, context, order, "replacement_unavailable")
+        self.order_building_service.replace(target.item, replacement, resolution, actor=conversation.user, correlation_id=correlation_id)
+        return self._modified_outcome(conversation, order, "unmatched_item_replaced")
+
+
+    def _handle_typed_item_action(
+        self, conversation, context, order, understanding, correlation_id
+    ):
+        """Typed actions are resolved and grounded before any domain mutation."""
+        target = self.order_building_service.target(
+            order, ItemReference(requested_name=understanding.target_reference.text)
+        )
+        if target.status != ItemTargetStatus.FOUND:
+            return self._ask_item_target(context, target)
+        if understanding.order_action == OrderAction.REMOVE_ITEM:
+            self.order_building_service.remove(
+                target.item, actor=conversation.user, correlation_id=correlation_id
+            )
+            self.context_service.clear_pending_clarification(
+                conversation, flow=ConversationFlow.ORDER_BUILDING
+            )
+            return self._modified_outcome(conversation, order, "order_item_removed")
+        replacement = understanding.replacement
+        resolution = self.grounding_service.ground_item(replacement)
+        # Strict-catalog policy: an unsuccessful grounding leaves the old line intact.
+        if resolution.status == OrderItemResolutionStatus.UNMATCHED:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                f"{replacement.requested_name} n'est pas disponible dans le catalogue Whatassoh. {target.item.requested_name} a été conservé dans votre commande.",
+                context,
+                metadata={
+                    "target_resolution_status": target.status,
+                    "grounding_status": resolution.status,
+                },
+            )
+        if resolution.status == OrderItemResolutionStatus.AMBIGUOUS:
+            pending = PendingClarification(
+                kind=ClarificationKind.AMBIGUOUS_PRODUCT,
+                field="product",
+                item_reference=replacement.requested_name,
+                candidate_ids=tuple(
+                    str(candidate.product_id) for candidate in resolution.candidates
+                ),
+                metadata={
+                    "operation": OrderAction.REPLACE_ITEM.value,
+                    "order_id": str(order.id),
+                    "target_order_item_id": str(target.item.id),
+                    "candidates": [
+                        {
+                            "id": str(candidate.product_id),
+                            "label": candidate.canonical_name,
+                        }
+                        for candidate in resolution.candidates
+                    ],
+                    "replacement": {
+                        "requested_name": replacement.requested_name,
+                        "quantity": str(replacement.quantity)
+                        if replacement.quantity is not None
+                        else None,
+                        "unit": replacement.unit.value if replacement.unit else None,
+                        "notes": replacement.notes,
+                    },
+                },
+            )
+            self.context_service.set_pending_clarification(
+                conversation, pending, flow=ConversationFlow.AWAITING_CLARIFICATION
+            )
+            logger.info(
+                "natural_replace_ambiguity_persisted",
+                extra={
+                    "correlation_id": correlation_id,
+                    "operation": "REPLACE_ITEM",
+                    "target_resolution_status": target.status,
+                    "grounding_status": resolution.status,
+                    "pending_operation": "REPLACE_ITEM",
+                },
+            )
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Plusieurs produits correspondent. Lequel souhaitez-vous ?",
+                context,
+                actions=tuple(
+                    ResponseAction(
+                        action_id=f"clarification.select_product.{candidate.product_id}",
+                        label=candidate.canonical_name,
+                    )
+                    for candidate in resolution.candidates
+                ),
+                metadata={
+                    "target_resolution_status": target.status,
+                    "grounding_status": resolution.status,
+                    "pending_operation": "REPLACE_ITEM",
+                },
+            )
+        self.order_building_service.replace(
+            target.item,
+            replacement,
+            resolution,
+            actor=conversation.user,
+            correlation_id=correlation_id,
+        )
+        self.context_service.clear_pending_clarification(
+            conversation, flow=ConversationFlow.ORDER_BUILDING
+        )
+        return self._modified_outcome(conversation, order, "order_item_replaced")
+
+    def _clarification_choice_action(
+        self, conversation, context, action_id, correlation_id
+    ):
+        prefix = "clarification.select_product."
+        if not action_id.startswith(prefix):
+            return None
+        pending = context.pending_clarification
+        candidate_id = action_id.removeprefix(prefix)
+        if (
+            not pending
+            or pending.kind != ClarificationKind.AMBIGUOUS_PRODUCT
+            or candidate_id not in pending.candidate_ids
+        ):
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Ce choix n'est plus disponible.",
+                context,
+            )
+        operation = pending.metadata.get("operation")
+        if operation not in {
+            OrderAction.REPLACE_ITEM.value,
+            OrderAction.ADD_ITEM.value,
+        }:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette clarification n'est pas encore disponible.",
+                context,
+            )
+        order = self._active_order(conversation, context)
+        if operation == OrderAction.ADD_ITEM.value and order is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette commande n'est plus disponible.",
+                context,
+            )
+        target_id = pending.metadata.get("target_order_item_id")
+        target = (
+            self.order_building_service.target(
+                order, ItemReference(order_item_id=target_id)
+            )
+            if order
+            else None
+        )
+        try:
+            UUID(candidate_id)
+        except (TypeError, ValueError):
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Ce choix n'est plus disponible.",
+                context,
+            )
+        product = Product.objects.filter(
+            pk=candidate_id, status=ProductStatus.ACTIVE
+        ).first()
+        if operation == OrderAction.ADD_ITEM.value:
+            if product is None:
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Ce choix n'est plus disponible.",
+                    context,
+                )
+            facts = pending.metadata.get("item", {})
+            item = ExtractedItem(
+                requested_name=facts["requested_name"],
+                quantity=Decimal(facts["quantity"]),
+                unit=facts["unit"],
+                notes=facts.get("notes"),
+            )
+            from apps.catalog.domain.grounding import (
+                CatalogResolution,
+                CatalogResolutionReason,
+            )
+
+            resolution = CatalogResolution(
+                status=OrderItemResolutionStatus.MATCHED,
+                requested_name=item.requested_name,
+                product_id=product.id,
+                variant_id=None,
+                candidates=(),
+                reason=CatalogResolutionReason.EXACT_MATCH,
+            )
+            self.order_building_service.add(
+                order,
+                item,
+                resolution,
+                actor=conversation.user,
+                correlation_id=correlation_id,
+            )
+            self.context_service.clear_pending_clarification(
+                conversation, flow=ConversationFlow.ORDER_BUILDING
+            )
+            return self._modified_outcome(conversation, order, "order_item_added")
+        facts = pending.metadata.get("replacement", {})
+        if not target or target.status != ItemTargetStatus.FOUND or product is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette modification n'est plus disponible.",
+                context,
+            )
+        replacement = ExtractedItem(
+            requested_name=facts["requested_name"],
+            quantity=Decimal(facts["quantity"])
+            if facts.get("quantity")
+            else target.item.quantity,
+            unit=facts.get("unit") or target.item.unit,
+            notes=facts.get("notes"),
+        )
+        from apps.catalog.domain.grounding import (
+            CatalogResolution,
+            CatalogResolutionReason,
+        )
+
+        resolution = CatalogResolution(
+            status=OrderItemResolutionStatus.MATCHED,
+            requested_name=replacement.requested_name,
+            product_id=product.id,
+            variant_id=None,
+            candidates=(),
+            reason=CatalogResolutionReason.EXACT_MATCH,
+        )
+        self.order_building_service.replace(
+            target.item,
+            replacement,
+            resolution,
+            actor=conversation.user,
+            correlation_id=correlation_id,
+        )
+        if replacement.quantity is not None or replacement.unit is not None:
+            self.order_building_service.update(
+                target.item,
+                quantity=replacement.quantity,
+                unit=replacement.unit,
+                actor=conversation.user,
+                correlation_id=correlation_id,
+            )
+        self.context_service.clear_pending_clarification(
+            conversation, flow=ConversationFlow.ORDER_BUILDING
+        )
+        return self._modified_outcome(conversation, order, "order_item_replaced")

@@ -89,6 +89,11 @@ class Order(BaseModel):
             models.Index(fields=["created_at"], name="orders_order_created_idx"),
         ]
         constraints = [
+            models.UniqueConstraint(
+                fields=["customer"],
+                condition=models.Q(status__in=["DRAFT", "AWAITING_LOCATION"]),
+                name="orders_one_building_order_per_customer",
+            ),
             models.CheckConstraint(
                 name="orders_order_status_valid",
                 condition=models.Q(status__in=OrderStatus.values),

@@ -124,10 +124,13 @@ def test_orders_api_main_draft_to_confirm_flow():
     assert response.status_code == 200
     assert response.data["status"] == OrderStatus.CONFIRMED
     assert response.data["confirmed_at"] is not None
-    assert AuditEvent.objects.filter(
-        entity_id=order_id,
-        event_type=AuditEventType.ORDER_CONFIRMED,
-    ).count() == 1
+    assert (
+        AuditEvent.objects.filter(
+            entity_id=order_id,
+            event_type=AuditEventType.ORDER_CONFIRMED,
+        ).count()
+        == 1
+    )
     assert len(confirmed_events) == 1
     assert confirmed_events[0].correlation_id == "corr-api-confirm"
 
@@ -233,8 +236,14 @@ def test_orders_api_retry_failed_order_uses_domain_target():
     user = create_user()
     order = create_order_draft(customer=user)
     rice = create_catalog_product("Riz retry")
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
-                   product=rice, resolution_status=OrderItemResolutionStatus.MATCHED)
+    add_order_item(
+        order=order,
+        requested_name="Riz",
+        quantity=5,
+        unit=ProductUnit.KG,
+        product=rice,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
     set_delivery_location(order=order, point=BONAMOUSSADI)
     order = start_store_matching(confirm_order(order))
     failed = fail_order(order, OrderFailureCode.NO_STORE_AVAILABLE)
@@ -274,8 +283,14 @@ def test_orders_api_confirm_idempotence_publishes_once():
     user = create_user()
     order = create_order_draft(customer=user)
     rice = create_catalog_product("Riz idempotence")
-    add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
-                   product=rice, resolution_status=OrderItemResolutionStatus.MATCHED)
+    add_order_item(
+        order=order,
+        requested_name="Riz",
+        quantity=5,
+        unit=ProductUnit.KG,
+        product=rice,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
     set_delivery_location(order=order, point=BONAMOUSSADI)
     client = auth_client(user)
     confirmed_events = []
@@ -286,10 +301,13 @@ def test_orders_api_confirm_idempotence_publishes_once():
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert AuditEvent.objects.filter(
-        entity_id=order.id,
-        event_type=AuditEventType.ORDER_CONFIRMED,
-    ).count() == 1
+    assert (
+        AuditEvent.objects.filter(
+            entity_id=order.id,
+            event_type=AuditEventType.ORDER_CONFIRMED,
+        ).count()
+        == 1
+    )
     assert len(confirmed_events) == 1
 
 

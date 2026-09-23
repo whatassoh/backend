@@ -41,7 +41,9 @@ class ConversationRecoveryService:
         self.active_order_service = active_order_service or ActiveCustomerOrderService()
         self.review_service = review_service or OrderReviewService()
 
-    def recover(self, conversation, context, *, correlation_id=None) -> RecoveryDecision:
+    def recover(
+        self, conversation, context, *, correlation_id=None
+    ) -> RecoveryDecision:
         active = self.active_order_service.get_active_order(
             conversation, correlation_id=correlation_id
         )
@@ -49,13 +51,13 @@ class ConversationRecoveryService:
             return RecoveryDecision(
                 status=RecoveryStatus.CLOSED_CONVERSATION, reason="conversation_closed"
             )
-        if active.stale_context_detected:
-            self._log("recovery_stale_context", conversation, correlation_id)
-            return RecoveryDecision(
-                status=RecoveryStatus.STALE_CONTEXT_RECOVERED,
-                reason=active.reason,
-            )
         if active.order is None:
+            if active.stale_context_detected:
+                self._log("recovery_stale_context", conversation, correlation_id)
+                return RecoveryDecision(
+                    status=RecoveryStatus.STALE_CONTEXT_RECOVERED,
+                    reason=active.reason,
+                )
             return RecoveryDecision(status=RecoveryStatus.NO_ACTIVE_FLOW)
         order = active.order
         if context.pending_clarification:

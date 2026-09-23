@@ -1,3 +1,5 @@
+import threading
+from django.db import close_old_connections
 import pytest
 
 from apps.conversations.application.active_orders import (
@@ -7,11 +9,13 @@ from apps.conversations.application.active_orders import (
 from apps.conversations.application.services import get_or_create_active_conversation
 from apps.conversations.domain.context import ConversationContext
 from apps.conversations.domain.enums import ConversationStatus
+from apps.conversations.infrastructure.models import Conversation
 from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.enums import MessagingChannel
 from apps.orders.application.services import create_order_draft
 from apps.orders.domain.enums import OrderStatus
+from apps.orders.infrastructure.models import Order
 
 
 def conversation(phone="+237699887766", channel=MessagingChannel.WHATSAPP):
@@ -80,7 +84,7 @@ def test_closed_conversation_neither_resumes_nor_creates_draft():
 
 
 @pytest.mark.django_db
-def test_cross_channel_conversations_do_not_share_active_order():
+def test_cross_channel_conversations_share_user_building_order_but_keep_contexts_separate():
     convo, user = conversation()
     identity = create_channel_identity(
         user=user, channel=MessagingChannel.TELEGRAM, external_user_id="telegram-1"
@@ -91,8 +95,12 @@ def test_cross_channel_conversations_do_not_share_active_order():
     service = ActiveCustomerOrderService()
     order = service.get_or_create_draft(convo).order
 
-    assert service.get_active_order(telegram).order is None
-    assert service.get_or_create_draft(telegram).order_id != str(order.id)
+    resolved = service.get_or_create_draft(telegram)
+    telegram.refresh_from_db()
+    convo.refresh_from_db()
+    assert resolved.order_id == str(order.id)
+    assert ConversationContext.from_payload(telegram.context).active_order_id == str(order.id)
+    assert telegram.id != convo.id
 
 
 @pytest.mark.django_db
@@ -108,3 +116,51 @@ def test_resume_is_explicit_and_abandon_uses_cancellation_transition():
     assert resumed.status == ActiveOrderDecisionStatus.RESUMED
     assert abandoned.status == ActiveOrderDecisionStatus.ABANDONED
     assert order.status == OrderStatus.CANCELLED
+
+@pytest.mark.django_db(transaction=True)
+def test_two_cross_channel_workers_converge_on_one_building_order():
+    whatsapp, user = conversation("+237699887799")
+    identity = create_channel_identity(
+        user=user,
+        channel=MessagingChannel.TELEGRAM,
+        external_user_id="telegram-concurrent-1",
+    )
+    telegram, _ = get_or_create_active_conversation(
+        channel_identity=identity, external_chat_id="chat-concurrent-1"
+    )
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+    result_lock = threading.Lock()
+
+    def create_from(conversation_id):
+        close_old_connections()
+        try:
+            parallel_conversation = Conversation.objects.get(pk=conversation_id)
+            barrier.wait(timeout=5)
+            decision = ActiveCustomerOrderService().get_or_create_draft(
+                parallel_conversation
+            )
+            with result_lock:
+                results.append(decision.order_id)
+        except Exception as exc:  # surface worker errors in the main test thread
+            with result_lock:
+                errors.append(exc)
+        finally:
+            close_old_connections()
+
+    workers = [
+        threading.Thread(target=create_from, args=(whatsapp.id,)),
+        threading.Thread(target=create_from, args=(telegram.id,)),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert not any(worker.is_alive() for worker in workers)
+    assert not errors
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert Order.objects.filter(
+        customer=user, status__in=ActiveCustomerOrderService.active_statuses
+    ).count() == 1

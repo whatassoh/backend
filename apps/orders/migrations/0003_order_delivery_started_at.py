@@ -6,7 +6,8 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.AddField(
-            model_name="order", name="delivery_started_at",
+            model_name="order",
+            name="delivery_started_at",
             field=models.DateTimeField(blank=True, null=True),
         ),
     ]
