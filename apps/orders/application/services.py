@@ -30,6 +30,7 @@ from apps.orders.domain.exceptions import (
     OrderNotRetryable,
 )
 from apps.orders.domain.rules import (
+    BUILDING_ORDER_STATUSES,
     ensure_failure_code_allowed,
     ensure_order_confirmable,
     ensure_transition_allowed,
@@ -125,6 +126,41 @@ def _item_metadata(item: OrderItem) -> dict[str, Any]:
 
 
 def create_order_draft(
+    *,
+    customer: Any,
+    delivery_location: Point | None = None,
+    delivery_address_label: str | None = None,
+    delivery_instructions: str | None = None,
+    currency: str = "XAF",
+    actor: Any | None = None,
+    actor_type: AuditActorType | str = AuditActorType.SYSTEM,
+    correlation_id: str | None = None,
+) -> Order:
+    """Return the customer's one building order, creating it when absent."""
+    customer_model = customer.__class__
+    with transaction.atomic():
+        locked_customer = customer_model.objects.select_for_update().get(pk=customer.pk)
+        existing = (
+            Order.objects.select_for_update()
+            .filter(customer=locked_customer, status__in=BUILDING_ORDER_STATUSES)
+            .order_by("created_at")
+            .first()
+        )
+        if existing is not None:
+            return existing
+        return _create_order_draft(
+            customer=locked_customer,
+            delivery_location=delivery_location,
+            delivery_address_label=delivery_address_label,
+            delivery_instructions=delivery_instructions,
+            currency=currency,
+            actor=actor,
+            actor_type=actor_type,
+            correlation_id=correlation_id,
+        )
+
+
+def _create_order_draft(
     *,
     customer: Any,
     delivery_location: Point | None = None,
@@ -328,7 +364,9 @@ def set_delivery_location(
         if not isfinite(point.x) or not isfinite(point.y):
             raise ValidationError("Delivery coordinates must be finite.")
         if not -180 <= point.x <= 180 or not -90 <= point.y <= 90:
-            raise ValidationError("Delivery coordinates are outside valid WGS84 bounds.")
+            raise ValidationError(
+                "Delivery coordinates are outside valid WGS84 bounds."
+            )
         if point.srid is None:
             point.srid = 4326
         if point.srid != 4326:
@@ -369,7 +407,9 @@ def set_delivery_instructions(
     if instructions is not None:
         instructions = instructions.strip() or None
         if instructions and len(instructions) > 1000:
-            raise ValidationError("Delivery instructions cannot exceed 1000 characters.")
+            raise ValidationError(
+                "Delivery instructions cannot exceed 1000 characters."
+            )
     with transaction.atomic():
         locked_order = _lock_order(order)
         validate_order_is_draft_mutable(locked_order.status)
@@ -400,7 +440,9 @@ def set_delivery_address_label(
     if address_label is not None:
         address_label = address_label.strip() or None
         if address_label and len(address_label) > 255:
-            raise ValidationError("Delivery address label cannot exceed 255 characters.")
+            raise ValidationError(
+                "Delivery address label cannot exceed 255 characters."
+            )
     with transaction.atomic():
         locked_order = _lock_order(order)
         validate_order_is_draft_mutable(locked_order.status)
@@ -694,10 +736,13 @@ def start_store_matching(
     )
 
 
-def mark_awaiting_partial_coverage(order: Order, *, correlation_id: str | None = None) -> Order:
+def mark_awaiting_partial_coverage(
+    order: Order, *, correlation_id: str | None = None
+) -> Order:
     """Matching remains active, but the next decision belongs to the customer."""
     return _semantic_transition(
-        order, OrderStatus.AWAITING_PARTIAL_COVERAGE,
+        order,
+        OrderStatus.AWAITING_PARTIAL_COVERAGE,
         idempotent_from={OrderStatus.AWAITING_PARTIAL_COVERAGE},
         correlation_id=correlation_id,
     )
@@ -851,7 +896,11 @@ def mark_in_delivery(
         if locked_order.delivery_started_at is None:
             now = timezone.now()
             # Server time is authoritative; guard against malformed legacy data.
-            locked_order.delivery_started_at = max(now, locked_order.picked_up_at) if locked_order.picked_up_at else now
+            locked_order.delivery_started_at = (
+                max(now, locked_order.picked_up_at)
+                if locked_order.picked_up_at
+                else now
+            )
         _save_status(locked_order, ["status", "delivery_started_at"])
         _record_order_audit(
             locked_order,
@@ -884,7 +933,11 @@ def mark_delivered(
         update_fields = ["status"]
         now = timezone.now()
         if locked_order.delivered_at is None:
-            locked_order.delivered_at = max(now, locked_order.delivery_started_at) if locked_order.delivery_started_at else now
+            locked_order.delivered_at = (
+                max(now, locked_order.delivery_started_at)
+                if locked_order.delivery_started_at
+                else now
+            )
             update_fields.append("delivered_at")
         if locked_order.completed_at is None:
             locked_order.completed_at = locked_order.delivered_at

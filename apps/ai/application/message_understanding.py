@@ -5,6 +5,7 @@ from apps.ai.application.service import AIService
 from apps.ai.contracts.requests import AIStructuredRequest
 from apps.ai.domain.understanding import (
     MessageIntent,
+    OrderAction,
     MessageUnderstandingInput,
     UserMessageUnderstanding,
     parse_understanding,
@@ -71,6 +72,9 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "missing_fields": {"type": "array", "items": {"type": "string"}},
         "ambiguities": {"type": "array", "items": {"type": "string"}},
         "language": {"type": ["string", "null"]},
+        "order_action": {"type": ["string", "null"], "enum": [*(action.value for action in OrderAction), None]},
+        "target_reference": {"type": ["object", "null"], "additionalProperties": False, "required": ["text"], "properties": {"text": {"type": "string", "minLength": 1}}},
+        "replacement": {"type": ["object", "null"], "additionalProperties": False, "required": ["requested_name", "quantity", "unit", "notes"], "properties": {"requested_name": {"type": "string", "minLength": 1}, "quantity": {"type": ["number", "null"], "exclusiveMinimum": 0}, "unit": {"type": ["string", "null"], "enum": ["KG", "G", "L", "ML", "UNIT", "PACK", "BOTTLE", "BAG", "OTHER", None]}, "notes": {"type": ["string", "null"]}}},
     },
 }
 

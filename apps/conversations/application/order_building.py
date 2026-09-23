@@ -6,6 +6,8 @@ from uuid import UUID
 
 from django.db import transaction
 
+from apps.catalog.domain.rules import normalize_catalog_text
+
 from apps.catalog.domain.enums import ProductStatus, ProductVariantStatus
 from apps.catalog.domain.grounding import CatalogResolution
 from apps.catalog.infrastructure.models import Product, ProductVariant
@@ -66,7 +68,8 @@ class OrderBuildingService:
     def target(order: Order, reference: ItemReference) -> ItemTargetDecision:
         items = list(
             OrderItem.objects.filter(order=order)
-            .select_related("product")
+            .select_related("product", "product_variant")
+            .prefetch_related("product__aliases")
             .order_by("created_at", "id")
         )
         if reference.order_item_id:
@@ -86,26 +89,24 @@ class OrderBuildingService:
                 status=ItemTargetStatus.FOUND if item else ItemTargetStatus.NOT_FOUND,
                 item=item,
             )
-        needle = (reference.requested_name or "").strip().casefold()
+        needle = _normalize_item_reference(reference.requested_name or "")
         if not needle:
             if len(items) == 1:
                 return ItemTargetDecision(status=ItemTargetStatus.FOUND, item=items[0])
-            return ItemTargetDecision(
-                status=ItemTargetStatus.AMBIGUOUS, candidates=tuple(items)
-            )
-        matches = [
-            item
-            for item in items
-            if item.requested_name.casefold() == needle
-            or (item.product and item.product.name.casefold() == needle)
-        ]
-        if len(matches) == 1:
-            return ItemTargetDecision(status=ItemTargetStatus.FOUND, item=matches[0])
+            return ItemTargetDecision(status=ItemTargetStatus.AMBIGUOUS, candidates=tuple(items))
+        ranked = []
+        for item in items:
+            score = _item_match_score(item, needle)
+            if score is not None:
+                ranked.append((score, item))
+        if not ranked:
+            return ItemTargetDecision(status=ItemTargetStatus.NOT_FOUND)
+        best = min(score for score, _ in ranked)
+        matches = tuple(item for score, item in ranked if score == best)
         return ItemTargetDecision(
-            status=ItemTargetStatus.NOT_FOUND
-            if not matches
-            else ItemTargetStatus.AMBIGUOUS,
-            candidates=tuple(matches),
+            status=ItemTargetStatus.FOUND if len(matches) == 1 else ItemTargetStatus.AMBIGUOUS,
+            item=matches[0] if len(matches) == 1 else None,
+            candidates=matches if len(matches) > 1 else (),
         )
 
     @staticmethod
@@ -172,3 +173,36 @@ class OrderBuildingService:
             actor=actor,
             correlation_id=correlation_id,
         )
+
+
+def _normalize_item_reference(value: str) -> str:
+    """Catalog-consistent Unicode/punctuation/accent normalization."""
+    return normalize_catalog_text(value)
+
+
+def _singular_equivalent(value: str) -> str:
+    """Intentionally small French plural equivalence, not linguistic stemming."""
+    if len(value) > 3 and value.endswith("aux"):
+        return f"{value[:-3]}al"
+    if len(value) > 3 and value.endswith(("s", "x")):
+        return value[:-1]
+    return value
+
+
+def _same_or_simple_plural(left: str, right: str) -> bool:
+    return left == right or _singular_equivalent(left) == _singular_equivalent(right)
+
+
+def _item_match_score(item: OrderItem, needle: str) -> int | None:
+    """Stable precedence: requested name, product, alias, variant; then plural form."""
+    names = [(0, item.requested_name)]
+    if item.product:
+        names.append((1, item.product.name))
+        names.extend((2, alias.alias) for alias in item.product.aliases.all())
+    if item.product_variant:
+        names.append((3, item.product_variant.name))
+    exact = [score for score, name in names if _normalize_item_reference(name) == needle]
+    if exact:
+        return min(exact)
+    plural = [score + 10 for score, name in names if _same_or_simple_plural(_normalize_item_reference(name), needle)]
+    return min(plural) if plural else None

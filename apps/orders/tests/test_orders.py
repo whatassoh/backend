@@ -73,8 +73,12 @@ def create_catalog_product(name: str):
 def add_matched_rice(order):
     product = create_catalog_product(f"Riz {order.id}")
     return add_order_item(
-        order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
-        product=product, resolution_status=OrderItemResolutionStatus.MATCHED,
+        order=order,
+        requested_name="Riz",
+        quantity=5,
+        unit=ProductUnit.KG,
+        product=product,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
     )
 
 
@@ -97,6 +101,8 @@ def test_order_reference_format_and_multiple_generation():
     customer = create_user()
 
     first = create_order_draft(customer=customer)
+    first.status = OrderStatus.CONFIRMED
+    first.save(update_fields=["status", "updated_at"])
     second = create_order_draft(customer=customer)
 
     assert first.reference != second.reference
@@ -130,6 +136,9 @@ def test_create_order_draft_retries_reference_collision(monkeypatch):
     customer = create_user()
     existing_reference = "ORD-260915-A7K2"
     Order.objects.create(reference=existing_reference, customer=customer)
+    Order.objects.filter(reference=existing_reference).update(
+        status=OrderStatus.CONFIRMED
+    )
     references = iter([existing_reference, "ORD-260915-B8L3"])
 
     monkeypatch.setattr(
@@ -448,7 +457,9 @@ def test_content_editing_is_blocked_after_confirmation():
     order = create_order_draft(customer=customer)
     item = add_order_item(
         order=order,
-        requested_name="Riz", quantity=5, unit=ProductUnit.KG,
+        requested_name="Riz",
+        quantity=5,
+        unit=ProductUnit.KG,
         product=create_catalog_product("Riz editing"),
         resolution_status=OrderItemResolutionStatus.MATCHED,
     )
@@ -674,3 +685,21 @@ def test_transition_services_use_fresh_locked_order_state():
 
     with pytest.raises(InvalidOrderTransition):
         start_store_matching(stale_order)
+
+@pytest.mark.django_db
+def test_database_allows_only_one_building_order_per_customer():
+    customer = create_user("+237699887799")
+    create_order_draft(customer=customer)
+
+    with pytest.raises(IntegrityError):
+        Order.objects.create(reference="ORD-260923-Z9K8", customer=customer)
+
+
+@pytest.mark.django_db
+def test_confirmed_cancelled_and_failed_orders_release_building_slot():
+    customer = create_user("+237699887798")
+    for status in (OrderStatus.CONFIRMED, OrderStatus.CANCELLED, OrderStatus.FAILED):
+        order = create_order_draft(customer=customer)
+        order.status = status
+        order.save(update_fields=["status", "updated_at"])
+        assert create_order_draft(customer=customer).id != order.id

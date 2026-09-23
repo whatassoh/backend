@@ -19,7 +19,14 @@ def test_review_is_built_from_current_database_truth_and_is_ready():
     user = User.objects.create_user(whatsapp_phone="+237699887766")
     order = create_order_draft(customer=user)
     product = create_product(name="Riz", category=create_category(name="Food"))
-    item = add_order_item(order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG, product=product, resolution_status=OrderItemResolutionStatus.MATCHED)
+    item = add_order_item(
+        order=order,
+        requested_name="Riz",
+        quantity=5,
+        unit=ProductUnit.KG,
+        product=product,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
     set_delivery_location(order=order, point=Point(9.7, 4.05, srid=4326))
     service = OrderReviewService()
     first = service.build_review(order)

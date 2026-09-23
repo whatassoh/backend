@@ -4,8 +4,8 @@ from django.db import transaction
 
 from apps.audit.domain.enums import AuditEventType
 from apps.audit.infrastructure.models import AuditEvent
-from apps.catalog.domain.enums import ProductUnit
 from apps.catalog.application.services import create_category, create_product
+from apps.catalog.domain.enums import ProductUnit
 from apps.identity.infrastructure.models import User
 from apps.orders.application.services import (
     add_order_item,
@@ -20,8 +20,8 @@ from apps.orders.application.services import (
 from apps.orders.domain.enums import (
     OrderCancellationCode,
     OrderFailureCode,
-    OrderStatus,
     OrderItemResolutionStatus,
+    OrderStatus,
 )
 from apps.orders.domain.events import (
     OrderCancelled,
@@ -53,8 +53,12 @@ def create_confirmable_order(user: User) -> Order:
         name=f"Riz {order.id}", category=create_category(name=f"Food {order.id}")
     )
     add_order_item(
-        order=order, requested_name="Riz", quantity=5, unit=ProductUnit.KG,
-        product=product, resolution_status=OrderItemResolutionStatus.MATCHED,
+        order=order,
+        requested_name="Riz",
+        quantity=5,
+        unit=ProductUnit.KG,
+        product=product,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
     )
     set_delivery_location(order=order, point=BONAMOUSSADI)
     return order

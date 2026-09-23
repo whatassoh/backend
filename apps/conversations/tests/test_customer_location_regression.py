@@ -5,6 +5,7 @@ import pytest
 from apps.ai.domain.understanding import ExtractedItem, ExtractedUnit, MessageIntent, UserMessageUnderstanding
 from apps.conversations.application.orchestrator import ConversationalOrchestrator
 from apps.conversations.application.services import get_or_create_active_conversation
+from apps.conversations.domain.context import ConversationContext
 from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.dtos import MessageLocation, NormalizedInboundMessage
@@ -44,20 +45,30 @@ def test_empty_catalog_location_builds_next_response_without_type_error(channel)
 
     app.process_message(conversation, inbound("1", channel=channel, action_id="journey.select.buy"))
     initial = app.process_message(conversation, inbound("2", channel=channel, text="Je veux un sac de riz"))
-    assert "Où souhaitez-vous être livré" in initial.response.text
+    assert "n’est pas disponible" in initial.response.text
+    assert not initial.response.request_location
+    assert [action.action_id for action in initial.response.actions] == [
+        "order.unmatched.remove", "order.unmatched.replace"
+    ]
     item = OrderItem.objects.get()
     assert item.resolution_status == OrderItemResolutionStatus.UNMATCHED
     assert item.product_id is None
 
-    conversation.refresh_from_db()
-    located = app.process_message(conversation, inbound("3", channel=channel, location=MessageLocation(latitude=4.05, longitude=9.70)))
-    assert "Position enregistrée" in located.response.text
-    assert [action.action_id for action in located.response.actions] == ["order.skip_delivery_instructions"]
-    conversation.refresh_from_db()
-    order = app.active_order_service.get_active_order(conversation).order
-    assert (order.delivery_location.x, order.delivery_location.y) == (9.70, 4.05)
+@pytest.mark.django_db
+def test_unmatched_remove_is_safe_and_stale_replace_does_not_mutate():
+    user = User.objects.create_user(whatsapp_phone="+237690099999")
+    identity = create_channel_identity(
+        user=user, channel=MessagingChannel.WHATSAPP, external_user_id="lot5-stale"
+    )
+    conversation = get_or_create_active_conversation(channel_identity=identity)[0]
+    app = ConversationalOrchestrator(understanding_service=RiceUnderstanding())
 
-    conversation.refresh_from_db()
-    review = app.process_message(conversation, inbound("4", channel=channel, action_id="order.skip_delivery_instructions"))
-    assert "Commande à compléter" in review.response.text
-    assert "order.confirm" not in [action.action_id for action in review.response.actions]
+    app.process_message(conversation, inbound("journey", channel=MessagingChannel.WHATSAPP, action_id="journey.select.buy"))
+    app.process_message(conversation, inbound("unmatched", channel=MessagingChannel.WHATSAPP, text="Je veux un sac de riz"))
+    removed = app.process_message(conversation, inbound("remove", channel=MessagingChannel.WHATSAPP, action_id="order.unmatched.remove"))
+
+    assert "vide" in removed.response.text
+    assert OrderItem.objects.count() == 0
+    stale = app.process_message(conversation, inbound("stale", channel=MessagingChannel.WHATSAPP, action_id="order.unmatched.replace"))
+    assert stale.status.value == "REJECTED"
+    assert OrderItem.objects.count() == 0
