@@ -12,6 +12,7 @@ IFS=$'\n\t'
 # Options par variables d'environnement :
 #
 #   ENABLE_TLS=1
+#   MANAGE_NGINX=1
 #   PORT_RANGE_START=8010
 #   PORT_RANGE_END=8099
 #   HEALTH_PATH=/
@@ -40,6 +41,7 @@ DOMAIN="${1:-}"
 LETSENCRYPT_EMAIL="${2:-}"
 
 ENABLE_TLS="${ENABLE_TLS:-1}"
+MANAGE_NGINX="${MANAGE_NGINX:-1}"
 
 PORT_RANGE_START="${PORT_RANGE_START:-8010}"
 PORT_RANGE_END="${PORT_RANGE_END:-8099}"
@@ -603,6 +605,9 @@ trap on_error ERR
 [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || \
     die "Nom de domaine invalide : ${DOMAIN}"
 
+[[ "$MANAGE_NGINX" == "0" || "$MANAGE_NGINX" == "1" ]] || \
+    die "MANAGE_NGINX doit valoir 0 ou 1."
+
 
 [[ -f "$COMPOSE_FILE" ]] || \
     die "Fichier absent : ${COMPOSE_FILE}"
@@ -614,7 +619,6 @@ trap on_error ERR
 
 for cmd in \
     docker \
-    nginx \
     ss \
     getent \
     openssl \
@@ -630,8 +634,11 @@ do
 
 done
 
+if [[ "$MANAGE_NGINX" == "1" ]]; then
+    require_cmd nginx
+fi
 
-if [[ "$ENABLE_TLS" == "1" ]]; then
+if [[ "$MANAGE_NGINX" == "1" && "$ENABLE_TLS" == "1" ]]; then
 
     require_cmd certbot
 
@@ -754,7 +761,9 @@ fi
 # autre application Nginx.
 # ----------------------------------------------------------
 
-if ! "${SUDO[@]}" test -e "$NGINX_SITE"; then
+if [[ "$MANAGE_NGINX" == "1" ]] \
+    && ! "${SUDO[@]}" test -e "$NGINX_SITE"
+then
 
     if \
         "${SUDO[@]}" nginx -T 2>/dev/null \
@@ -1294,6 +1303,10 @@ fi
 log "Release applicative opérationnelle : web + worker + beat."
 log "Django répond correctement en local."
 
+TMP_NGINX=""
+
+if [[ "$MANAGE_NGINX" == "1" ]]; then
+
 # ==========================================================
 # 13. NGINX BACKUP
 # ==========================================================
@@ -1596,6 +1609,12 @@ if [[ "$ENABLE_TLS" == "1" ]]; then
 
 fi
 
+else
+
+    log "Configuration Nginx/Certbot conservée (MANAGE_NGINX=0)."
+
+fi
+
 
 # ==========================================================
 # 18. TEST PUBLIC FINAL
@@ -1677,7 +1696,9 @@ fi
 trap - ERR
 
 
-rm -f "$TMP_NGINX"
+if [[ -n "$TMP_NGINX" ]]; then
+    rm -f "$TMP_NGINX"
+fi
 
 trap - EXIT
 
