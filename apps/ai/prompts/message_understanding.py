@@ -26,6 +26,10 @@ OUT_OF_SCOPE, explicit requests to continue suspended work as ORDER_RESUME, requ
 continue later as PAUSE, and requests to return to the previous step as BACK. Use
 UNKNOWN only when unclear.
 
+Use MEMORY_SHOW when the user asks what conversational preferences are remembered and
+MEMORY_FORGET when the user explicitly asks to erase those preferences. These intents
+never concern orders, accounts, stores or other authoritative business records.
+
 For order actions, use order_action: ADD_ITEM, REMOVE_ITEM, REPLACE_ITEM,
 MODIFY_QUANTITY, CONFIRM, CANCEL, MODIFY, CHANGE_LOCATION or RESUME. target_reference
 contains only the user's words, never an ID. REPLACE_ITEM requires target_reference and

@@ -29,6 +29,8 @@ class UniversalCommand(StrEnum):
     BACK = "BACK"
     HELP = "HELP"
     GREETING = "GREETING"
+    MEMORY_SHOW = "MEMORY_SHOW"
+    MEMORY_FORGET = "MEMORY_FORGET"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -70,6 +72,18 @@ _COMMAND_PATTERNS = {
         r"coucou",
         r"hello",
         r"bon matin",
+    ),
+    UniversalCommand.MEMORY_SHOW: (
+        r"qu est ce que tu sais sur moi",
+        r"que sais tu sur moi",
+        r"qu as tu memorise sur moi",
+        r"montre mes preferences",
+    ),
+    UniversalCommand.MEMORY_FORGET: (
+        r"oublie mes preferences",
+        r"oublie ce que tu sais sur moi",
+        r"efface ta memoire sur moi",
+        r"supprime mes preferences",
     ),
 }
 

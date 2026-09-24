@@ -93,7 +93,9 @@ class OrderBuildingService:
         if not needle:
             if len(items) == 1:
                 return ItemTargetDecision(status=ItemTargetStatus.FOUND, item=items[0])
-            return ItemTargetDecision(status=ItemTargetStatus.AMBIGUOUS, candidates=tuple(items))
+            return ItemTargetDecision(
+                status=ItemTargetStatus.AMBIGUOUS, candidates=tuple(items)
+            )
         ranked = []
         for item in items:
             score = _item_match_score(item, needle)
@@ -104,7 +106,9 @@ class OrderBuildingService:
         best = min(score for score, _ in ranked)
         matches = tuple(item for score, item in ranked if score == best)
         return ItemTargetDecision(
-            status=ItemTargetStatus.FOUND if len(matches) == 1 else ItemTargetStatus.AMBIGUOUS,
+            status=ItemTargetStatus.FOUND
+            if len(matches) == 1
+            else ItemTargetStatus.AMBIGUOUS,
             item=matches[0] if len(matches) == 1 else None,
             candidates=matches if len(matches) > 1 else (),
         )
@@ -130,7 +134,9 @@ class OrderBuildingService:
         return product, variant, OrderItemResolutionStatus.MATCHED
 
     @transaction.atomic
-    def add(self, order, extracted_item, resolution, *, actor=None, correlation_id=None):
+    def add(
+        self, order, extracted_item, resolution, *, actor=None, correlation_id=None
+    ):
         """One utterance creates one line; duplicates are intentionally retained."""
         product, variant, status = self._catalog_values(resolution)
         return add_order_item(
@@ -146,7 +152,9 @@ class OrderBuildingService:
             correlation_id=correlation_id,
         )
 
-    def update(self, item, *, quantity=None, unit=None, actor=None, correlation_id=None):
+    def update(
+        self, item, *, quantity=None, unit=None, actor=None, correlation_id=None
+    ):
         fields = {}
         if quantity is not None:
             fields["quantity"] = quantity
@@ -162,7 +170,9 @@ class OrderBuildingService:
         return remove_order_item(item, actor=actor, correlation_id=correlation_id)
 
     @transaction.atomic
-    def replace(self, item, extracted_item, resolution, *, actor=None, correlation_id=None):
+    def replace(
+        self, item, extracted_item, resolution, *, actor=None, correlation_id=None
+    ):
         product, variant, status = self._catalog_values(resolution)
         return replace_order_item(
             item,
@@ -201,8 +211,14 @@ def _item_match_score(item: OrderItem, needle: str) -> int | None:
         names.extend((2, alias.alias) for alias in item.product.aliases.all())
     if item.product_variant:
         names.append((3, item.product_variant.name))
-    exact = [score for score, name in names if _normalize_item_reference(name) == needle]
+    exact = [
+        score for score, name in names if _normalize_item_reference(name) == needle
+    ]
     if exact:
         return min(exact)
-    plural = [score + 10 for score, name in names if _same_or_simple_plural(_normalize_item_reference(name), needle)]
+    plural = [
+        score + 10
+        for score, name in names
+        if _same_or_simple_plural(_normalize_item_reference(name), needle)
+    ]
     return min(plural) if plural else None

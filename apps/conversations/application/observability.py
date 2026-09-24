@@ -97,9 +97,7 @@ def observe_decision(
             timer.elapsed_seconds()
         )
         if _equals_previous_response(conversation, outcome.response.text):
-            REPEATED_RESPONSES.labels(
-                channel=channel, flow=_bounded(flow_before)
-            ).inc()
+            REPEATED_RESPONSES.labels(channel=channel, flow=_bounded(flow_before)).inc()
             logger.warning(
                 "conversation_repeated_response_detected",
                 extra={

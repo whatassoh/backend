@@ -76,6 +76,8 @@ def message(text=None, *, action_id=None, message_id="message-1"):
         ("revenir en arrière", UniversalCommand.BACK),
         ("AIDE", UniversalCommand.HELP),
         ("Bonjour", UniversalCommand.GREETING),
+        ("Qu’as-tu mémorisé sur moi ?", UniversalCommand.MEMORY_SHOW),
+        ("Oublie mes préférences", UniversalCommand.MEMORY_FORGET),
     ],
 )
 def test_exact_universal_commands_are_accent_and_case_tolerant(text, expected):

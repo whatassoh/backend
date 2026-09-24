@@ -5,6 +5,10 @@ from django.utils import timezone
 
 from apps.conversations.application.flow import process_inbound_conversation
 from apps.conversations.application.services import ingest_inbound_message
+from apps.messaging.application.reliable_pipeline import (
+    channel_pipeline_enabled,
+    enqueue_inbound_turn,
+)
 from apps.messaging.domain.enums import (
     MessageDirection,
     MessageStatus,
@@ -21,15 +25,29 @@ def process_whatsapp_webhook(payload: dict) -> dict[str, int]:
     messages = parse_whatsapp_webhook(payload)
     processed = 0
     duplicates = 0
+    queued = 0
 
     for message in messages:
-        logger.info("inbound_normalized", extra={"channel": MessagingChannel.WHATSAPP, "message_type": message.message_type, "action_id": message.metadata.get("action_id")})
+        logger.info(
+            "inbound_normalized",
+            extra={
+                "channel": MessagingChannel.WHATSAPP,
+                "message_type": message.message_type,
+                "action_id": message.metadata.get("action_id"),
+            },
+        )
         with transaction.atomic():
             message_event, created = _get_or_create_inbound_message_event(message)
             if not created and _has_conversation_message(message_event):
                 duplicates += 1
                 continue
             inbound = ingest_inbound_message(message, message_event)
+            if channel_pipeline_enabled(message.channel):
+                _, created_item = enqueue_inbound_turn(
+                    inbound=inbound, message=message, message_event=message_event
+                )
+                queued += int(created_item)
+                continue
             message_event.status = MessageStatus.PROCESSED
             message_event.processed_at = timezone.now()
             message_event.save(update_fields=["status", "processed_at", "updated_at"])
@@ -40,7 +58,15 @@ def process_whatsapp_webhook(payload: dict) -> dict[str, int]:
                 correlation_id=str(message_event.id),
             )
         except Exception as exc:
-            logger.exception("inbound_processing_failed", extra={"correlation_id": str(message_event.id), "channel": MessagingChannel.WHATSAPP, "message_type": message.message_type, "exception_class": type(exc).__name__})
+            logger.exception(
+                "inbound_processing_failed",
+                extra={
+                    "correlation_id": str(message_event.id),
+                    "channel": MessagingChannel.WHATSAPP,
+                    "message_type": message.message_type,
+                    "exception_class": type(exc).__name__,
+                },
+            )
             raise
         from apps.conversations.application.responding import deliver_outcome_response
 
@@ -63,11 +89,14 @@ def process_whatsapp_webhook(payload: dict) -> dict[str, int]:
         )
 
     statuses_updated = apply_whatsapp_status_updates(payload)
-    return {
+    result = {
         "processed": processed,
         "duplicates": duplicates,
         "statuses_updated": statuses_updated,
     }
+    if channel_pipeline_enabled(MessagingChannel.WHATSAPP):
+        result["queued"] = queued
+    return result
 
 
 def _get_or_create_inbound_message_event(message):

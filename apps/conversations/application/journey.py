@@ -30,6 +30,7 @@ class JourneyRoutingService:
 
     def __init__(self, *, context_service=None):
         from apps.conversations.application.context import ConversationContextService
+
         self.context_service = context_service or ConversationContextService()
 
     @classmethod
@@ -73,6 +74,7 @@ class JourneyRoutingService:
         if journey == ActiveJourney.SELL:
             from apps.stores.domain.enums import StoreMembershipStatus
             from apps.stores.infrastructure.models import StoreMembership
+
             exists = StoreMembership.objects.filter(
                 user=user, status=StoreMembershipStatus.ACTIVE
             ).exists()
@@ -82,6 +84,7 @@ class JourneyRoutingService:
                 else JourneyRoutingStatus.SELLER_ONBOARDING_REQUIRED
             )
         from apps.drivers.infrastructure.models import DriverProfile
+
         exists = DriverProfile.objects.filter(user=user).exists()
         return (
             JourneyRoutingStatus.DRIVER_JOURNEY_READY

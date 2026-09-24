@@ -1,6 +1,14 @@
 from django.contrib import admin
 
-from apps.conversations.infrastructure.models import Conversation, ConversationMessage
+from apps.conversations.infrastructure.models import (
+    Conversation,
+    ConversationEpisode,
+    ConversationMessage,
+    ConversationStyleProfile,
+    ConversationSummary,
+    MemoryFact,
+    UserCommunicationProfile,
+)
 
 
 @admin.register(Conversation)
@@ -72,3 +80,54 @@ class ConversationMessageAdmin(admin.ModelAdmin):
                 ]
             )
         return fields
+
+
+class _ReadOnlyMemoryAdmin(admin.ModelAdmin):
+    """Memory records are changed only through audited application services."""
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ConversationStyleProfile)
+class ConversationStyleProfileAdmin(_ReadOnlyMemoryAdmin):
+    list_display = [
+        "conversation",
+        "language",
+        "register",
+        "address_form",
+        "sample_count",
+    ]
+    search_fields = ["conversation__id", "conversation__user__whatsapp_phone"]
+
+
+@admin.register(UserCommunicationProfile)
+class UserCommunicationProfileAdmin(_ReadOnlyMemoryAdmin):
+    list_display = ["user", "language", "register", "address_form", "sample_count"]
+    search_fields = ["user__whatsapp_phone", "user__first_name"]
+
+
+@admin.register(ConversationSummary)
+class ConversationSummaryAdmin(_ReadOnlyMemoryAdmin):
+    list_display = ["conversation", "prompt_version", "status", "created_at"]
+    list_filter = ["status", "prompt_version"]
+    search_fields = ["conversation__id", "content_hash"]
+
+
+@admin.register(ConversationEpisode)
+class ConversationEpisodeAdmin(_ReadOnlyMemoryAdmin):
+    list_display = ["conversation", "topic", "outcome", "status", "created_at"]
+    list_filter = ["status", "topic", "outcome"]
+
+
+@admin.register(MemoryFact)
+class MemoryFactAdmin(_ReadOnlyMemoryAdmin):
+    list_display = ["user", "fact_type", "consent", "expires_at", "deleted_at"]
+    list_filter = ["fact_type", "consent", "sensitivity"]
+    search_fields = ["user__whatsapp_phone", "conversation__id"]

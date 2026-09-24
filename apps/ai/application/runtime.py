@@ -21,6 +21,11 @@ class AIRuntimePolicy:
     tools_enabled: bool
     write_tools_enabled: bool
     memory_enabled: bool
+    conversation_memory_enabled: bool
+    memory_summary_enabled: bool
+    natural_composer_enabled: bool
+    natural_composer_shadow_enabled: bool
+    style_adaptation_enabled: bool
     rag_enabled: bool
     voice_enabled: bool
     decision_observability_enabled: bool
@@ -61,6 +66,19 @@ def get_ai_runtime_policy() -> AIRuntimePolicy:
         and bool(getattr(settings, "AI_AGENT_WRITE_TOOLS_ENABLED", False)),
         memory_enabled=agent_enabled
         and bool(getattr(settings, "AI_AGENT_MEMORY_ENABLED", False)),
+        conversation_memory_enabled=bool(
+            getattr(settings, "AI_CONVERSATION_MEMORY_ENABLED", False)
+        ),
+        memory_summary_enabled=model_calls_enabled
+        and bool(getattr(settings, "AI_CONVERSATION_MEMORY_ENABLED", False))
+        and bool(getattr(settings, "AI_MEMORY_SUMMARY_ENABLED", False)),
+        natural_composer_enabled=model_calls_enabled
+        and bool(getattr(settings, "AI_NATURAL_COMPOSER_ENABLED", False)),
+        natural_composer_shadow_enabled=model_calls_enabled
+        and bool(getattr(settings, "AI_NATURAL_COMPOSER_SHADOW_ENABLED", False)),
+        style_adaptation_enabled=bool(
+            getattr(settings, "AI_STYLE_ADAPTATION_ENABLED", False)
+        ),
         rag_enabled=model_calls_enabled
         and bool(getattr(settings, "AI_RAG_ENABLED", True)),
         voice_enabled=model_calls_enabled

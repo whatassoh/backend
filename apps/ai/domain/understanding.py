@@ -23,6 +23,8 @@ class MessageIntent(StrEnum):
     ORDER_RESUME = "ORDER_RESUME"
     PAUSE = "PAUSE"
     BACK = "BACK"
+    MEMORY_SHOW = "MEMORY_SHOW"
+    MEMORY_FORGET = "MEMORY_FORGET"
 
 
 class OrderAction(StrEnum):
@@ -39,6 +41,7 @@ class OrderAction(StrEnum):
 
 class ExtractedUnit(StrEnum):
     """Transport enum deliberately aligned with catalog ProductUnit values."""
+
     KG = "KG"
     G = "G"
     L = "L"
@@ -61,6 +64,7 @@ class ExtractedItem:
 @dataclass(frozen=True, kw_only=True)
 class ItemTargetReference:
     """User wording only; deliberately not a business identifier."""
+
     text: str
 
 
@@ -97,11 +101,17 @@ def parse_understanding(data: dict[str, Any]) -> UserMessageUnderstanding:
         replacement_data = data.get("replacement")
         replacement = _parse_item(replacement_data) if replacement_data else None
         result = UserMessageUnderstanding(
-            intent=MessageIntent(data["intent"]), confidence=confidence, items=items,
-            location_text=data.get("location_text"), confirmation=data.get("confirmation"),
-            missing_fields=tuple(data["missing_fields"]), ambiguities=tuple(data["ambiguities"]),
-            language=data.get("language"), order_action=action,
-            target_reference=target, replacement=replacement,
+            intent=MessageIntent(data["intent"]),
+            confidence=confidence,
+            items=items,
+            location_text=data.get("location_text"),
+            confirmation=data.get("confirmation"),
+            missing_fields=tuple(data["missing_fields"]),
+            ambiguities=tuple(data["ambiguities"]),
+            language=data.get("language"),
+            order_action=action,
+            target_reference=target,
+            replacement=replacement,
         )
     except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
         raise AIInvalidResponseError("Invalid message-understanding response.") from exc
@@ -125,7 +135,12 @@ def _parse_item(data: dict[str, Any]) -> ExtractedItem:
         unit = ExtractedUnit(data["unit"]) if data.get("unit") is not None else None
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise AIInvalidResponseError("Invalid extracted item.") from exc
-    return ExtractedItem(requested_name=data["requested_name"].strip(), quantity=parsed_quantity, unit=unit, notes=data.get("notes"))
+    return ExtractedItem(
+        requested_name=data["requested_name"].strip(),
+        quantity=parsed_quantity,
+        unit=unit,
+        notes=data.get("notes"),
+    )
 
 
 def _validate_understanding(result: UserMessageUnderstanding) -> None:
@@ -133,12 +148,19 @@ def _validate_understanding(result: UserMessageUnderstanding) -> None:
         raise AIInvalidResponseError("Confidence must be between zero and one.")
     if result.confirmation is not None and not isinstance(result.confirmation, bool):
         raise AIInvalidResponseError("Confirmation must be a boolean or null.")
-    for item in (*result.items, *(() if result.replacement is None else (result.replacement,))):
+    for item in (
+        *result.items,
+        *(() if result.replacement is None else (result.replacement,)),
+    ):
         if not item.requested_name:
             raise AIInvalidResponseError("Extracted item name cannot be empty.")
         if item.quantity is not None and item.quantity <= 0:
             raise AIInvalidResponseError("Extracted item quantity must be positive.")
-    requires_target = {OrderAction.REMOVE_ITEM, OrderAction.REPLACE_ITEM, OrderAction.MODIFY_QUANTITY}
+    requires_target = {
+        OrderAction.REMOVE_ITEM,
+        OrderAction.REPLACE_ITEM,
+        OrderAction.MODIFY_QUANTITY,
+    }
     if result.order_action in requires_target and result.target_reference is None:
         raise AIInvalidResponseError("This order action requires a target reference.")
     if result.order_action == OrderAction.REPLACE_ITEM and result.replacement is None:
