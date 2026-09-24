@@ -55,6 +55,26 @@ le niveau d'emoji et les marqueurs techniques. Il ne tente pas d'inférer l'âge
 l'origine, la santé, la religion, les opinions ou d'autres attributs sensibles. Le bot
 n'imite ni fautes d'orthographe, ni insultes, ni vulnérabilités linguistiques.
 
+Le vocabulaire n'est plus codé dans `style.py`. La ressource versionnée
+`casual_markers.json` contient 2 648 formes uniques françaises et anglaises, chacune
+associée à une catégorie et un poids. Son générateur déterministe conserve les concepts
+revus séparément des variantes. Au chargement, le moteur vérifie le hash, le nombre
+d'entrées, l'unicité et les poids, puis construit un index d'n-grammes mis en cache. Il
+cherche les correspondances les plus longues sans chevauchement au lieu de parcourir
+linéairement toute la liste à chaque message.
+
+Le lexique est un capteur, pas un routeur. Une phrase non répertoriée produit un rapport
+neutre et poursuit exactement le même traitement de compréhension. Une ressource
+invalide ou indisponible fait échouer uniquement l'observation facultative; la frontière
+du flux journalise l'erreur et continue avec le résultat métier. Aucun message n'est
+accepté, refusé ou classé hors périmètre à partir du seul lexique.
+
+`UserCommunicationProfile` agrège les signaux entre les conversations et les canaux du
+même utilisateur. Le profil local conserve la dynamique de la conversation courante;
+le profil utilisateur évite de repartir de zéro sur Telegram après WhatsApp. Aucun des
+deux ne stocke le texte, les mots reconnus ou un attribut sensible : uniquement des
+compteurs, scores, confiances et versions de ressource.
+
 Les préférences explicites `tu/vous`, langue, longueur, emojis et niveau technique
 priment sur les observations. Les politiques de salutation et de présentation déjà
 portées par `ConversationSocialState` empêchent leur répétition à chaque message. Un
@@ -77,9 +97,51 @@ expiration. Une nouvelle valeur supplante l'ancienne sans effacer l'historique. 
 lectures filtrent systématiquement l'utilisateur, l'expiration, l'effacement et la
 supersession.
 
+Le catalogue `communication_preferences.json` contient 1 736 formulations françaises
+et anglaises. Les correspondances sont indexées par taille d'n-gramme. Si le même
+message exprime deux valeurs opposées pour une catégorie, cette catégorie n'est pas
+persistée. La provenance conserve un hash de la formulation reconnue, sa langue et la
+version du lexique, jamais la phrase brute. Une absence de correspondance retourne une
+liste vide et n'interrompt pas le tour.
+
 Les commandes « qu'as-tu mémorisé sur moi ? » et « oublie mes préférences » fonctionnent
 même sans tâche active. L'effacement est logique pour l'audit et supprime les profils de
-style dérivés. Il ne touche jamais les commandes ou les données de compte.
+style dérivés, résumés et épisodes de cet utilisateur, y compris les anciennes
+préférences supplantées. Il ne touche jamais les messages canoniques, commandes ou
+données de compte. Une tâche horaire expire les faits arrivés à leur TTL pour tous les
+utilisateurs par lots bornés.
+
+## Politiques du composeur
+
+Le composeur ne suit plus une consigne générique unique. Quatorze politiques typées
+couvrent : social, clarification, demande de position, onboarding, revue de commande,
+statut, résultat d'action, navigation, catalogue, résultat vide, contrôle mémoire, aide,
+erreur récupérable et réponse générique.
+
+Chaque politique fixe l'objectif, les actes de langage obligatoires et interdits, la
+taille maximale, la conservation éventuelle de la question, des lignes et de la demande
+de localisation. Les erreurs récupérables ne sont pas reformulées par modèle. Le
+candidat doit préserver exactement nombres, références, UUID, téléphones, emails et
+URL; préserver la polarité négative; ne pas introduire de marqueur d'extraction de
+prompt; et respecter les contraintes structurelles du cas d'usage.
+
+Le texte autorisé est transmis comme donnée JSON délimitée. Le candidat généré, sa
+décision, ses scores et le hash du texte finalement livré sont audités par cas d'usage.
+Le mode shadow ne change jamais la réponse envoyée.
+
+## Registre d'outils
+
+Le manifeste distingue maintenant explicitement les outils exécutables de ceux déclarés
+pour un futur rollout d'écriture. Les outils de lecture exécutables couvrent la tâche
+courante et les tâches suspendues, les préférences et le style, commandes et articles,
+catalogue vendeur autorisé, catégories et produits, profil livreur, mission active et
+suivi client avec GPS exact masqué.
+
+Avant chaque exécution, le registre valide le JSON Schema et les formats, l'identité de
+l'utilisateur par rapport à la conversation, le niveau de risque, la confirmation et la
+taille maximale du résultat. Chaque handler refait son contrôle de propriété dans la
+base métier. Les arguments et résultats sensibles ne sont pas écrits dans les logs;
+seuls outil, risque, statut, durée et catégorie d'erreur le sont.
 
 ## Résumé incrémental et épisodes
 
@@ -112,6 +174,7 @@ AI_MEMORY_SUMMARY_MIN_MESSAGES=8
 AI_MEMORY_SUMMARY_BATCH_SIZE=24
 AI_MEMORY_FACT_TTL_DAYS=365
 AI_MEMORY_RECONCILIATION_BATCH_SIZE=100
+AI_TOOL_MAX_RESULT_BYTES=65536
 ```
 
 Ordre recommandé après migrations : style, mémoire explicite, résumé sur une cohorte

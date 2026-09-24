@@ -98,13 +98,16 @@ def process_inbound_conversation(conversation, message, *, correlation_id=None):
     ):
         from apps.conversations.application.composition import compose_outcome_safely
 
-        outcome = compose_outcome_safely(
-            conversation=conversation,
-            outcome=outcome,
-            enabled=runtime_policy.natural_composer_enabled,
-            shadow=runtime_policy.natural_composer_shadow_enabled,
-            correlation_id=correlation_id,
-        )
+        try:
+            outcome = compose_outcome_safely(
+                conversation=conversation,
+                outcome=outcome,
+                enabled=runtime_policy.natural_composer_enabled,
+                shadow=runtime_policy.natural_composer_shadow_enabled,
+                correlation_id=correlation_id,
+            )
+        except Exception:
+            logger.exception("natural_response_composition_boundary_failed")
     if runtime_policy.memory_summary_enabled:
         from apps.conversations.tasks import refresh_conversation_memory
 

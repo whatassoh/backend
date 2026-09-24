@@ -17,6 +17,11 @@ class StubAI:
         )
 
 
+class FailingAI:
+    def generate_structured(self, request):
+        raise RuntimeError("provider unavailable")
+
+
 def brief(text):
     return ResponseBrief(
         objective="answer",
@@ -95,3 +100,14 @@ def test_location_policy_requires_question_location_and_speech_act():
     assert valid.text == "Tu peux partager ta position ?"
     assert rejected is False
     assert invalid is response
+
+
+def test_composer_failure_does_not_replace_the_authoritative_response():
+    response = ResponsePlan(text="Réponse métier sûre.")
+
+    try:
+        NaturalResponseComposer(FailingAI()).compose(brief(response.text), response)
+    except RuntimeError:
+        fallback = response
+
+    assert fallback is response

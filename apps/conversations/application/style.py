@@ -28,8 +28,12 @@ def style_snapshot(conversation):
     """Resolve explicit preferences over local and cross-channel observations."""
 
     snapshot = dict(DEFAULT_STYLE)
-    user_profile = _related_profile(conversation.user, "communication_profile")
-    local_profile = _related_profile(conversation, "style_profile")
+    user_profile = UserCommunicationProfile.objects.filter(
+        user_id=conversation.user_id
+    ).first()
+    local_profile = ConversationStyleProfile.objects.filter(
+        conversation=conversation
+    ).first()
     if user_profile is not None:
         snapshot.update(_profile_values(user_profile))
     if local_profile is not None and local_profile.sample_count >= 2:
@@ -178,13 +182,3 @@ def _derive_profile(profile, signals):
 
 def _profile_values(profile):
     return {field: getattr(profile, field) for field in PROFILE_FIELDS}
-
-
-def _related_profile(instance, attribute):
-    try:
-        return getattr(instance, attribute)
-    except (
-        ConversationStyleProfile.DoesNotExist,
-        UserCommunicationProfile.DoesNotExist,
-    ):
-        return None

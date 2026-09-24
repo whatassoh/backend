@@ -61,9 +61,12 @@ def test_registry_manifest_contains_policy_metadata(monkeypatch, settings):
     assert cancel["confirmation_required"] is True
     assert cancel["permission"] == "orders.cancel_own"
     assert len(manifest) >= 25
-    assert next(item for item in manifest if item["name"] == "get_response_style")[
-        "executable"
-    ] is True
+    assert (
+        next(item for item in manifest if item["name"] == "get_response_style")[
+            "executable"
+        ]
+        is True
+    )
     assert cancel["executable"] is False
 
 

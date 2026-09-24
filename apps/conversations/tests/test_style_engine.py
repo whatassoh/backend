@@ -61,3 +61,15 @@ def test_preference_lexicon_is_multilingual_and_rejects_conflicts():
         ("response_length", "short"),
     }
     assert not any(item.fact_type == "response_length" for item in conflict)
+
+
+def test_unmapped_message_is_neutral_and_never_rejected():
+    text = "zxqv objet totalement absent du lexique 947"
+
+    report = analyze_writing_style(text)
+    preferences = extract_explicit_preferences(text)
+
+    assert report.casual_score == 0
+    assert report.formal_score == 0
+    assert report.evidence_count == 0
+    assert preferences == ()
