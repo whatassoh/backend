@@ -42,11 +42,6 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     die "Le dépôt serveur contient des modifications suivies. Déploiement refusé."
 fi
 
-if [[ "${EUID}" -ne 0 ]]; then
-    sudo -n true >/dev/null 2>&1 || \
-        die "Le compte de déploiement doit disposer de sudo sans mot de passe."
-fi
-
 previous_sha="$(git rev-parse HEAD)"
 
 git fetch --prune origin main
@@ -68,7 +63,7 @@ restore_checkout_on_error() {
 
 trap restore_checkout_on_error ERR
 
-./deploy/deploy.sh "$DOMAIN" "$LETSENCRYPT_EMAIL"
+MANAGE_NGINX=0 ./deploy/deploy.sh "$DOMAIN" "$LETSENCRYPT_EMAIL"
 
 trap - ERR
 printf '[OK] Commit %s déployé avec succès.\n' "$GIT_SHA"
