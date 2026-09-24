@@ -21,6 +21,8 @@ class MessageIntent(StrEnum):
     ORDER_STATUS = "ORDER_STATUS"
     OUT_OF_SCOPE = "OUT_OF_SCOPE"
     ORDER_RESUME = "ORDER_RESUME"
+    PAUSE = "PAUSE"
+    BACK = "BACK"
 
 
 class OrderAction(StrEnum):

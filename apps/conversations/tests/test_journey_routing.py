@@ -45,7 +45,7 @@ def test_greeting_requests_stable_journey_actions():
     conversation = make_conversation()
     app = ConversationalOrchestrator(understanding_service=UnderstandingStub(UserMessageUnderstanding(intent=MessageIntent.GREETING, confidence=Decimal(".99"))))
     outcome = app.process_message(conversation, inbound(text="Bonjour"))
-    assert "Bonjour" in outcome.response.text
+    assert outcome.response.text.startswith(("Bonjour", "Bonsoir"))
     assert outcome.metadata["capability_status"] == "SOCIAL"
     conversation.refresh_from_db()
     assert ConversationContext.from_payload(conversation.context).active_journey is None
@@ -157,7 +157,7 @@ def test_empty_order_history_has_a_conversational_response():
 @pytest.mark.parametrize(
     ("intent", "text_fragment"),
     [
-        (MessageIntent.GREETING, "Bonjour"),
+        (MessageIntent.GREETING, "assistant WhatAssoh"),
         (MessageIntent.OUT_OF_SCOPE, "Ce n'est pas un service"),
         (MessageIntent.UNKNOWN, "reformuler"),
     ],

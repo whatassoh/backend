@@ -154,6 +154,46 @@ class SellerOnboardingService:
         self._save_draft(conversation, context, draft)
         return self.review(draft)
 
+    def cancel(self, conversation, context) -> SellerOnboardingOutcome:
+        """Cancel an uncommitted onboarding draft from any stage."""
+
+        self.context_service.update_context(
+            conversation,
+            replace(
+                context,
+                flow=ConversationFlow.IDLE,
+                active_journey=None,
+                seller_onboarding=None,
+            ),
+        )
+        self._audit("seller_onboarding_cancelled", conversation)
+        return SellerOnboardingOutcome(
+            status=SellerOnboardingStatus.CANCELLED,
+            text="Création de boutique annulée. Aucune boutique n'a été créée.",
+            metadata={"seller_onboarding": True, "task_cancelled": True},
+        )
+
+    def back(self, conversation, context) -> SellerOnboardingOutcome:
+        """Move to the preceding editable stage without discarding the draft."""
+
+        draft = context.seller_onboarding
+        if draft is None:
+            return self._stale_action()
+        previous = {
+            SellerOnboardingStage.LOCATION: SellerOnboardingStage.NAME,
+            SellerOnboardingStage.CITY: SellerOnboardingStage.LOCATION,
+            SellerOnboardingStage.REVIEW: SellerOnboardingStage.CITY,
+        }.get(draft.stage)
+        if previous is None:
+            return SellerOnboardingOutcome(
+                status=SellerOnboardingStatus.INVALID,
+                text="Vous êtes déjà à la première étape de création de boutique.",
+                metadata={"seller_onboarding": True, "at_first_step": True},
+            )
+        draft = replace(draft, stage=previous)
+        self._save_draft(conversation, context, draft)
+        return self._prompt_for(draft)
+
     @transaction.atomic
     def handle_action(self, conversation, context, action_id: str) -> SellerOnboardingOutcome:
         from apps.conversations.infrastructure.models import Conversation
@@ -180,20 +220,7 @@ class SellerOnboardingService:
             self._save_draft(locked, context, draft)
             return self._prompt_for(draft)
         if action_id == self.cancel_action:
-            self.context_service.update_context(
-                locked,
-                replace(context, flow=ConversationFlow.IDLE, seller_onboarding=None),
-            )
-            return SellerOnboardingOutcome(
-                status=SellerOnboardingStatus.CANCELLED,
-                text="Création de boutique annulée. Que souhaitez-vous faire ?",
-                actions=(
-                    SellerOnboardingAction(action_id="journey.select.buy", label="Acheter"),
-                    SellerOnboardingAction(action_id="journey.select.sell", label="Vendre"),
-                    SellerOnboardingAction(action_id="journey.select.deliver", label="Livrer"),
-                ),
-                metadata={"seller_onboarding": True, "journey_selection": True},
-            )
+            return self.cancel(locked, context)
         if action_id in {self.catalog_chat_action, self.catalog_dashboard_action}:
             choice = "chat" if action_id == self.catalog_chat_action else "dashboard"
             if not self._consume_catalog_choice(conversation, choice):

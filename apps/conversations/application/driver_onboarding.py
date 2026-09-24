@@ -94,6 +94,44 @@ class DriverOnboardingService:
         self._save_draft(conversation, context, draft)
         return self.review(draft)
 
+    def cancel(self, conversation, context):
+        """Cancel an uncommitted driver profile from every onboarding stage."""
+
+        self.context_service.update_context(
+            conversation,
+            replace(
+                context,
+                flow=ConversationFlow.IDLE,
+                active_journey=None,
+                driver_onboarding=None,
+            ),
+        )
+        self._audit("driver_onboarding_cancelled", conversation)
+        return DriverOnboardingOutcome(
+            status=DriverOnboardingStatus.CANCELLED,
+            text="Création du profil livreur annulée. Aucun profil n'a été créé.",
+            metadata={"driver_onboarding": True, "task_cancelled": True},
+        )
+
+    def back(self, conversation, context):
+        """Return from review to vehicle selection without losing identity state."""
+
+        draft = context.driver_onboarding
+        if draft is None:
+            return DriverOnboardingOutcome(
+                status=DriverOnboardingStatus.INVALID,
+                text="Aucune inscription livreur n'est en cours.",
+            )
+        if draft.stage != DriverOnboardingStage.REVIEW:
+            return DriverOnboardingOutcome(
+                status=DriverOnboardingStatus.INVALID,
+                text="Vous êtes déjà à la première étape de l'inscription livreur.",
+                metadata={"driver_onboarding": True, "at_first_step": True},
+            )
+        draft = replace(draft, stage=DriverOnboardingStage.VEHICLE_TYPE)
+        self._save_draft(conversation, context, draft)
+        return self._prompt_for(draft)
+
     def handle_action(self, conversation, context, action_id):
         if action_id == self.confirm_action:
             return self.confirm(conversation)
@@ -102,8 +140,7 @@ class DriverOnboardingService:
             self._save_draft(conversation, context, draft)
             return self._prompt_for(draft)
         if action_id == self.cancel_action:
-            self.context_service.update_context(conversation, replace(context, flow=ConversationFlow.IDLE, driver_onboarding=None))
-            return DriverOnboardingOutcome(status=DriverOnboardingStatus.CANCELLED, text="Création de profil livreur annulée.", metadata={"driver_onboarding": True})
+            return self.cancel(conversation, context)
         return self._prompt_for(context.driver_onboarding)
 
     @transaction.atomic

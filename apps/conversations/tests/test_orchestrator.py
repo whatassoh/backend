@@ -58,7 +58,7 @@ def test_greeting_does_not_create_order_or_call_catalog():
     )
     outcome = orchestrator.process_message(SimpleNamespace(), message("Bonjour"))
     assert outcome.status == ConversationalOutcomeStatus.PROCESSED
-    assert "Bonjour" in outcome.response.text
+    assert outcome.response.text.startswith(("Bonjour", "Bonsoir"))
     assert context.processed == ["m-1"]
 
 
@@ -75,7 +75,7 @@ def test_ai_failure_is_recoverable_and_not_marked_processed():
 
 def test_social_out_of_scope_unknown_and_low_confidence_are_non_mutating():
     cases = (
-        (MessageIntent.GREETING, Decimal(".99"), "Bonjour"),
+        (MessageIntent.GREETING, Decimal(".99"), "assistant WhatAssoh"),
         (MessageIntent.OUT_OF_SCOPE, Decimal(".99"), "Ce n'est pas un service"),
         (MessageIntent.UNKNOWN, Decimal(".99"), "reformuler"),
         (MessageIntent.CREATE_OR_UPDATE_ORDER, Decimal(".20"), "reformuler"),

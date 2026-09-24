@@ -42,11 +42,14 @@ class JourneyRoutingService:
         # Do not clear an active order or clarification while switching: those are
         # business records/state machines, not a role-selection side effect.
         if changed or context.flow == ConversationFlow.AWAITING_JOURNEY_SELECTION:
+            metadata = {**context.metadata}
+            metadata.pop("task_paused", None)
             updated = self.context_service.update_context(
                 conversation,
                 replace(
                     context,
                     active_journey=journey,
+                    metadata=metadata,
                     flow=(
                         ConversationFlow.IDLE
                         if context.active_order_id is None

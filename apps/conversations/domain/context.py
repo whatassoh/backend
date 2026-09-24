@@ -22,6 +22,17 @@ class ActiveJourney(StrEnum):
     DELIVER = "DELIVER"
 
 
+class ConversationTaskKind(StrEnum):
+    """Resumable conversational work; never a substitute for business state."""
+
+    ORDER = "ORDER"
+    SELLER_ONBOARDING = "SELLER_ONBOARDING"
+    SELLER_CATALOG = "SELLER_CATALOG"
+    DRIVER_ONBOARDING = "DRIVER_ONBOARDING"
+    DELIVERY_INSTRUCTIONS = "DELIVERY_INSTRUCTIONS"
+    JOURNEY = "JOURNEY"
+
+
 class SellerOnboardingStage(StrEnum):
     NAME = "NAME"
     LOCATION = "LOCATION"
@@ -113,6 +124,26 @@ class PendingSellerCatalogMutation:
 
 
 @dataclass(frozen=True, kw_only=True)
+class SuspendedConversationTask:
+    """Navigation snapshot; domain data remains in its authoritative fields."""
+
+    kind: ConversationTaskKind
+    journey: ActiveJourney | None
+    flow: ConversationFlow
+    suspended_at: str
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ConversationSocialState:
+    """Minimal social memory used to prevent repetitive scripted replies."""
+
+    greeting_count: int = 0
+    last_greeting_at: str | None = None
+    introduced_at: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class ConversationContext:
     flow: ConversationFlow = ConversationFlow.IDLE
     active_order_id: str | None = None
@@ -124,6 +155,10 @@ class ConversationContext:
     catalog_setup_choice: str | None = None
     driver_onboarding: DriverOnboardingDraft | None = None
     pending_seller_catalog_mutation: PendingSellerCatalogMutation | None = None
+    suspended_tasks: tuple[SuspendedConversationTask, ...] = ()
+    social_state: ConversationSocialState = field(
+        default_factory=ConversationSocialState
+    )
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
@@ -151,6 +186,10 @@ class ConversationContext:
             payload["pending_seller_catalog_mutation"]["candidates"] = list(
                 self.pending_seller_catalog_mutation.candidates
             )
+        for task in payload["suspended_tasks"]:
+            task["kind"] = task["kind"].value
+            task["journey"] = task["journey"].value if task["journey"] else None
+            task["flow"] = task["flow"].value
         return payload
 
     @classmethod
@@ -160,6 +199,8 @@ class ConversationContext:
         onboarding_data = payload.get("seller_onboarding")
         driver_onboarding_data = payload.get("driver_onboarding")
         catalog_data = payload.get("pending_seller_catalog_mutation")
+        suspended_data = payload.get("suspended_tasks", ())
+        social_data = payload.get("social_state") or {}
         pending = None
         if pending_data:
             pending = PendingClarification(
@@ -202,6 +243,18 @@ class ConversationContext:
                 expected_updated_at=catalog_data.get("expected_updated_at"),
                 candidates=tuple(catalog_data.get("candidates", ())),
             )
+        suspended_tasks = tuple(
+            SuspendedConversationTask(
+                kind=ConversationTaskKind(task["kind"]),
+                journey=(
+                    ActiveJourney(task["journey"]) if task.get("journey") else None
+                ),
+                flow=ConversationFlow(task.get("flow", ConversationFlow.IDLE)),
+                suspended_at=task["suspended_at"],
+                reason=task.get("reason", "user_pause"),
+            )
+            for task in suspended_data
+        )
         return cls(
             flow=ConversationFlow(payload.get("flow", ConversationFlow.IDLE)),
             active_order_id=payload.get("active_order_id"),
@@ -217,6 +270,12 @@ class ConversationContext:
             catalog_setup_choice=payload.get("catalog_setup_choice"),
             driver_onboarding=driver_onboarding,
             pending_seller_catalog_mutation=pending_catalog,
+            suspended_tasks=suspended_tasks,
+            social_state=ConversationSocialState(
+                greeting_count=max(0, int(social_data.get("greeting_count", 0))),
+                last_greeting_at=social_data.get("last_greeting_at"),
+                introduced_at=social_data.get("introduced_at"),
+            ),
             metadata=dict(payload.get("metadata", {})),
         )
 

@@ -313,6 +313,24 @@ AI_MODEL = env("AI_MODEL", default="")
 AI_TIMEOUT_SECONDS = env.float("AI_TIMEOUT_SECONDS", default=15.0)
 OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
 
+# AI rollout controls are intentionally independent environment switches. New
+# agent capabilities remain off until their implementation lot passes its
+# regression and security gates. AI_EMERGENCY_STOP is the operational kill
+# switch: it blocks model calls while deterministic channel actions stay live.
+AI_EMERGENCY_STOP = env.bool("AI_EMERGENCY_STOP", default=False)
+AI_AGENT_ENABLED = env.bool("AI_AGENT_ENABLED", default=False)
+AI_AGENT_SHADOW_ENABLED = env.bool("AI_AGENT_SHADOW_ENABLED", default=False)
+AI_AGENT_TOOLS_ENABLED = env.bool("AI_AGENT_TOOLS_ENABLED", default=False)
+AI_AGENT_WRITE_TOOLS_ENABLED = env.bool(
+    "AI_AGENT_WRITE_TOOLS_ENABLED", default=False
+)
+AI_AGENT_MEMORY_ENABLED = env.bool("AI_AGENT_MEMORY_ENABLED", default=False)
+AI_RAG_ENABLED = env.bool("AI_RAG_ENABLED", default=True)
+AI_VOICE_ENABLED = env.bool("AI_VOICE_ENABLED", default=False)
+AI_DECISION_OBSERVABILITY_ENABLED = env.bool(
+    "AI_DECISION_OBSERVABILITY_ENABLED", default=True
+)
+
 
 # ---------------------------------------------------------------------
 # OpenAPI
