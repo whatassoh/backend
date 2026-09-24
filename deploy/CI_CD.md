@@ -29,8 +29,10 @@ Ajouter les secrets suivants à cet environnement :
 - `LETSENCRYPT_EMAIL` : email utilisé par Certbot.
 
 Le compte SSH doit pouvoir lire et modifier `/opt/whatAssoh/backend`, utiliser
-Docker, récupérer `origin/main` et exécuter sans interaction les commandes
-`sudo` déjà utilisées par `deploy/deploy.sh` pour Nginx et Certbot.
+Docker et récupérer `origin/main`. Le CI conserve la configuration Nginx et
+Certbot existante avec `MANAGE_NGINX=0`, afin de ne pas donner de droits root au
+compte de déploiement. Un lancement manuel de `deploy/deploy.sh` continue de
+gérer Nginx et Certbot par défaut.
 
 Le dépôt serveur doit être propre pour les fichiers suivis. En cas de
 modification manuelle, le déploiement s'arrête avant tout changement.
