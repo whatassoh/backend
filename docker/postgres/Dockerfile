@@ -1,11 +1,21 @@
-# syntax=docker/dockerfile:1
 FROM postgis/postgis:17-3.5
 
 ARG PGVECTOR_VERSION=0.8.6
 
-# pgvector is compiled into the existing PostGIS image so one PostgreSQL
-# instance supports both geographic and semantic indexes on the same volume.
-RUN apt-get update \
+# Debian Bullseye a atteint sa fin de support.
+# On fige les dépôts Debian sur un snapshot cohérent afin d'éviter
+# les 404 actuels de bullseye-security.
+#
+# On conserve les autres sources APT (notamment PostgreSQL/PGDG)
+# fournies par l'image de base.
+
+RUN printf '%s\n' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bullseye main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bullseye-updates main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bullseye-security main' \
+      > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
