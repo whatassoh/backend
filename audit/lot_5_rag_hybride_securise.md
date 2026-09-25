@@ -280,9 +280,10 @@ bucket HMAC est stable: un utilisateur ne change pas de cohorte entre deux messa
 
 ### Arret immediat
 
-`AI_EMERGENCY_STOP=True` bloque tous les appels modele. Pour couper seulement le
-RAG, utiliser `AI_RAG_ENABLED=False`, `AI_RAG_SHADOW_ENABLED=False` et redemarrer
-web/worker/beat. La recherche et les donnees metier deterministes restent actives.
+`AI_EMERGENCY_STOP=True` bloque tous les appels modele, y compris la generation
+des embeddings par les workers. Pour couper seulement le RAG, utiliser
+`AI_RAG_ENABLED=False`, `AI_RAG_SHADOW_ENABLED=False` et redemarrer web/worker/beat.
+La recherche et les donnees metier deterministes restent actives.
 
 ## Tests et gates
 

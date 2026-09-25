@@ -92,6 +92,13 @@ def knowledge_configuration_checks(app_configs, **kwargs):
                 id="knowledge.W003",
             )
         )
+    if settings.AI_RAG_SEMANTIC_ENABLED and not settings.AI_ENABLED:
+        errors.append(
+            Warning(
+                "AI_RAG_SEMANTIC_ENABLED has no effect while AI_ENABLED is false.",
+                id="knowledge.W004",
+            )
+        )
     if settings.AI_RAG_ENABLED and settings.AI_RAG_ROLLOUT_PERCENT == 0:
         errors.append(
             Warning(

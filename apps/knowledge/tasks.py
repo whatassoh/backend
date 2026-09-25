@@ -36,7 +36,12 @@ def index_source_embeddings(source_id, *, provider=None, vector_store=None) -> i
     source = KnowledgeSource.objects.filter(
         id=source_id, status=KnowledgeSourceStatus.ACTIVE
     ).first()
-    if source is None or not settings.AI_RAG_SEMANTIC_ENABLED:
+    if (
+        source is None
+        or not settings.AI_ENABLED
+        or settings.AI_EMERGENCY_STOP
+        or not settings.AI_RAG_SEMANTIC_ENABLED
+    ):
         return 0
     provider = provider or get_embedding_provider()
     vector_store = vector_store or PostgresVectorStore()
@@ -122,7 +127,11 @@ def index_knowledge_source(source_id: str) -> int:
 
 @shared_task(name="knowledge.reconcile_embeddings")
 def reconcile_embeddings() -> int:
-    if not settings.AI_RAG_SEMANTIC_ENABLED:
+    if (
+        not settings.AI_ENABLED
+        or settings.AI_EMERGENCY_STOP
+        or not settings.AI_RAG_SEMANTIC_ENABLED
+    ):
         return 0
     stale_before = timezone.now() - timedelta(
         seconds=settings.AI_RAG_EMBEDDING_LEASE_SECONDS

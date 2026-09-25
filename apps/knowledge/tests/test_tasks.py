@@ -66,6 +66,8 @@ def source_with_chunk(*, status=KnowledgeEmbeddingStatus.PENDING, sensitivity="P
 
 @pytest.mark.django_db
 def test_embedding_worker_indexes_pending_chunk_once(settings):
+    settings.AI_ENABLED = True
+    settings.AI_EMERGENCY_STOP = False
     settings.AI_RAG_SEMANTIC_ENABLED = True
     settings.AI_RAG_EMBEDDING_DIMENSIONS = 4
     settings.AI_RAG_EMBEDDING_BATCH_SIZE = 32
@@ -85,6 +87,8 @@ def test_embedding_worker_indexes_pending_chunk_once(settings):
 
 @pytest.mark.django_db
 def test_embedding_worker_does_not_reclaim_live_indexing_lease(settings):
+    settings.AI_ENABLED = True
+    settings.AI_EMERGENCY_STOP = False
     settings.AI_RAG_SEMANTIC_ENABLED = True
     settings.AI_RAG_EMBEDDING_DIMENSIONS = 4
     settings.AI_RAG_EMBEDDING_BATCH_SIZE = 32
@@ -101,7 +105,25 @@ def test_embedding_worker_does_not_reclaim_live_indexing_lease(settings):
 
 
 @pytest.mark.django_db
+def test_emergency_stop_blocks_embedding_provider_calls(settings):
+    settings.AI_ENABLED = True
+    settings.AI_EMERGENCY_STOP = True
+    settings.AI_RAG_SEMANTIC_ENABLED = True
+    source, _ = source_with_chunk()
+    provider = RecordingProvider()
+    store = RecordingVectorStore()
+
+    indexed = index_source_embeddings(source.id, provider=provider, vector_store=store)
+
+    assert indexed == 0
+    assert provider.calls == []
+    assert store.writes == []
+
+
+@pytest.mark.django_db
 def test_external_provider_cannot_embed_sensitive_source_without_consent(settings):
+    settings.AI_ENABLED = True
+    settings.AI_EMERGENCY_STOP = False
     settings.AI_RAG_SEMANTIC_ENABLED = True
     settings.AI_RAG_EMBEDDING_DIMENSIONS = 4
     settings.AI_RAG_EMBEDDING_BATCH_SIZE = 32

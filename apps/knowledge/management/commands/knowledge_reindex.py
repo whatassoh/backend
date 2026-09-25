@@ -30,6 +30,10 @@ class Command(BaseCommand):
             raise CommandError("No active knowledge source matched the selection.")
         if options["embeddings"] and not settings.AI_RAG_SEMANTIC_ENABLED:
             raise CommandError("AI_RAG_SEMANTIC_ENABLED must be true.")
+        if options["embeddings"] and (
+            not settings.AI_ENABLED or settings.AI_EMERGENCY_STOP
+        ):
+            raise CommandError("AI model calls are disabled by the runtime policy.")
 
         indexed = 0
         for source in sources:
