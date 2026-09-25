@@ -1057,7 +1057,7 @@ done
 
 
 # ==========================================================
-# 6. BUILD DJANGO
+# 6. BUILD DJANGO + POSTGRESQL EXTENSIONS
 # ==========================================================
 
 log "Build ${NEW_WEB_IMAGE}"
@@ -1066,8 +1066,14 @@ log "Build ${NEW_WEB_IMAGE}"
 "${COMPOSE[@]}" build web
 
 
+log "Build PostgreSQL/PostGIS/pgvector"
+
+
+"${COMPOSE[@]}" build postgres
+
+
 # ==========================================================
-# 7. POSTGIS + REDIS
+# 7. POSTGIS + PG_TRGM + PGVECTOR + REDIS
 # ==========================================================
 
 log "
@@ -1111,10 +1117,10 @@ POSTGRES_USER="$(env_get POSTGRES_USER)"
 
 
 # ----------------------------------------------------------
-# PostGIS
+# PostGIS + pg_trgm + pgvector
 # ----------------------------------------------------------
 
-log "Vérification PostGIS"
+log "Vérification PostGIS, pg_trgm et pgvector"
 
 
 "${COMPOSE[@]}" exec \
@@ -1124,7 +1130,17 @@ log "Vérification PostGIS"
     -v ON_ERROR_STOP=1 \
     -U "$POSTGRES_USER" \
     -d "$POSTGRES_DB" \
-    -c 'CREATE EXTENSION IF NOT EXISTS postgis;'
+    -c 'CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;'
+
+
+"${COMPOSE[@]}" exec \
+    -T \
+    postgres \
+    psql \
+    -v ON_ERROR_STOP=1 \
+    -U "$POSTGRES_USER" \
+    -d "$POSTGRES_DB" \
+    -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('postgis', 'pg_trgm', 'vector') ORDER BY extname;"
 
 
 # ==========================================================

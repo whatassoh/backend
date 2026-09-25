@@ -17,6 +17,8 @@ from apps.ai.application.runtime import get_ai_runtime_policy
     AI_NATURAL_COMPOSER_SHADOW_ENABLED=True,
     AI_STYLE_ADAPTATION_ENABLED=True,
     AI_RAG_ENABLED=True,
+    AI_RAG_SHADOW_ENABLED=True,
+    AI_RAG_SEMANTIC_ENABLED=True,
     AI_VOICE_ENABLED=True,
 )
 def test_runtime_policy_enables_explicit_capabilities():
@@ -34,6 +36,8 @@ def test_runtime_policy_enables_explicit_capabilities():
     assert policy.natural_composer_shadow_enabled is True
     assert policy.style_adaptation_enabled is True
     assert policy.rag_enabled is True
+    assert policy.rag_shadow_enabled is True
+    assert policy.rag_semantic_enabled is True
     assert policy.voice_enabled is True
 
 
@@ -50,6 +54,8 @@ def test_runtime_policy_enables_explicit_capabilities():
     AI_NATURAL_COMPOSER_ENABLED=True,
     AI_NATURAL_COMPOSER_SHADOW_ENABLED=True,
     AI_RAG_ENABLED=True,
+    AI_RAG_SHADOW_ENABLED=True,
+    AI_RAG_SEMANTIC_ENABLED=True,
     AI_VOICE_ENABLED=True,
 )
 def test_emergency_stop_fails_closed_for_every_model_capability():
@@ -65,6 +71,8 @@ def test_emergency_stop_fails_closed_for_every_model_capability():
     assert policy.natural_composer_enabled is False
     assert policy.natural_composer_shadow_enabled is False
     assert policy.rag_enabled is False
+    assert policy.rag_shadow_enabled is False
+    assert policy.rag_semantic_enabled is False
     assert policy.voice_enabled is False
 
 

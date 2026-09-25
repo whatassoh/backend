@@ -127,6 +127,8 @@ class ConversationalOrchestrator:
         understanding_service,
         grounding_service=None,
         knowledge_answer_service=None,
+        knowledge_answer_enabled=False,
+        knowledge_answer_shadow=False,
         context_service=None,
         clarification_engine=None,
         active_order_service=None,
@@ -142,6 +144,8 @@ class ConversationalOrchestrator:
         self.understanding_service = understanding_service
         self.grounding_service = grounding_service or CatalogGroundingService()
         self.knowledge_answer_service = knowledge_answer_service
+        self.knowledge_answer_enabled = knowledge_answer_enabled
+        self.knowledge_answer_shadow = knowledge_answer_shadow
         self.context_service = context_service or ConversationContextService()
         self.clarification_engine = clarification_engine or ClarificationEngine()
         self.active_order_service = active_order_service or ActiveCustomerOrderService()
@@ -1825,15 +1829,43 @@ class ConversationalOrchestrator:
         self, conversation, context, text, intent, correlation_id
     ):
         if intent == MessageIntent.HELP and self.knowledge_answer_service:
-            answer = self.knowledge_answer_service.answer(
-                text, correlation_id=correlation_id
-            )
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                answer.answer,
-                context,
-                metadata={"grounded": answer.grounded},
-            )
+            try:
+                from apps.knowledge.application.access import principal_for_user
+
+                answer = self.knowledge_answer_service.answer(
+                    text,
+                    principal=principal_for_user(conversation.user),
+                    language=conversation.user.preferred_language,
+                    correlation_id=correlation_id,
+                )
+                if self.knowledge_answer_enabled and answer.grounded:
+                    return self._outcome(
+                        ConversationalOutcomeStatus.PROCESSED,
+                        answer.answer,
+                        context,
+                        metadata={
+                            "grounded": True,
+                            "citation_count": len(answer.citations),
+                        },
+                    )
+                if self.knowledge_answer_shadow:
+                    logger.info(
+                        "knowledge_answer_shadow_completed",
+                        extra={
+                            "grounded": answer.grounded,
+                            "citation_count": len(answer.citations),
+                            "no_answer_reason": answer.no_answer_reason,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "knowledge_answer_failed",
+                    extra={
+                        "error_category": exc.__class__.__name__,
+                        "correlation_id": correlation_id,
+                    },
+                )
         if intent == MessageIntent.HELP:
             return self._help_outcome(context)
         return self._outcome(

@@ -339,7 +339,47 @@ AI_MEMORY_FACT_TTL_DAYS = env.int("AI_MEMORY_FACT_TTL_DAYS", default=365)
 AI_MEMORY_RECONCILIATION_BATCH_SIZE = env.int(
     "AI_MEMORY_RECONCILIATION_BATCH_SIZE", default=100
 )
-AI_RAG_ENABLED = env.bool("AI_RAG_ENABLED", default=True)
+AI_RAG_ENABLED = env.bool("AI_RAG_ENABLED", default=False)
+AI_RAG_SHADOW_ENABLED = env.bool("AI_RAG_SHADOW_ENABLED", default=False)
+AI_RAG_ROLLOUT_PERCENT = env.int("AI_RAG_ROLLOUT_PERCENT", default=0)
+AI_RAG_SEMANTIC_ENABLED = env.bool("AI_RAG_SEMANTIC_ENABLED", default=False)
+AI_RAG_EMBEDDING_PROVIDER = env("AI_RAG_EMBEDDING_PROVIDER", default="openai")
+AI_RAG_EMBEDDING_MODEL = env("AI_RAG_EMBEDDING_MODEL", default="text-embedding-3-small")
+AI_RAG_EMBEDDING_DIMENSIONS = env.int("AI_RAG_EMBEDDING_DIMENSIONS", default=1024)
+AI_RAG_EMBEDDING_BASE_URL = env("AI_RAG_EMBEDDING_BASE_URL", default="")
+AI_RAG_EMBEDDING_API_KEY = env("AI_RAG_EMBEDDING_API_KEY", default="")
+AI_RAG_EMBEDDING_SEND_DIMENSIONS = env.bool(
+    "AI_RAG_EMBEDDING_SEND_DIMENSIONS", default=True
+)
+AI_RAG_MAX_QUERY_CHARACTERS = env.int("AI_RAG_MAX_QUERY_CHARACTERS", default=1200)
+AI_RAG_MAX_SOURCE_CHARACTERS = env.int("AI_RAG_MAX_SOURCE_CHARACTERS", default=500_000)
+AI_RAG_MAX_METADATA_CHARACTERS = env.int(
+    "AI_RAG_MAX_METADATA_CHARACTERS", default=20_000
+)
+AI_RAG_CHUNK_TARGET_CHARACTERS = env.int("AI_RAG_CHUNK_TARGET_CHARACTERS", default=1200)
+AI_RAG_CHUNK_MAX_CHARACTERS = env.int("AI_RAG_CHUNK_MAX_CHARACTERS", default=1800)
+AI_RAG_CHUNK_OVERLAP_CHARACTERS = env.int(
+    "AI_RAG_CHUNK_OVERLAP_CHARACTERS", default=160
+)
+AI_RAG_MAX_RESULTS = env.int("AI_RAG_MAX_RESULTS", default=6)
+AI_RAG_CANDIDATE_LIMIT = env.int("AI_RAG_CANDIDATE_LIMIT", default=24)
+AI_RAG_MAX_CONTEXT_CHARACTERS = env.int("AI_RAG_MAX_CONTEXT_CHARACTERS", default=12_000)
+AI_RAG_MAX_CHUNKS_PER_SOURCE = env.int("AI_RAG_MAX_CHUNKS_PER_SOURCE", default=2)
+AI_RAG_MIN_LEXICAL_SCORE = env.float("AI_RAG_MIN_LEXICAL_SCORE", default=0.02)
+AI_RAG_MIN_TRIGRAM_SCORE = env.float("AI_RAG_MIN_TRIGRAM_SCORE", default=0.12)
+AI_RAG_MIN_SEMANTIC_SCORE = env.float("AI_RAG_MIN_SEMANTIC_SCORE", default=0.45)
+AI_RAG_MAX_CHUNK_INJECTION_RISK = env.float(
+    "AI_RAG_MAX_CHUNK_INJECTION_RISK", default=0.45
+)
+AI_RAG_RRF_RANK_CONSTANT = env.int("AI_RAG_RRF_RANK_CONSTANT", default=60)
+AI_RAG_LEXICAL_WEIGHT = env.float("AI_RAG_LEXICAL_WEIGHT", default=0.55)
+AI_RAG_SEMANTIC_WEIGHT = env.float("AI_RAG_SEMANTIC_WEIGHT", default=0.45)
+AI_RAG_CACHE_SECONDS = env.int("AI_RAG_CACHE_SECONDS", default=300)
+AI_RAG_EMBEDDING_BATCH_SIZE = env.int("AI_RAG_EMBEDDING_BATCH_SIZE", default=32)
+AI_RAG_EMBEDDING_MAX_ATTEMPTS = env.int("AI_RAG_EMBEDDING_MAX_ATTEMPTS", default=5)
+AI_RAG_EMBEDDING_LEASE_SECONDS = env.int("AI_RAG_EMBEDDING_LEASE_SECONDS", default=900)
+AI_RAG_AUDIT_ENABLED = env.bool("AI_RAG_AUDIT_ENABLED", default=True)
+AI_RAG_AUDIT_RETENTION_DAYS = env.int("AI_RAG_AUDIT_RETENTION_DAYS", default=30)
 AI_VOICE_ENABLED = env.bool("AI_VOICE_ENABLED", default=False)
 AI_DECISION_OBSERVABILITY_ENABLED = env.bool(
     "AI_DECISION_OBSERVABILITY_ENABLED", default=True
@@ -507,6 +547,14 @@ CELERY_BEAT_SCHEDULE = {
     "conversations-expire-memory-facts": {
         "task": "conversations.expire_memory_facts",
         "schedule": timedelta(hours=1),
+    },
+    "knowledge-reconcile-embeddings": {
+        "task": "knowledge.reconcile_embeddings",
+        "schedule": timedelta(minutes=10),
+    },
+    "knowledge-expire-retrieval-audits": {
+        "task": "knowledge.expire_retrieval_audits",
+        "schedule": timedelta(days=1),
     },
 }
 

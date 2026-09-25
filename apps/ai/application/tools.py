@@ -378,13 +378,6 @@ def build_business_tool_registry():
             True,
             "deliveries.write_own",
         ),
-        (
-            "retrieve_knowledge",
-            "Retrieve ACL-filtered help content from the approved knowledge base.",
-            ToolRisk.R1,
-            False,
-            "knowledge.read",
-        ),
     ):
         registry.register(
             ToolSpec(
@@ -475,6 +468,13 @@ def _register_extended_read_tools(registry):
             _string_schema("reference", 80),
             "deliveries.read_own",
             _get_customer_delivery_tracking,
+        ),
+        (
+            "retrieve_knowledge",
+            "Retrieve cited static help content after server-side ACL filtering.",
+            _string_schema("query", 1200),
+            "knowledge.read",
+            _retrieve_knowledge,
         ),
     )
     for name, description, schema, permission, handler in read_tools:
@@ -797,5 +797,60 @@ def _get_customer_delivery_tracking(context, reference):
             "driver_location_status": tracking.driver.location_status.value,
             "pickup_name": tracking.pickup.display_name if tracking.pickup else None,
             "destination_label": tracking.destination.address_label,
+        },
+    )
+
+
+def _retrieve_knowledge(context, query):
+    from apps.ai.application.runtime import get_ai_runtime_policy
+    from apps.knowledge.application.access import principal_for_user
+    from apps.knowledge.application.embeddings import get_embedding_provider
+    from apps.knowledge.application.retrieval import HybridKnowledgeRetriever
+    from apps.knowledge.application.security import (
+        requires_authoritative_business_tool,
+    )
+    from apps.knowledge.domain.dtos import KnowledgeQuery
+
+    if requires_authoritative_business_tool(query):
+        return ToolResult(
+            "NOT_ALLOWED",
+            {"reason": "AUTHORITATIVE_BUSINESS_TOOL_REQUIRED", "chunks": []},
+        )
+    runtime = get_ai_runtime_policy()
+    if not runtime.rag_enabled:
+        return ToolResult("NOT_ALLOWED", {"reason": "RAG_DISABLED", "chunks": []})
+    from apps.knowledge.application.rollout import rag_enabled_for
+
+    if not rag_enabled_for(context.user.id):
+        return ToolResult(
+            "NOT_ALLOWED", {"reason": "RAG_ROLLOUT_EXCLUDED", "chunks": []}
+        )
+    embedding_provider = (
+        get_embedding_provider() if runtime.rag_semantic_enabled else None
+    )
+    result = HybridKnowledgeRetriever(
+        embedding_provider=embedding_provider
+    ).retrieve(
+        KnowledgeQuery(
+            text=query,
+            principal=principal_for_user(context.user),
+            language=context.user.preferred_language,
+            limit=min(settings.AI_RAG_MAX_RESULTS, 6),
+        )
+    )
+    return ToolResult(
+        "OK" if result.chunks else "NOT_FOUND",
+        {
+            "strategy": result.strategy.value,
+            "chunks": [
+                {
+                    "chunk_id": str(chunk.chunk_id),
+                    "source": chunk.source_title,
+                    "version": chunk.source_version,
+                    "url": chunk.canonical_url,
+                    "content": chunk.content[:800],
+                }
+                for chunk in result.chunks
+            ],
         },
     )

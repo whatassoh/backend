@@ -63,21 +63,31 @@ def process_inbound_conversation(conversation, message, *, correlation_id=None):
             )
         except Exception:
             logger.exception("conversation_explicit_memory_failed")
+    ai_service = (
+        AIService(get_ai_provider()) if runtime_policy.model_calls_enabled else None
+    )
     understanding_service = (
-        MessageUnderstandingService(AIService(get_ai_provider()))
-        if runtime_policy.model_calls_enabled
+        MessageUnderstandingService(ai_service)
+        if ai_service is not None
         else _UnavailableUnderstandingService()
     )
     seller_catalog_service = SellerCatalogConversationService(
         understanding_service=(
-            SellerCatalogUnderstandingService(AIService(get_ai_provider()))
-            if runtime_policy.model_calls_enabled
+            SellerCatalogUnderstandingService(ai_service)
+            if ai_service is not None
             else _UnavailableSellerCatalogUnderstandingService()
         )
     )
+    from apps.knowledge.application.rollout import rag_enabled_for
+
+    rag_active = runtime_policy.rag_enabled and rag_enabled_for(conversation.user_id)
+    knowledge_service = _knowledge_service(runtime_policy, ai_service, rag_active)
     orchestrator = ConversationalOrchestrator(
         understanding_service=understanding_service,
         seller_catalog_conversation_service=seller_catalog_service,
+        knowledge_answer_service=knowledge_service,
+        knowledge_answer_enabled=rag_active,
+        knowledge_answer_shadow=runtime_policy.rag_shadow_enabled,
     )
     outcome = orchestrator.process_message(
         conversation, message, correlation_id=correlation_id
@@ -116,3 +126,22 @@ def process_inbound_conversation(conversation, message, *, correlation_id=None):
         except Exception:
             logger.exception("conversation_memory_enqueue_failed")
     return outcome
+
+
+def _knowledge_service(runtime_policy, ai_service, rag_active):
+    if ai_service is None or not (rag_active or runtime_policy.rag_shadow_enabled):
+        return None
+    try:
+        from apps.knowledge.application.answers import KnowledgeAnswerService
+        from apps.knowledge.application.embeddings import get_embedding_provider
+        from apps.knowledge.application.retrieval import HybridKnowledgeRetriever
+
+        embedding_provider = (
+            get_embedding_provider() if runtime_policy.rag_semantic_enabled else None
+        )
+        return KnowledgeAnswerService(
+            HybridKnowledgeRetriever(embedding_provider=embedding_provider), ai_service
+        )
+    except Exception:
+        logger.exception("knowledge_service_initialization_failed")
+        return None

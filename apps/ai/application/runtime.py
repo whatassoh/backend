@@ -27,6 +27,8 @@ class AIRuntimePolicy:
     natural_composer_shadow_enabled: bool
     style_adaptation_enabled: bool
     rag_enabled: bool
+    rag_shadow_enabled: bool
+    rag_semantic_enabled: bool
     voice_enabled: bool
     decision_observability_enabled: bool
 
@@ -80,7 +82,11 @@ def get_ai_runtime_policy() -> AIRuntimePolicy:
             getattr(settings, "AI_STYLE_ADAPTATION_ENABLED", False)
         ),
         rag_enabled=model_calls_enabled
-        and bool(getattr(settings, "AI_RAG_ENABLED", True)),
+        and bool(getattr(settings, "AI_RAG_ENABLED", False)),
+        rag_shadow_enabled=model_calls_enabled
+        and bool(getattr(settings, "AI_RAG_SHADOW_ENABLED", False)),
+        rag_semantic_enabled=model_calls_enabled
+        and bool(getattr(settings, "AI_RAG_SEMANTIC_ENABLED", False)),
         voice_enabled=model_calls_enabled
         and bool(getattr(settings, "AI_VOICE_ENABLED", False)),
         decision_observability_enabled=bool(
