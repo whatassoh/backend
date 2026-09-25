@@ -32,6 +32,22 @@ class MessageStatus(models.TextChoices):
     IGNORED = "IGNORED", "Ignored"
 
 
+class InboxStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    PROCESSING = "PROCESSING", "Processing"
+    PROCESSED = "PROCESSED", "Processed"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE", "Failed retryable"
+    DEAD_LETTER = "DEAD_LETTER", "Dead letter"
+
+
+class OutboxStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    SENDING = "SENDING", "Sending"
+    DELIVERED = "DELIVERED", "Delivered"
+    FAILED_RETRYABLE = "FAILED_RETRYABLE", "Failed retryable"
+    DEAD_LETTER = "DEAD_LETTER", "Dead letter"
+
+
 class NotificationKind(models.TextChoices):
     ORDER_CONFIRMED = "ORDER_CONFIRMED", "Order confirmed"
     ORDER_STORE_ACCEPTED = "ORDER_STORE_ACCEPTED", "Store accepted order"
@@ -46,7 +62,10 @@ class NotificationKind(models.TextChoices):
     ORDER_IN_DELIVERY = "ORDER_IN_DELIVERY", "Order in delivery"
     ORDER_DELIVERED = "ORDER_DELIVERED", "Order delivered"
     DRIVER_LOCATION_REQUIRED = "DRIVER_LOCATION_REQUIRED", "Driver location required"
-    DRIVER_LOCATION_REFRESH_REQUIRED = "DRIVER_LOCATION_REFRESH_REQUIRED", "Driver location refresh required"
+    DRIVER_LOCATION_REFRESH_REQUIRED = (
+        "DRIVER_LOCATION_REFRESH_REQUIRED",
+        "Driver location refresh required",
+    )
 
 
 class NotificationStatus(models.TextChoices):

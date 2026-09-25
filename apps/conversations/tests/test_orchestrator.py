@@ -58,7 +58,7 @@ def test_greeting_does_not_create_order_or_call_catalog():
     )
     outcome = orchestrator.process_message(SimpleNamespace(), message("Bonjour"))
     assert outcome.status == ConversationalOutcomeStatus.PROCESSED
-    assert "Bonjour" in outcome.response.text
+    assert outcome.response.text.startswith(("Bonjour", "Bonsoir"))
     assert context.processed == ["m-1"]
 
 
@@ -75,7 +75,7 @@ def test_ai_failure_is_recoverable_and_not_marked_processed():
 
 def test_social_out_of_scope_unknown_and_low_confidence_are_non_mutating():
     cases = (
-        (MessageIntent.GREETING, Decimal(".99"), "Bonjour"),
+        (MessageIntent.GREETING, Decimal(".99"), "assistant WhatAssoh"),
         (MessageIntent.OUT_OF_SCOPE, Decimal(".99"), "Ce n'est pas un service"),
         (MessageIntent.UNKNOWN, Decimal(".99"), "reformuler"),
         (MessageIntent.CREATE_OR_UPDATE_ORDER, Decimal(".20"), "reformuler"),
@@ -88,7 +88,9 @@ def test_social_out_of_scope_unknown_and_low_confidence_are_non_mutating():
             ),
             context_service=context,
         )
-        outcome = app.process_message(SimpleNamespace(), message("texte", f"cap-{index}"))
+        outcome = app.process_message(
+            SimpleNamespace(), message("texte", f"cap-{index}")
+        )
         assert expected in outcome.response.text
         assert context.processed == [f"cap-{index}"]
 
@@ -97,7 +99,9 @@ def test_order_status_is_honestly_not_implemented():
     context = ContextStub()
     app = ConversationalOrchestrator(
         understanding_service=UnderstandingStub(
-            UserMessageUnderstanding(intent=MessageIntent.ORDER_STATUS, confidence=Decimal(".99"))
+            UserMessageUnderstanding(
+                intent=MessageIntent.ORDER_STATUS, confidence=Decimal(".99")
+            )
         ),
         context_service=context,
     )
@@ -105,11 +109,14 @@ def test_order_status_is_honestly_not_implemented():
     assert "pas encore disponible" in outcome.response.text
     assert outcome.metadata["capability_status"] == "NOT_IMPLEMENTED"
 
+
 def test_bare_confirmation_is_non_mutating_outside_review_context():
     context = ContextStub()
     app = ConversationalOrchestrator(
         understanding_service=UnderstandingStub(
-            UserMessageUnderstanding(intent=MessageIntent.CONFIRM, confidence=Decimal(".99"))
+            UserMessageUnderstanding(
+                intent=MessageIntent.CONFIRM, confidence=Decimal(".99")
+            )
         ),
         context_service=context,
     )
@@ -119,16 +126,27 @@ def test_bare_confirmation_is_non_mutating_outside_review_context():
     assert outcome.status == ConversationalOutcomeStatus.PROCESSED
     assert "après son récapitulatif" in outcome.response.text
 
+
 def test_unexpected_orchestration_error_is_logged_and_reraised(caplog):
     caplog.set_level("INFO")
     context = ContextStub()
-    app = ConversationalOrchestrator(understanding_service=UnderstandingStub(), context_service=context)
-    app._process = lambda *_args: (_ for _ in ()).throw(RuntimeError("programming error"))
+    app = ConversationalOrchestrator(
+        understanding_service=UnderstandingStub(), context_service=context
+    )
+    app._process = lambda *_args: (_ for _ in ()).throw(
+        RuntimeError("programming error")
+    )
 
     with pytest.raises(RuntimeError, match="programming error"):
-        app.process_message(SimpleNamespace(), message("secret message"), correlation_id="corr-6")
+        app.process_message(
+            SimpleNamespace(), message("secret message"), correlation_id="corr-6"
+        )
 
-    record = next(record for record in caplog.records if record.message == "conversation_orchestration_unexpected")
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "conversation_orchestration_unexpected"
+    )
     assert record.correlation_id == "corr-6"
     assert "secret message" not in record.getMessage()
 
@@ -137,13 +155,23 @@ def test_turn_completion_log_has_safe_correlation_fields(caplog):
     caplog.set_level("INFO")
     context = ContextStub()
     app = ConversationalOrchestrator(
-        understanding_service=UnderstandingStub(UserMessageUnderstanding(intent=MessageIntent.GREETING, confidence=Decimal(".99"))),
+        understanding_service=UnderstandingStub(
+            UserMessageUnderstanding(
+                intent=MessageIntent.GREETING, confidence=Decimal(".99")
+            )
+        ),
         context_service=context,
     )
 
-    app.process_message(SimpleNamespace(), message("private greeting"), correlation_id="corr-7")
+    app.process_message(
+        SimpleNamespace(), message("private greeting"), correlation_id="corr-7"
+    )
 
-    record = next(record for record in caplog.records if record.message == "conversation_turn_completed")
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "conversation_turn_completed"
+    )
     assert record.correlation_id == "corr-7"
     assert record.channel == MessagingChannel.WHATSAPP
     assert record.action_id_present is False

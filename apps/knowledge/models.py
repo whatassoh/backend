@@ -1,3 +1,13 @@
-from apps.knowledge.infrastructure.models import KnowledgeChunk, KnowledgeSource
+from apps.knowledge.infrastructure.models import (
+    KnowledgeAccessGrant,
+    KnowledgeChunk,
+    KnowledgeRetrievalAudit,
+    KnowledgeSource,
+)
 
-__all__ = ["KnowledgeChunk", "KnowledgeSource"]
+__all__ = [
+    "KnowledgeAccessGrant",
+    "KnowledgeChunk",
+    "KnowledgeRetrievalAudit",
+    "KnowledgeSource",
+]

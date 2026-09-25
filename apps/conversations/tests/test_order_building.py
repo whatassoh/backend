@@ -54,7 +54,10 @@ def test_targeting_refuses_ambiguous_name_and_accepts_display_index():
     add_order_item(order=order, requested_name="riz", quantity=2, unit="KG")
     service = OrderBuildingService()
 
-    assert service.target(order, ItemReference(requested_name="riz")).status == ItemTargetStatus.AMBIGUOUS
+    assert (
+        service.target(order, ItemReference(requested_name="riz")).status
+        == ItemTargetStatus.AMBIGUOUS
+    )
     decision = service.target(order, ItemReference(display_index=1))
     assert decision.status == ItemTargetStatus.FOUND
     assert decision.item.id == first.id
@@ -66,7 +69,11 @@ def test_update_remove_and_replace_use_existing_order_services():
     order = create_order_draft(customer=user)
     rice, pasta = product("Riz"), product("Pates")
     item = add_order_item(
-        order=order, requested_name="riz", quantity=5, unit="KG", product=rice,
+        order=order,
+        requested_name="riz",
+        quantity=5,
+        unit="KG",
+        product=rice,
         resolution_status=OrderItemResolutionStatus.MATCHED,
     )
     service = OrderBuildingService()
@@ -74,7 +81,9 @@ def test_update_remove_and_replace_use_existing_order_services():
     updated = service.update(item, quantity=Decimal("10"), unit=ExtractedUnit.BAG)
     replaced = service.replace(
         updated,
-        ExtractedItem(requested_name="pâtes", quantity=Decimal("10"), unit=ExtractedUnit.BAG),
+        ExtractedItem(
+            requested_name="pâtes", quantity=Decimal("10"), unit=ExtractedUnit.BAG
+        ),
         resolution("pâtes", pasta),
     )
     service.remove(replaced)
@@ -84,13 +93,16 @@ def test_update_remove_and_replace_use_existing_order_services():
     assert replaced.product_id == pasta.id
     assert service.summary(order) == ()
 
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("spoken", ["arachides", "ARACHIDE", " arachide ", "arachidé"])
 def test_target_normalizes_plural_case_spacing_and_accents(spoken):
     user = User.objects.create_user(whatsapp_phone=f"+237611{User.objects.count():06d}")
     order = create_order_draft(customer=user)
     item = add_order_item(order=order, requested_name="arachide", quantity=1, unit="KG")
-    decision = OrderBuildingService().target(order, ItemReference(requested_name=spoken))
+    decision = OrderBuildingService().target(
+        order, ItemReference(requested_name=spoken)
+    )
     assert decision.status == ItemTargetStatus.FOUND
     assert decision.item.id == item.id
 
@@ -106,8 +118,17 @@ def test_target_uses_product_alias_and_never_crosses_order_scope():
     order = create_order_draft(customer=user)
     rice = product("Riz parfumé")
     add_product_alias(product=rice, alias="riz long")
-    expected = add_order_item(order=order, requested_name="riz", quantity=1, unit="KG", product=rice, resolution_status=OrderItemResolutionStatus.MATCHED)
-    decision = OrderBuildingService().target(order, ItemReference(requested_name="riz long"))
+    expected = add_order_item(
+        order=order,
+        requested_name="riz",
+        quantity=1,
+        unit="KG",
+        product=rice,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
+    decision = OrderBuildingService().target(
+        order, ItemReference(requested_name="riz long")
+    )
     assert decision.status == ItemTargetStatus.FOUND
     assert decision.item.id == expected.id
 
@@ -118,7 +139,9 @@ def test_target_returns_ambiguous_without_selecting_any_item():
     order = create_order_draft(customer=user)
     add_order_item(order=order, requested_name="arachide", quantity=1, unit="KG")
     add_order_item(order=order, requested_name="arachide", quantity=2, unit="KG")
-    decision = OrderBuildingService().target(order, ItemReference(requested_name="arachide"))
+    decision = OrderBuildingService().target(
+        order, ItemReference(requested_name="arachide")
+    )
     assert decision.status == ItemTargetStatus.AMBIGUOUS
     assert decision.item is None
     assert len(decision.candidates) == 2

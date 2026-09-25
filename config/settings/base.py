@@ -225,6 +225,7 @@ CACHES = {
         "LOCATION": env("REDIS_URL"),
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
         },
     }
 }
@@ -313,6 +314,84 @@ AI_MODEL = env("AI_MODEL", default="")
 AI_TIMEOUT_SECONDS = env.float("AI_TIMEOUT_SECONDS", default=15.0)
 OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
 
+# AI rollout controls are intentionally independent environment switches. New
+# agent capabilities remain off until their implementation lot passes its
+# regression and security gates. AI_EMERGENCY_STOP is the operational kill
+# switch: it blocks model calls while deterministic channel actions stay live.
+AI_EMERGENCY_STOP = env.bool("AI_EMERGENCY_STOP", default=False)
+AI_AGENT_ENABLED = env.bool("AI_AGENT_ENABLED", default=False)
+AI_AGENT_SHADOW_ENABLED = env.bool("AI_AGENT_SHADOW_ENABLED", default=False)
+AI_AGENT_TOOLS_ENABLED = env.bool("AI_AGENT_TOOLS_ENABLED", default=False)
+AI_AGENT_WRITE_TOOLS_ENABLED = env.bool("AI_AGENT_WRITE_TOOLS_ENABLED", default=False)
+AI_AGENT_MEMORY_ENABLED = env.bool("AI_AGENT_MEMORY_ENABLED", default=False)
+AI_CONVERSATION_MEMORY_ENABLED = env.bool(
+    "AI_CONVERSATION_MEMORY_ENABLED", default=False
+)
+AI_MEMORY_SUMMARY_ENABLED = env.bool("AI_MEMORY_SUMMARY_ENABLED", default=False)
+AI_NATURAL_COMPOSER_ENABLED = env.bool("AI_NATURAL_COMPOSER_ENABLED", default=False)
+AI_NATURAL_COMPOSER_SHADOW_ENABLED = env.bool(
+    "AI_NATURAL_COMPOSER_SHADOW_ENABLED", default=False
+)
+AI_STYLE_ADAPTATION_ENABLED = env.bool("AI_STYLE_ADAPTATION_ENABLED", default=False)
+AI_MEMORY_SUMMARY_MIN_MESSAGES = env.int("AI_MEMORY_SUMMARY_MIN_MESSAGES", default=8)
+AI_MEMORY_SUMMARY_BATCH_SIZE = env.int("AI_MEMORY_SUMMARY_BATCH_SIZE", default=24)
+AI_MEMORY_FACT_TTL_DAYS = env.int("AI_MEMORY_FACT_TTL_DAYS", default=365)
+AI_MEMORY_RECONCILIATION_BATCH_SIZE = env.int(
+    "AI_MEMORY_RECONCILIATION_BATCH_SIZE", default=100
+)
+AI_RAG_ENABLED = env.bool("AI_RAG_ENABLED", default=False)
+AI_RAG_SHADOW_ENABLED = env.bool("AI_RAG_SHADOW_ENABLED", default=False)
+AI_RAG_ROLLOUT_PERCENT = env.int("AI_RAG_ROLLOUT_PERCENT", default=0)
+AI_RAG_SEMANTIC_ENABLED = env.bool("AI_RAG_SEMANTIC_ENABLED", default=False)
+AI_RAG_EMBEDDING_PROVIDER = env("AI_RAG_EMBEDDING_PROVIDER", default="openai")
+AI_RAG_EMBEDDING_MODEL = env("AI_RAG_EMBEDDING_MODEL", default="text-embedding-3-small")
+AI_RAG_EMBEDDING_DIMENSIONS = env.int("AI_RAG_EMBEDDING_DIMENSIONS", default=1024)
+AI_RAG_EMBEDDING_BASE_URL = env("AI_RAG_EMBEDDING_BASE_URL", default="")
+AI_RAG_EMBEDDING_API_KEY = env("AI_RAG_EMBEDDING_API_KEY", default="")
+AI_RAG_EMBEDDING_SEND_DIMENSIONS = env.bool(
+    "AI_RAG_EMBEDDING_SEND_DIMENSIONS", default=True
+)
+AI_RAG_MAX_QUERY_CHARACTERS = env.int("AI_RAG_MAX_QUERY_CHARACTERS", default=1200)
+AI_RAG_MAX_SOURCE_CHARACTERS = env.int("AI_RAG_MAX_SOURCE_CHARACTERS", default=500_000)
+AI_RAG_MAX_METADATA_CHARACTERS = env.int(
+    "AI_RAG_MAX_METADATA_CHARACTERS", default=20_000
+)
+AI_RAG_CHUNK_TARGET_CHARACTERS = env.int("AI_RAG_CHUNK_TARGET_CHARACTERS", default=1200)
+AI_RAG_CHUNK_MAX_CHARACTERS = env.int("AI_RAG_CHUNK_MAX_CHARACTERS", default=1800)
+AI_RAG_CHUNK_OVERLAP_CHARACTERS = env.int(
+    "AI_RAG_CHUNK_OVERLAP_CHARACTERS", default=160
+)
+AI_RAG_MAX_RESULTS = env.int("AI_RAG_MAX_RESULTS", default=6)
+AI_RAG_CANDIDATE_LIMIT = env.int("AI_RAG_CANDIDATE_LIMIT", default=24)
+AI_RAG_MAX_CONTEXT_CHARACTERS = env.int("AI_RAG_MAX_CONTEXT_CHARACTERS", default=12_000)
+AI_RAG_MAX_CHUNKS_PER_SOURCE = env.int("AI_RAG_MAX_CHUNKS_PER_SOURCE", default=2)
+AI_RAG_MIN_LEXICAL_SCORE = env.float("AI_RAG_MIN_LEXICAL_SCORE", default=0.02)
+AI_RAG_MIN_TRIGRAM_SCORE = env.float("AI_RAG_MIN_TRIGRAM_SCORE", default=0.12)
+AI_RAG_MIN_SEMANTIC_SCORE = env.float("AI_RAG_MIN_SEMANTIC_SCORE", default=0.45)
+AI_RAG_MAX_CHUNK_INJECTION_RISK = env.float(
+    "AI_RAG_MAX_CHUNK_INJECTION_RISK", default=0.45
+)
+AI_RAG_RRF_RANK_CONSTANT = env.int("AI_RAG_RRF_RANK_CONSTANT", default=60)
+AI_RAG_LEXICAL_WEIGHT = env.float("AI_RAG_LEXICAL_WEIGHT", default=0.55)
+AI_RAG_SEMANTIC_WEIGHT = env.float("AI_RAG_SEMANTIC_WEIGHT", default=0.45)
+AI_RAG_CACHE_SECONDS = env.int("AI_RAG_CACHE_SECONDS", default=300)
+AI_RAG_EMBEDDING_BATCH_SIZE = env.int("AI_RAG_EMBEDDING_BATCH_SIZE", default=32)
+AI_RAG_EMBEDDING_MAX_ATTEMPTS = env.int("AI_RAG_EMBEDDING_MAX_ATTEMPTS", default=5)
+AI_RAG_EMBEDDING_LEASE_SECONDS = env.int("AI_RAG_EMBEDDING_LEASE_SECONDS", default=900)
+AI_RAG_AUDIT_ENABLED = env.bool("AI_RAG_AUDIT_ENABLED", default=True)
+AI_RAG_AUDIT_RETENTION_DAYS = env.int("AI_RAG_AUDIT_RETENTION_DAYS", default=30)
+AI_VOICE_ENABLED = env.bool("AI_VOICE_ENABLED", default=False)
+AI_DECISION_OBSERVABILITY_ENABLED = env.bool(
+    "AI_DECISION_OBSERVABILITY_ENABLED", default=True
+)
+AI_AGENT_MAX_PLAN_STEPS = env.int("AI_AGENT_MAX_PLAN_STEPS", default=4)
+AI_AGENT_SHADOW_CACHE_SECONDS = env.int("AI_AGENT_SHADOW_CACHE_SECONDS", default=300)
+AI_TOOL_MANIFEST_CACHE_SECONDS = env.int("AI_TOOL_MANIFEST_CACHE_SECONDS", default=300)
+AI_TOOL_MAX_RESULT_BYTES = env.int("AI_TOOL_MAX_RESULT_BYTES", default=65536)
+MESSAGING_CONFIGURATION_CACHE_SECONDS = env.int(
+    "MESSAGING_CONFIGURATION_CACHE_SECONDS", default=60
+)
+
 
 # ---------------------------------------------------------------------
 # OpenAPI
@@ -382,18 +461,56 @@ CELERY_TASK_RETRY_BACKOFF = env.int("CELERY_TASK_RETRY_BACKOFF", default=30)
 CELERY_TASK_RETRY_BACKOFF_MAX = env.int("CELERY_TASK_RETRY_BACKOFF_MAX", default=900)
 CELERY_TASK_RETRY_JITTER = env.bool("CELERY_TASK_RETRY_JITTER", default=True)
 
-NOTIFICATION_DELIVERY_MAX_ATTEMPTS = env.int("NOTIFICATION_DELIVERY_MAX_ATTEMPTS", default=3)
-NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS = env.int("NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS", default=30)
-NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS = env.int("NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS", default=900)
-NOTIFICATION_DELIVERY_RETRY_JITTER = env.bool("NOTIFICATION_DELIVERY_RETRY_JITTER", default=True)
+NOTIFICATION_DELIVERY_MAX_ATTEMPTS = env.int(
+    "NOTIFICATION_DELIVERY_MAX_ATTEMPTS", default=3
+)
+NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS = env.int(
+    "NOTIFICATION_DELIVERY_RETRY_BASE_SECONDS", default=30
+)
+NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS = env.int(
+    "NOTIFICATION_DELIVERY_RETRY_MAX_SECONDS", default=900
+)
+NOTIFICATION_DELIVERY_RETRY_JITTER = env.bool(
+    "NOTIFICATION_DELIVERY_RETRY_JITTER", default=True
+)
 
-OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS = env.int("OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS", default=60)
+OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS = env.int(
+    "OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS", default=60
+)
 OFFER_EXPIRY_SWEEP_BATCH_SIZE = env.int("OFFER_EXPIRY_SWEEP_BATCH_SIZE", default=100)
-DRIVER_LOCATION_REMINDER_INTERVAL_SECONDS = env.int("DRIVER_LOCATION_REMINDER_INTERVAL_SECONDS", default=900)
-DRIVER_LOCATION_REMINDER_MAX_ATTEMPTS = env.int("DRIVER_LOCATION_REMINDER_MAX_ATTEMPTS", default=3)
-DRIVER_LOCATION_REMINDER_SWEEP_BATCH_SIZE = env.int("DRIVER_LOCATION_REMINDER_SWEEP_BATCH_SIZE", default=100)
-WORKFLOW_RECONCILIATION_BATCH_SIZE = env.int("WORKFLOW_RECONCILIATION_BATCH_SIZE", default=100)
-NOTIFICATION_PROCESSING_LEASE_SECONDS = env.int("NOTIFICATION_PROCESSING_LEASE_SECONDS", default=900)
+DRIVER_LOCATION_REMINDER_INTERVAL_SECONDS = env.int(
+    "DRIVER_LOCATION_REMINDER_INTERVAL_SECONDS", default=900
+)
+DRIVER_LOCATION_REMINDER_MAX_ATTEMPTS = env.int(
+    "DRIVER_LOCATION_REMINDER_MAX_ATTEMPTS", default=3
+)
+DRIVER_LOCATION_REMINDER_SWEEP_BATCH_SIZE = env.int(
+    "DRIVER_LOCATION_REMINDER_SWEEP_BATCH_SIZE", default=100
+)
+WORKFLOW_RECONCILIATION_BATCH_SIZE = env.int(
+    "WORKFLOW_RECONCILIATION_BATCH_SIZE", default=100
+)
+NOTIFICATION_PROCESSING_LEASE_SECONDS = env.int(
+    "NOTIFICATION_PROCESSING_LEASE_SECONDS", default=900
+)
+CONVERSATION_INBOX_CHANNELS = tuple(
+    value.upper() for value in env.list("CONVERSATION_INBOX_CHANNELS", default=[])
+)
+CONVERSATION_INBOX_LEASE_SECONDS = env.int(
+    "CONVERSATION_INBOX_LEASE_SECONDS", default=300
+)
+CONVERSATION_OUTBOX_LEASE_SECONDS = env.int(
+    "CONVERSATION_OUTBOX_LEASE_SECONDS", default=120
+)
+CONVERSATION_INBOX_MAX_ATTEMPTS = env.int("CONVERSATION_INBOX_MAX_ATTEMPTS", default=3)
+CONVERSATION_OUTBOX_MAX_ATTEMPTS = env.int(
+    "CONVERSATION_OUTBOX_MAX_ATTEMPTS", default=3
+)
+CONVERSATION_RETRY_BASE_SECONDS = env.int("CONVERSATION_RETRY_BASE_SECONDS", default=15)
+CONVERSATION_RETRY_MAX_SECONDS = env.int("CONVERSATION_RETRY_MAX_SECONDS", default=300)
+CONVERSATION_RECONCILIATION_BATCH_SIZE = env.int(
+    "CONVERSATION_RECONCILIATION_BATCH_SIZE", default=100
+)
 CELERY_BEAT_SCHEDULE = {
     "stores-sweep-expired-offers": {
         "task": "stores.sweep_expired_store_offers",
@@ -407,17 +524,56 @@ CELERY_BEAT_SCHEDULE = {
         "task": "drivers.sweep_location_reminders",
         "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
     },
-    "stores-reconcile-matching": {"task": "stores.reconcile_store_matching", "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS)},
-    "drivers-reconcile-matching": {"task": "drivers.reconcile_driver_matching", "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS)},
-    "messaging-reconcile-notifications": {"task": "messaging.reconcile_operational_notifications", "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS)},
+    "stores-reconcile-matching": {
+        "task": "stores.reconcile_store_matching",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "drivers-reconcile-matching": {
+        "task": "drivers.reconcile_driver_matching",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "messaging-reconcile-notifications": {
+        "task": "messaging.reconcile_operational_notifications",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "messaging-reconcile-conversation-pipeline": {
+        "task": "messaging.reconcile_conversation_pipeline",
+        "schedule": timedelta(seconds=OFFER_EXPIRY_SWEEP_INTERVAL_SECONDS),
+    },
+    "conversations-reconcile-memory": {
+        "task": "conversations.reconcile_memory",
+        "schedule": timedelta(minutes=5),
+    },
+    "conversations-expire-memory-facts": {
+        "task": "conversations.expire_memory_facts",
+        "schedule": timedelta(hours=1),
+    },
+    "knowledge-reconcile-embeddings": {
+        "task": "knowledge.reconcile_embeddings",
+        "schedule": timedelta(minutes=10),
+    },
+    "knowledge-expire-retrieval-audits": {
+        "task": "knowledge.expire_retrieval_audits",
+        "schedule": timedelta(days=1),
+    },
 }
 
 # Store-offer notifications are delivery concerns, distinct from StoreOffer.
-STORE_OFFER_NOTIFICATION_MAX_ATTEMPTS = env.int("STORE_OFFER_NOTIFICATION_MAX_ATTEMPTS", default=3)
-STORE_OFFER_NOTIFICATION_RETRY_BASE_SECONDS = env.int("STORE_OFFER_NOTIFICATION_RETRY_BASE_SECONDS", default=30)
-STORE_OFFER_NOTIFICATION_RETRY_MAX_SECONDS = env.int("STORE_OFFER_NOTIFICATION_RETRY_MAX_SECONDS", default=900)
-STORE_OFFER_NOTIFICATION_SENDING_STALE_SECONDS = env.int("STORE_OFFER_NOTIFICATION_SENDING_STALE_SECONDS", default=900)
-STORE_MATCHING_RECONCILIATION_BATCH_SIZE = env.int("STORE_MATCHING_RECONCILIATION_BATCH_SIZE", default=100)
+STORE_OFFER_NOTIFICATION_MAX_ATTEMPTS = env.int(
+    "STORE_OFFER_NOTIFICATION_MAX_ATTEMPTS", default=3
+)
+STORE_OFFER_NOTIFICATION_RETRY_BASE_SECONDS = env.int(
+    "STORE_OFFER_NOTIFICATION_RETRY_BASE_SECONDS", default=30
+)
+STORE_OFFER_NOTIFICATION_RETRY_MAX_SECONDS = env.int(
+    "STORE_OFFER_NOTIFICATION_RETRY_MAX_SECONDS", default=900
+)
+STORE_OFFER_NOTIFICATION_SENDING_STALE_SECONDS = env.int(
+    "STORE_OFFER_NOTIFICATION_SENDING_STALE_SECONDS", default=900
+)
+STORE_MATCHING_RECONCILIATION_BATCH_SIZE = env.int(
+    "STORE_MATCHING_RECONCILIATION_BATCH_SIZE", default=100
+)
 
 
 # ---------------------------------------------------------------------

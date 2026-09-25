@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "purpose": "Lot 0 regression baseline. These cases describe behavior that later lots must preserve or intentionally improve behind a reviewed acceptance gate.",
+  "cases": [
+    {
+      "id": "greeting_does_not_mutate_order",
+      "initial_state": "no_active_task",
+      "input": "Bonjour",
+      "invariants": ["no_order_created", "no_catalog_mutation"]
+    },
+    {
+      "id": "structured_action_bypasses_llm",
+      "initial_state": "main_menu",
+      "input": "interactive_action",
+      "invariants": ["no_model_call", "deterministic_route"]
+    },
+    {
+      "id": "duplicate_message_is_idempotent",
+      "initial_state": "message_already_processed",
+      "input": "same_external_message_id",
+      "invariants": ["no_business_mutation", "duplicate_outcome"]
+    },
+    {
+      "id": "unmatched_product_never_invents_catalog_identity",
+      "initial_state": "buying",
+      "input": "unavailable product",
+      "invariants": ["no_invented_product_id", "confirmation_blocked"]
+    },
+    {
+      "id": "order_mutation_checks_ownership",
+      "initial_state": "active_order",
+      "input": "modify order",
+      "invariants": ["authenticated_user_enforced", "backend_resolves_target"]
+    },
+    {
+      "id": "ai_failure_preserves_retryability",
+      "initial_state": "any",
+      "input": "provider timeout",
+      "invariants": ["no_message_marked_processed", "recoverable_outcome"]
+    },
+    {
+      "id": "location_is_not_recreated_by_llm",
+      "initial_state": "awaiting_location",
+      "input": "native location",
+      "invariants": ["trusted_coordinates_preserved", "no_model_coordinates"]
+    },
+    {
+      "id": "sensitive_content_not_exported_to_metrics",
+      "initial_state": "any",
+      "input": "message containing PII",
+      "invariants": ["finite_metric_labels", "no_message_text", "no_external_user_id"]
+    }
+  ]
+}

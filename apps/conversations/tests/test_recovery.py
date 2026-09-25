@@ -50,7 +50,9 @@ def test_recovery_resumes_clarification_before_review():
     convo.context = ConversationContext(
         active_order_id=str(active.order.id),
         pending_clarification=PendingClarification(
-            kind=ClarificationKind.MISSING_QUANTITY, field="quantity", item_reference="riz"
+            kind=ClarificationKind.MISSING_QUANTITY,
+            field="quantity",
+            item_reference="riz",
         ),
     ).to_payload()
     convo.save(update_fields=["context", "updated_at"])
@@ -66,9 +68,17 @@ def test_recovery_resumes_clarification_before_review():
 def test_recovery_rebuilds_ready_review_from_order_rows():
     convo = conversation()
     active = ActiveCustomerOrderService().get_or_create_draft(convo)
-    product = create_product(name="Riz recovery", category=create_category(name="Food recovery"))
-    add_order_item(order=active.order, requested_name="Riz", quantity=1, unit="KG", product=product,
-                   resolution_status=OrderItemResolutionStatus.MATCHED)
+    product = create_product(
+        name="Riz recovery", category=create_category(name="Food recovery")
+    )
+    add_order_item(
+        order=active.order,
+        requested_name="Riz",
+        quantity=1,
+        unit="KG",
+        product=product,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
     set_delivery_location(active.order, Point(9.7, 4.05, srid=4326))
     convo.refresh_from_db()
 
