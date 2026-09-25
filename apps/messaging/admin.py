@@ -1,6 +1,15 @@
 from django.contrib import admin
 
-from apps.messaging.infrastructure.models import ChannelIdentity, MessageEvent
+from apps.messaging.application.reliable_pipeline import (
+    replay_inbox_dead_letter,
+    replay_outbox_dead_letter,
+)
+from apps.messaging.infrastructure.models import (
+    ChannelIdentity,
+    ConversationInboxItem,
+    ConversationOutboxItem,
+    MessageEvent,
+)
 
 
 @admin.register(ChannelIdentity)
@@ -74,3 +83,33 @@ class MessageEventAdmin(admin.ModelAdmin):
                 ]
             )
         return fields
+
+
+@admin.action(description="Rejouer les éléments inbox en DLQ")
+def replay_inbox(modeladmin, request, queryset):
+    replayed = sum(replay_inbox_dead_letter(item.id) for item in queryset)
+    modeladmin.message_user(request, f"{replayed} élément(s) inbox remis en attente.")
+
+
+@admin.register(ConversationInboxItem)
+class ConversationInboxItemAdmin(admin.ModelAdmin):
+    list_display = ["conversation", "sequence", "status", "attempts", "available_at"]
+    list_filter = ["status"]
+    search_fields = ["conversation__id", "message_event__external_message_id"]
+    readonly_fields = [field.name for field in ConversationInboxItem._meta.fields]
+    actions = [replay_inbox]
+
+
+@admin.action(description="Rejouer les sorties DLQ sans livraison incertaine")
+def replay_outbox(modeladmin, request, queryset):
+    replayed = sum(replay_outbox_dead_letter(item.id) for item in queryset)
+    modeladmin.message_user(request, f"{replayed} sortie(s) remise(s) en attente.")
+
+
+@admin.register(ConversationOutboxItem)
+class ConversationOutboxItemAdmin(admin.ModelAdmin):
+    list_display = ["conversation", "sequence", "status", "attempts", "available_at"]
+    list_filter = ["status", "last_error_category"]
+    search_fields = ["conversation__id", "idempotency_key"]
+    readonly_fields = [field.name for field in ConversationOutboxItem._meta.fields]
+    actions = [replay_outbox]

@@ -29,14 +29,20 @@ def classify_capability(intent: MessageIntent) -> CapabilityDecision:
     if intent == MessageIntent.UNKNOWN:
         return CapabilityDecision(status=CapabilityStatus.UNKNOWN)
     if intent == MessageIntent.ORDER_HISTORY:
-        return CapabilityDecision(status=CapabilityStatus.SUPPORTED, name="order_history")
+        return CapabilityDecision(
+            status=CapabilityStatus.SUPPORTED, name="order_history"
+        )
     if intent == MessageIntent.ORDER_RESUME:
-        return CapabilityDecision(status=CapabilityStatus.SUPPORTED, name="order_resume")
+        return CapabilityDecision(
+            status=CapabilityStatus.SUPPORTED, name="order_resume"
+        )
     if intent == MessageIntent.ORDER_STATUS:
         return CapabilityDecision(
             status=CapabilityStatus.NOT_IMPLEMENTED, name="order_status"
         )
-    return CapabilityDecision(status=CapabilityStatus.SUPPORTED, name=intent.value.lower())
+    return CapabilityDecision(
+        status=CapabilityStatus.SUPPORTED, name=intent.value.lower()
+    )
 
 
 SOCIAL_RESPONSE = "Bonjour 👋 Je vais bien, merci ! Comment puis-je vous aider ?"

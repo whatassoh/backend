@@ -1,7 +1,12 @@
 services:
 
   postgres:
-    image: postgis/postgis:17-3.5
+    image: whatassoh-postgres:pg17-postgis3.5-pgvector0.8.6
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
+      args:
+        PGVECTOR_VERSION: "0.8.6"
 
     environment:
       POSTGRES_DB: whatassoh_db

@@ -30,6 +30,7 @@ class JourneyRoutingService:
 
     def __init__(self, *, context_service=None):
         from apps.conversations.application.context import ConversationContextService
+
         self.context_service = context_service or ConversationContextService()
 
     @classmethod
@@ -42,11 +43,14 @@ class JourneyRoutingService:
         # Do not clear an active order or clarification while switching: those are
         # business records/state machines, not a role-selection side effect.
         if changed or context.flow == ConversationFlow.AWAITING_JOURNEY_SELECTION:
+            metadata = {**context.metadata}
+            metadata.pop("task_paused", None)
             updated = self.context_service.update_context(
                 conversation,
                 replace(
                     context,
                     active_journey=journey,
+                    metadata=metadata,
                     flow=(
                         ConversationFlow.IDLE
                         if context.active_order_id is None
@@ -70,6 +74,7 @@ class JourneyRoutingService:
         if journey == ActiveJourney.SELL:
             from apps.stores.domain.enums import StoreMembershipStatus
             from apps.stores.infrastructure.models import StoreMembership
+
             exists = StoreMembership.objects.filter(
                 user=user, status=StoreMembershipStatus.ACTIVE
             ).exists()
@@ -79,6 +84,7 @@ class JourneyRoutingService:
                 else JourneyRoutingStatus.SELLER_ONBOARDING_REQUIRED
             )
         from apps.drivers.infrastructure.models import DriverProfile
+
         exists = DriverProfile.objects.filter(user=user).exists()
         return (
             JourneyRoutingStatus.DRIVER_JOURNEY_READY

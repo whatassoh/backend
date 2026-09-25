@@ -1,6 +1,8 @@
+import logging
 from collections.abc import Callable
 
 from django.conf import settings
+from django.core.cache import cache
 
 from apps.messaging.domain.enums import MessagingChannel
 from apps.messaging.domain.exceptions import (
@@ -10,6 +12,7 @@ from apps.messaging.domain.exceptions import (
 from apps.messaging.domain.providers import MessagingProvider, ProviderCapabilities
 
 ProviderFactory = Callable[[], MessagingProvider]
+logger = logging.getLogger(__name__)
 
 
 def is_channel_enabled(channel: MessagingChannel | str) -> bool:
@@ -62,7 +65,15 @@ def supports(channel: MessagingChannel | str, capability: str) -> bool:
 
 
 def get_channel_configuration_status() -> dict[str, dict[str, bool]]:
-    return {
+    cache_key = "whatassoh:v1:messaging:channel-configuration"
+    try:
+        cached = cache.get(cache_key)
+    except Exception:
+        logger.warning("messaging_configuration_cache_read_failed")
+        cached = None
+    if cached is not None:
+        return cached
+    status = {
         MessagingChannel.WHATSAPP: {
             "enabled": is_channel_enabled(MessagingChannel.WHATSAPP),
             "configured": _is_whatsapp_configured(),
@@ -72,6 +83,15 @@ def get_channel_configuration_status() -> dict[str, dict[str, bool]]:
             "configured": _is_telegram_configured(),
         },
     }
+    try:
+        cache.set(
+            cache_key,
+            status,
+            timeout=settings.MESSAGING_CONFIGURATION_CACHE_SECONDS,
+        )
+    except Exception:
+        logger.warning("messaging_configuration_cache_write_failed")
+    return status
 
 
 def _is_whatsapp_configured() -> bool:
