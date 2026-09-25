@@ -65,11 +65,17 @@ def test_wrong_owner_and_corrupt_uuid_are_never_reused():
 
     convo.context = ConversationContext(active_order_id=str(order.id)).to_payload()
     convo.save(update_fields=["context", "updated_at"])
-    assert service.get_active_order(convo).status == ActiveOrderDecisionStatus.STALE_CONTEXT
+    assert (
+        service.get_active_order(convo).status
+        == ActiveOrderDecisionStatus.STALE_CONTEXT
+    )
 
     convo.context = {"active_order_id": "not-a-uuid"}
     convo.save(update_fields=["context", "updated_at"])
-    assert service.get_active_order(convo).status == ActiveOrderDecisionStatus.STALE_CONTEXT
+    assert (
+        service.get_active_order(convo).status
+        == ActiveOrderDecisionStatus.STALE_CONTEXT
+    )
 
 
 @pytest.mark.django_db
@@ -99,7 +105,9 @@ def test_cross_channel_conversations_share_user_building_order_but_keep_contexts
     telegram.refresh_from_db()
     convo.refresh_from_db()
     assert resolved.order_id == str(order.id)
-    assert ConversationContext.from_payload(telegram.context).active_order_id == str(order.id)
+    assert ConversationContext.from_payload(telegram.context).active_order_id == str(
+        order.id
+    )
     assert telegram.id != convo.id
 
 
@@ -116,6 +124,7 @@ def test_resume_is_explicit_and_abandon_uses_cancellation_transition():
     assert resumed.status == ActiveOrderDecisionStatus.RESUMED
     assert abandoned.status == ActiveOrderDecisionStatus.ABANDONED
     assert order.status == OrderStatus.CANCELLED
+
 
 @pytest.mark.django_db(transaction=True)
 def test_two_cross_channel_workers_converge_on_one_building_order():
@@ -161,6 +170,9 @@ def test_two_cross_channel_workers_converge_on_one_building_order():
     assert not errors
     assert len(results) == 2
     assert results[0] == results[1]
-    assert Order.objects.filter(
-        customer=user, status__in=ActiveCustomerOrderService.active_statuses
-    ).count() == 1
+    assert (
+        Order.objects.filter(
+            customer=user, status__in=ActiveCustomerOrderService.active_statuses
+        ).count()
+        == 1
+    )

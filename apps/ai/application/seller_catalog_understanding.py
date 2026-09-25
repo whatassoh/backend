@@ -31,16 +31,32 @@ class SellerCatalogCommand:
 
 
 SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "required": ["intent", "confidence", "product_query", "variant_query", "price", "currency", "availability", "missing_fields"],
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "intent",
+        "confidence",
+        "product_query",
+        "variant_query",
+        "price",
+        "currency",
+        "availability",
+        "missing_fields",
+    ],
     "properties": {
-        "intent": {"type": "string", "enum": [value.value for value in SellerCatalogIntent]},
+        "intent": {
+            "type": "string",
+            "enum": [value.value for value in SellerCatalogIntent],
+        },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "product_query": {"type": ["string", "null"]},
         "variant_query": {"type": ["string", "null"]},
         "price": {"type": ["number", "null"]},
         "currency": {"type": ["string", "null"]},
-        "availability": {"type": ["string", "null"], "enum": ["AVAILABLE", "UNAVAILABLE", "UNKNOWN", None]},
+        "availability": {
+            "type": ["string", "null"],
+            "enum": ["AVAILABLE", "UNAVAILABLE", "UNKNOWN", None],
+        },
         "missing_fields": {"type": "array", "items": {"type": "string"}},
     },
 }
@@ -51,23 +67,29 @@ class SellerCatalogUnderstandingService:
         self.ai_service = ai_service
 
     def understand(self, text, *, correlation_id=None):
-        result = self.ai_service.generate_structured(AIStructuredRequest(
-            task_name="seller_catalog_command",
-            system_instructions=("Extract only a seller catalog command. Never return product, variant, store, user IDs or mutate data. "
-                                 "Use availability only for declared availability, never physical stock."),
-            user_input=text,
-            response_schema=SCHEMA,
-            correlation_id=correlation_id,
-            prompt=PromptReference(name="seller_catalog_command", version="v1"),
-        ))
+        result = self.ai_service.generate_structured(
+            AIStructuredRequest(
+                task_name="seller_catalog_command",
+                system_instructions=(
+                    "Extract only a seller catalog command. Never return product, variant, store, user IDs or mutate data. "
+                    "Use availability only for declared availability, never physical stock."
+                ),
+                user_input=text,
+                response_schema=SCHEMA,
+                correlation_id=correlation_id,
+                prompt=PromptReference(name="seller_catalog_command", version="v1"),
+            )
+        )
         try:
             price = result.data["price"]
             return SellerCatalogCommand(
                 intent=SellerCatalogIntent(result.data["intent"]),
                 confidence=Decimal(str(result.data["confidence"])),
-                product_query=result.data["product_query"], variant_query=result.data["variant_query"],
+                product_query=result.data["product_query"],
+                variant_query=result.data["variant_query"],
                 price=Decimal(str(price)) if price is not None else None,
-                currency=result.data["currency"], availability=result.data["availability"],
+                currency=result.data["currency"],
+                availability=result.data["availability"],
                 missing_fields=tuple(result.data["missing_fields"]),
             )
         except (KeyError, TypeError, ValueError, InvalidOperation) as exc:

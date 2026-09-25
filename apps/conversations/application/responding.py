@@ -30,7 +30,14 @@ def deliver_outcome_response(*, conversation, outcome, correlation_id=None) -> b
         return False
 
     try:
-        logger.info("outbound_requested", extra={"channel": conversation.channel, "correlation_id": correlation_id, "interactive": bool(response.actions)})
+        logger.info(
+            "outbound_requested",
+            extra={
+                "channel": conversation.channel,
+                "correlation_id": correlation_id,
+                "interactive": bool(response.actions),
+            },
+        )
         send_response_plan(
             conversation=conversation,
             response=response,
@@ -42,7 +49,14 @@ def deliver_outcome_response(*, conversation, outcome, correlation_id=None) -> b
             extra={"channel": conversation.channel, "correlation_id": correlation_id},
         )
         return False
-    logger.info("outbound_sent", extra={"channel": conversation.channel, "correlation_id": correlation_id, "interactive": bool(response.actions)})
+    logger.info(
+        "outbound_sent",
+        extra={
+            "channel": conversation.channel,
+            "correlation_id": correlation_id,
+            "interactive": bool(response.actions),
+        },
+    )
     return True
 
 
@@ -52,7 +66,10 @@ def send_response_plan(*, conversation, response, correlation_id=None):
         from apps.messaging.application.orchestration import send_conversation_text
 
         return send_conversation_text(
-            conversation=conversation, text=response.text, correlation_id=correlation_id
+            conversation=conversation,
+            text=response.text,
+            metadata=response.metadata,
+            correlation_id=correlation_id,
         )
     actions = [
         {"id": action.action_id, "label": action.label} for action in response.actions

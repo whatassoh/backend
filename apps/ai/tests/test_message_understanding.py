@@ -186,42 +186,86 @@ def test_understanding_logs_aggregate_confidence_without_message(provider, caplo
     assert record.correlation_id == "corr-understand"
     assert "secret customer message" not in caplog.text
 
+
 @pytest.mark.parametrize(
     ("action", "target", "replacement"),
     [
         ("ADD_ITEM", None, None),
         ("REMOVE_ITEM", {"text": "arachides"}, None),
         ("MODIFY_QUANTITY", {"text": "riz"}, None),
-        ("REPLACE_ITEM", {"text": "arachides"}, {"requested_name": "maïs", "quantity": 1, "unit": "L", "notes": None}),
+        (
+            "REPLACE_ITEM",
+            {"text": "arachides"},
+            {"requested_name": "maïs", "quantity": 1, "unit": "L", "notes": None},
+        ),
     ],
 )
-def test_typed_order_action_contract_parses_without_business_ids(action, target, replacement):
+def test_typed_order_action_contract_parses_without_business_ids(
+    action, target, replacement
+):
     from apps.ai.domain.understanding import OrderAction, parse_understanding
 
-    parsed = parse_understanding({
-        "intent": "MODIFY", "confidence": 0.9, "items": [], "location_text": None,
-        "confirmation": None, "missing_fields": [], "ambiguities": [], "language": "fr",
-        "order_action": action, "target_reference": target, "replacement": replacement,
-    })
+    parsed = parse_understanding(
+        {
+            "intent": "MODIFY",
+            "confidence": 0.9,
+            "items": [],
+            "location_text": None,
+            "confirmation": None,
+            "missing_fields": [],
+            "ambiguities": [],
+            "language": "fr",
+            "order_action": action,
+            "target_reference": target,
+            "replacement": replacement,
+        }
+    )
     assert parsed.order_action == OrderAction(action)
-    assert parsed.target_reference.text == target["text"] if target else parsed.target_reference is None
-    assert parsed.replacement.requested_name == "maïs" if replacement else parsed.replacement is None
+    assert (
+        parsed.target_reference.text == target["text"]
+        if target
+        else parsed.target_reference is None
+    )
+    assert (
+        parsed.replacement.requested_name == "maïs"
+        if replacement
+        else parsed.replacement is None
+    )
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {"order_action": "REMOVE_ITEM", "target_reference": None, "replacement": None},
-        {"order_action": "REPLACE_ITEM", "target_reference": {"text": "riz"}, "replacement": None},
-        {"order_action": "REPLACE_ITEM", "target_reference": {"id": "invented"}, "replacement": {"requested_name": "maïs", "quantity": 1, "unit": "L", "notes": None}},
+        {
+            "order_action": "REPLACE_ITEM",
+            "target_reference": {"text": "riz"},
+            "replacement": None,
+        },
+        {
+            "order_action": "REPLACE_ITEM",
+            "target_reference": {"id": "invented"},
+            "replacement": {
+                "requested_name": "maïs",
+                "quantity": 1,
+                "unit": "L",
+                "notes": None,
+            },
+        },
     ],
 )
 def test_invalid_typed_order_action_contract_is_rejected(payload):
     from apps.ai.domain.understanding import parse_understanding
 
     data = {
-        "intent": "MODIFY", "confidence": 0.9, "items": [], "location_text": None,
-        "confirmation": None, "missing_fields": [], "ambiguities": [], "language": "fr",
+        "intent": "MODIFY",
+        "confidence": 0.9,
+        "items": [],
+        "location_text": None,
+        "confirmation": None,
+        "missing_fields": [],
+        "ambiguities": [],
+        "language": "fr",
         **payload,
     }
     with pytest.raises(AIInvalidResponseError):

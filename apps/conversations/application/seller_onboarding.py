@@ -90,25 +90,36 @@ class SellerOnboardingService:
         self._audit("seller_onboarding_started", conversation)
         return self._prompt_for(SellerOnboardingDraft(stage=SellerOnboardingStage.NAME))
 
-    def handle(self, conversation, context: ConversationContext, message) -> SellerOnboardingOutcome | None:
+    def handle(
+        self, conversation, context: ConversationContext, message
+    ) -> SellerOnboardingOutcome | None:
         draft = context.seller_onboarding
         if context.active_journey != ActiveJourney.SELL or not draft:
             return None
         action_id = message.metadata.get("action_id")
         # Journey selection is global navigation, never an onboarding command.
-        if action_id in {"journey.select.buy", "journey.select.sell", "journey.select.deliver"}:
+        if action_id in {
+            "journey.select.buy",
+            "journey.select.sell",
+            "journey.select.deliver",
+        }:
             return None
         if action_id:
             return self.handle_action(conversation, context, action_id)
         if draft.stage == SellerOnboardingStage.NAME and message.text is not None:
             return self.set_store_name(conversation, context, message.text)
-        if draft.stage == SellerOnboardingStage.LOCATION and message.location is not None:
+        if (
+            draft.stage == SellerOnboardingStage.LOCATION
+            and message.location is not None
+        ):
             return self.set_location(conversation, context, message.location)
         if draft.stage == SellerOnboardingStage.CITY and message.text is not None:
             return self.set_city(conversation, context, message.text)
         return self._prompt_for(draft)
 
-    def set_store_name(self, conversation, context, raw_name: str) -> SellerOnboardingOutcome:
+    def set_store_name(
+        self, conversation, context, raw_name: str
+    ) -> SellerOnboardingOutcome:
         name = self._normalize_name(raw_name)
         if not name:
             return SellerOnboardingOutcome(
@@ -150,12 +161,56 @@ class SellerOnboardingService:
                 text="Indiquez une ville valide.",
                 metadata={"seller_onboarding": True},
             )
-        draft = replace(context.seller_onboarding, stage=SellerOnboardingStage.REVIEW, city=city)
+        draft = replace(
+            context.seller_onboarding, stage=SellerOnboardingStage.REVIEW, city=city
+        )
         self._save_draft(conversation, context, draft)
         return self.review(draft)
 
+    def cancel(self, conversation, context) -> SellerOnboardingOutcome:
+        """Cancel an uncommitted onboarding draft from any stage."""
+
+        self.context_service.update_context(
+            conversation,
+            replace(
+                context,
+                flow=ConversationFlow.IDLE,
+                active_journey=None,
+                seller_onboarding=None,
+            ),
+        )
+        self._audit("seller_onboarding_cancelled", conversation)
+        return SellerOnboardingOutcome(
+            status=SellerOnboardingStatus.CANCELLED,
+            text="Création de boutique annulée. Aucune boutique n'a été créée.",
+            metadata={"seller_onboarding": True, "task_cancelled": True},
+        )
+
+    def back(self, conversation, context) -> SellerOnboardingOutcome:
+        """Move to the preceding editable stage without discarding the draft."""
+
+        draft = context.seller_onboarding
+        if draft is None:
+            return self._stale_action()
+        previous = {
+            SellerOnboardingStage.LOCATION: SellerOnboardingStage.NAME,
+            SellerOnboardingStage.CITY: SellerOnboardingStage.LOCATION,
+            SellerOnboardingStage.REVIEW: SellerOnboardingStage.CITY,
+        }.get(draft.stage)
+        if previous is None:
+            return SellerOnboardingOutcome(
+                status=SellerOnboardingStatus.INVALID,
+                text="Vous êtes déjà à la première étape de création de boutique.",
+                metadata={"seller_onboarding": True, "at_first_step": True},
+            )
+        draft = replace(draft, stage=previous)
+        self._save_draft(conversation, context, draft)
+        return self._prompt_for(draft)
+
     @transaction.atomic
-    def handle_action(self, conversation, context, action_id: str) -> SellerOnboardingOutcome:
+    def handle_action(
+        self, conversation, context, action_id: str
+    ) -> SellerOnboardingOutcome:
         from apps.conversations.infrastructure.models import Conversation
 
         locked = Conversation.objects.select_for_update().get(pk=conversation.pk)
@@ -180,20 +235,7 @@ class SellerOnboardingService:
             self._save_draft(locked, context, draft)
             return self._prompt_for(draft)
         if action_id == self.cancel_action:
-            self.context_service.update_context(
-                locked,
-                replace(context, flow=ConversationFlow.IDLE, seller_onboarding=None),
-            )
-            return SellerOnboardingOutcome(
-                status=SellerOnboardingStatus.CANCELLED,
-                text="Création de boutique annulée. Que souhaitez-vous faire ?",
-                actions=(
-                    SellerOnboardingAction(action_id="journey.select.buy", label="Acheter"),
-                    SellerOnboardingAction(action_id="journey.select.sell", label="Vendre"),
-                    SellerOnboardingAction(action_id="journey.select.deliver", label="Livrer"),
-                ),
-                metadata={"seller_onboarding": True, "journey_selection": True},
-            )
+            return self.cancel(locked, context)
         if action_id in {self.catalog_chat_action, self.catalog_dashboard_action}:
             choice = "chat" if action_id == self.catalog_chat_action else "dashboard"
             if not self._consume_catalog_choice(conversation, choice):
@@ -236,12 +278,19 @@ class SellerOnboardingService:
     def confirm(self, conversation) -> SellerOnboardingOutcome:
         from apps.conversations.infrastructure.models import Conversation
 
-        locked = Conversation.objects.select_for_update().select_related("user").get(pk=conversation.pk)
+        locked = (
+            Conversation.objects.select_for_update()
+            .select_related("user")
+            .get(pk=conversation.pk)
+        )
         user = User.objects.select_for_update().get(pk=locked.user_id)
         context = ConversationContext.from_payload(locked.context)
         draft = context.seller_onboarding
         if context.active_journey != ActiveJourney.SELL or not draft:
-            return SellerOnboardingOutcome(status=SellerOnboardingStatus.INVALID, text="Cet onboarding n'est pas disponible.")
+            return SellerOnboardingOutcome(
+                status=SellerOnboardingStatus.INVALID,
+                text="Cet onboarding n'est pas disponible.",
+            )
         if draft.stage == SellerOnboardingStage.COMPLETED:
             return self._catalog_choice(draft.store_id)
         if draft.stage != SellerOnboardingStage.REVIEW or not self._is_complete(draft):
@@ -259,7 +308,9 @@ class SellerOnboardingService:
             UserRole.objects.get_or_create(user=user, role=UserRoleType.STORE_OWNER)
             store_id = str(store.id)
             self._audit("store_created", locked, store_id=store_id)
-        completed = replace(draft, stage=SellerOnboardingStage.COMPLETED, store_id=store_id)
+        completed = replace(
+            draft, stage=SellerOnboardingStage.COMPLETED, store_id=store_id
+        )
         locked.context = replace(context, seller_onboarding=completed).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._audit("seller_onboarding_completed", locked, store_id=store_id)
@@ -270,7 +321,9 @@ class SellerOnboardingService:
             status=SellerOnboardingStatus.REVIEW_READY,
             text=f"Boutique : {draft.store_name}\nLocalisation : reçue\nVille : {draft.city}",
             actions=(
-                SellerOnboardingAction(action_id=self.confirm_action, label="Créer ma boutique"),
+                SellerOnboardingAction(
+                    action_id=self.confirm_action, label="Créer ma boutique"
+                ),
                 SellerOnboardingAction(action_id=self.edit_action, label="Modifier"),
                 SellerOnboardingAction(action_id=self.cancel_action, label="Annuler"),
             ),
@@ -282,51 +335,91 @@ class SellerOnboardingService:
             status=SellerOnboardingStatus.COMPLETED,
             text="Boutique créée. Comment souhaitez-vous configurer votre catalogue ?",
             actions=(
-                SellerOnboardingAction(action_id=self.catalog_chat_action, label="Dans le chat"),
-                SellerOnboardingAction(action_id=self.catalog_dashboard_action, label="Via mon espace vendeur"),
+                SellerOnboardingAction(
+                    action_id=self.catalog_chat_action, label="Dans le chat"
+                ),
+                SellerOnboardingAction(
+                    action_id=self.catalog_dashboard_action,
+                    label="Via mon espace vendeur",
+                ),
             ),
             metadata={"seller_onboarding": True, "store_id": store_id},
         )
 
     def _prompt_for(self, draft: SellerOnboardingDraft) -> SellerOnboardingOutcome:
         prompts = {
-            SellerOnboardingStage.NAME: (SellerOnboardingStatus.AWAITING_NAME, "Comment s'appelle votre boutique ?", False),
-            SellerOnboardingStage.LOCATION: (SellerOnboardingStatus.AWAITING_LOCATION, "Partagez la position de votre boutique.", True),
-            SellerOnboardingStage.CITY: (SellerOnboardingStatus.AWAITING_CITY, "Dans quelle ville se trouve votre boutique ?", False),
+            SellerOnboardingStage.NAME: (
+                SellerOnboardingStatus.AWAITING_NAME,
+                "Comment s'appelle votre boutique ?",
+                False,
+            ),
+            SellerOnboardingStage.LOCATION: (
+                SellerOnboardingStatus.AWAITING_LOCATION,
+                "Partagez la position de votre boutique.",
+                True,
+            ),
+            SellerOnboardingStage.CITY: (
+                SellerOnboardingStatus.AWAITING_CITY,
+                "Dans quelle ville se trouve votre boutique ?",
+                False,
+            ),
         }
         if draft.stage == SellerOnboardingStage.REVIEW:
             return self.review(draft)
         if draft.stage == SellerOnboardingStage.COMPLETED:
             return self._catalog_choice(draft.store_id)
         status, text, request_location = prompts[draft.stage]
-        return SellerOnboardingOutcome(status=status, text=text, request_location=request_location, metadata={"seller_onboarding": True})
+        return SellerOnboardingOutcome(
+            status=status,
+            text=text,
+            request_location=request_location,
+            metadata={"seller_onboarding": True},
+        )
 
     def _save_draft(self, conversation, context, draft) -> None:
         self.context_service.update_context(
             conversation,
-            replace(context, flow=ConversationFlow.SELLER_ONBOARDING, seller_onboarding=draft),
+            replace(
+                context,
+                flow=ConversationFlow.SELLER_ONBOARDING,
+                seller_onboarding=draft,
+            ),
         )
 
     @staticmethod
     def _normalize_name(raw_name: str) -> str | None:
-        name = re.sub(r"^ma boutique s['’]appelle\s+", "", raw_name.strip(), flags=re.IGNORECASE)
+        name = re.sub(
+            r"^ma boutique s['’]appelle\s+", "", raw_name.strip(), flags=re.IGNORECASE
+        )
         name = " ".join(name.split())
         return name if 1 <= len(name) <= 255 else None
 
     @staticmethod
     def _valid_coordinates(latitude, longitude) -> bool:
         try:
-            return math.isfinite(latitude) and math.isfinite(longitude) and -90 <= latitude <= 90 and -180 <= longitude <= 180
+            return (
+                math.isfinite(latitude)
+                and math.isfinite(longitude)
+                and -90 <= latitude <= 90
+                and -180 <= longitude <= 180
+            )
         except TypeError:
             return False
 
     @staticmethod
     def _is_complete(draft) -> bool:
-        return bool(draft.store_name and draft.city and draft.latitude is not None and draft.longitude is not None)
+        return bool(
+            draft.store_name
+            and draft.city
+            and draft.latitude is not None
+            and draft.longitude is not None
+        )
 
     @staticmethod
     def _existing_membership(user, *, lock=False):
-        queryset = StoreMembership.objects.filter(user=user, status=StoreMembershipStatus.ACTIVE).order_by("created_at")
+        queryset = StoreMembership.objects.filter(
+            user=user, status=StoreMembershipStatus.ACTIVE
+        ).order_by("created_at")
         if lock:
             queryset = queryset.select_for_update()
         return queryset.first()

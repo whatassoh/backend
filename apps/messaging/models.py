@@ -1,5 +1,7 @@
 from apps.messaging.infrastructure.models import (
     ChannelIdentity,
+    ConversationInboxItem,
+    ConversationOutboxItem,
     MessageEvent,
     OperationalNotification,
     OperationalNotificationAttempt,
@@ -7,6 +9,8 @@ from apps.messaging.infrastructure.models import (
 
 __all__ = [
     "ChannelIdentity",
+    "ConversationInboxItem",
+    "ConversationOutboxItem",
     "MessageEvent",
     "OperationalNotification",
     "OperationalNotificationAttempt",
