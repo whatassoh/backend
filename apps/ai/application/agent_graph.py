@@ -1,11 +1,13 @@
-"""Bounded LangGraph definition used only for shadow decisions in lot 3."""
+"""Bounded LangGraph router and policy gate for shadow and read-only execution."""
+
+from functools import lru_cache
 
 from django.conf import settings
 
 from apps.ai.domain.agent_state import AgentGraphState, AgentRoute, ToolRisk
 from apps.ai.domain.understanding import MessageIntent
 
-GRAPH_VERSION = "shadow-v1"
+GRAPH_VERSION = "read-only-v2"
 
 INTERRUPT_INTENTS = {
     MessageIntent.CANCEL,
@@ -81,23 +83,37 @@ def plan_node(state: AgentGraphState):
 
 
 def policy_node(state: AgentGraphState):
-    write_tools = {
-        "suspend_task": ToolRisk.R2,
-        "resume_task": ToolRisk.R2,
-        "cancel_task": ToolRisk.R3,
-    }
-    risks = [write_tools.get(step["tool"], ToolRisk.R1) for step in state["plan"]]
+    tool_risks = _registered_tool_risks()
+    risks = [tool_risks.get(step["tool"], ToolRisk.R4) for step in state["plan"]]
     risk = max(risks, default=ToolRisk.R0, key=lambda item: int(item.value[1]))
     requires_confirmation = risk in {ToolRisk.R3, ToolRisk.R4}
+    if state.get("shadow_only", True):
+        decision = "SHADOW_ONLY"
+    elif any(item != ToolRisk.R1 for item in risks):
+        decision = "DENIED_NON_READ_ONLY"
+    else:
+        decision = "ACTIVE_READ_ONLY"
     return {
         "risk_level": risk.value,
         "requires_confirmation": requires_confirmation,
-        "policy_decision": "SHADOW_ONLY",
+        "policy_decision": decision,
+    }
+
+
+@lru_cache(maxsize=1)
+def _registered_tool_risks():
+    """Keep graph policy aligned with the registry's single risk declaration."""
+
+    from apps.ai.application.tools import build_business_tool_registry
+
+    return {
+        name: specification.risk
+        for name, specification in build_business_tool_registry().specs.items()
     }
 
 
 def build_compiled_graph(*, checkpointer=None):
-    """Import LangGraph lazily so disabled shadow mode keeps startup independent."""
+    """Import LangGraph lazily so disabled agent modes keep startup independent."""
 
     from langgraph.graph import END, START, StateGraph
 

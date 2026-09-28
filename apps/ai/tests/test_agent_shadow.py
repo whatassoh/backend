@@ -1,8 +1,10 @@
+from contextlib import contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
+from apps.ai.application.active_agent import ActiveReadAgentService
 from apps.ai.application.agent_graph import plan_node, policy_node, route_node
 from apps.ai.application.shadow import run_agent_shadow_safely
 from apps.ai.application.tools import (
@@ -12,7 +14,7 @@ from apps.ai.application.tools import (
 )
 from apps.ai.domain.agent_state import AgentRoute
 from apps.ai.domain.understanding import MessageIntent, UserMessageUnderstanding
-from apps.ai.infrastructure.models import AgentShadowRun
+from apps.ai.infrastructure.models import AgentExecutionRun, AgentShadowRun
 from apps.conversations.application.orchestrator import ResponsePlan
 from apps.conversations.application.services import get_or_create_active_conversation
 from apps.identity.infrastructure.models import User
@@ -48,6 +50,29 @@ def test_catalog_browse_plans_only_the_read_only_marketplace_tool(settings):
     assert state["route"] == AgentRoute.BUY
     assert state["plan"] == [{"tool": "list_marketplace_products", "arguments": {}}]
     assert state["risk_level"] == "R1"
+
+
+def test_active_policy_admits_reads_and_denies_planned_writes(settings):
+    settings.AI_AGENT_MAX_PLAN_STEPS = 4
+    read_state = {
+        "intent": MessageIntent.CATALOG_BROWSE.value,
+        "plan": [],
+        "shadow_only": False,
+    }
+    read_state.update(route_node(read_state))
+    read_state.update(plan_node(read_state))
+    read_state.update(policy_node(read_state))
+    write_state = {
+        "intent": MessageIntent.CANCEL.value,
+        "plan": [],
+        "shadow_only": False,
+    }
+    write_state.update(route_node(write_state))
+    write_state.update(plan_node(write_state))
+    write_state.update(policy_node(write_state))
+
+    assert read_state["policy_decision"] == "ACTIVE_READ_ONLY"
+    assert write_state["policy_decision"] == "DENIED_NON_READ_ONLY"
 
 
 def test_shadow_registry_rejects_every_mutating_tool():
@@ -153,3 +178,51 @@ def test_shadow_failure_is_persisted_without_changing_legacy_outcome(monkeypatch
     assert run.status == "FAILED"
     assert run.error_category == "RuntimeError"
     assert AgentShadowRun.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_active_agent_executes_only_the_planned_r1_read(monkeypatch, settings):
+    settings.AI_AGENT_MAX_PLAN_STEPS = 4
+    settings.AI_TOOL_MAX_RESULT_BYTES = 65536
+    convo = conversation()
+    inbound = NormalizedInboundMessage(
+        channel=MessagingChannel.WHATSAPP,
+        external_message_id="active-read-1",
+        external_user_id=convo.channel_identity.external_user_id,
+        message_type=MessageType.TEXT,
+        text="Quels produits sont disponibles ?",
+    )
+
+    @contextmanager
+    def saver():
+        yield object()
+
+    class Graph:
+        def invoke(self, initial_state, config):
+            state = dict(initial_state)
+            state.update(route_node(state))
+            state.update(plan_node(state))
+            state.update(policy_node(state))
+            return state
+
+    monkeypatch.setattr("apps.ai.application.active_agent.postgres_saver", saver)
+    monkeypatch.setattr(
+        "apps.ai.application.active_agent.build_compiled_graph",
+        lambda **_kwargs: Graph(),
+    )
+
+    decision = ActiveReadAgentService().run(
+        conversation=convo,
+        message=inbound,
+        understanding=UserMessageUnderstanding(
+            intent=MessageIntent.CATALOG_BROWSE,
+            confidence=Decimal(".99"),
+        ),
+        correlation_id="active-read-correlation",
+    )
+
+    assert decision.policy_decision == "ACTIVE_READ_ONLY"
+    assert decision.tool_results["list_marketplace_products"].status == "NOT_FOUND"
+    run = AgentExecutionRun.objects.get(correlation_id="active-read-correlation")
+    assert run.executed_tools == ["list_marketplace_products"]
+    assert run.result_statuses == {"list_marketplace_products": "NOT_FOUND"}

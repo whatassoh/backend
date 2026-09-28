@@ -1,6 +1,10 @@
 from django.contrib import admin
 
-from apps.ai.infrastructure.models import AgentShadowRun, ResponseCompositionRun
+from apps.ai.infrastructure.models import (
+    AgentExecutionRun,
+    AgentShadowRun,
+    ResponseCompositionRun,
+)
 
 
 @admin.register(AgentShadowRun)
@@ -17,6 +21,22 @@ class AgentShadowRunAdmin(admin.ModelAdmin):
     list_filter = ["status", "route", "risk_level", "parity"]
     search_fields = ["conversation__id", "correlation_id"]
     readonly_fields = [field.name for field in AgentShadowRun._meta.fields]
+
+
+@admin.register(AgentExecutionRun)
+class AgentExecutionRunAdmin(admin.ModelAdmin):
+    list_display = [
+        "conversation",
+        "status",
+        "route",
+        "risk_level",
+        "policy_decision",
+        "latency_ms",
+        "created_at",
+    ]
+    list_filter = ["status", "route", "risk_level", "policy_decision"]
+    search_fields = ["conversation__id", "correlation_id"]
+    readonly_fields = [field.name for field in AgentExecutionRun._meta.fields]
 
 
 @admin.register(ResponseCompositionRun)

@@ -7,7 +7,13 @@ import pytest
 from apps.ai.application.message_understanding import MessageUnderstandingService
 from apps.ai.application.service import AIService
 from apps.ai.domain.exceptions import AIInvalidResponseError
-from apps.ai.domain.understanding import MessageIntent, MessageUnderstandingInput
+from apps.ai.domain.understanding import (
+    InteractionMode,
+    JourneyGoal,
+    MessageIntent,
+    MessageUnderstandingInput,
+    TaskTarget,
+)
 from apps.ai.prompts.message_understanding import SYSTEM_INSTRUCTIONS
 from apps.ai.providers.mock import MockAIProvider
 from apps.messaging.domain.dtos import MessageLocation, NormalizedInboundMessage
@@ -20,6 +26,12 @@ def examples():
     examples = json.loads(fixture_path.read_text())
     for example in examples:
         example["result"].update(
+            secondary_intents=[],
+            interaction_mode="ANSWER",
+            action_requested=False,
+            journey_goal="NONE",
+            standalone_question=None,
+            task_target="NONE",
             order_action=None,
             target_reference=None,
             replacement=None,
@@ -49,6 +61,47 @@ def test_prompt_routes_platform_catalog_and_social_questions_explicitly():
     assert "Questions about WhatAssoh" in SYSTEM_INSTRUCTIONS
     assert "CATALOG_BROWSE" in SYSTEM_INSTRUCTIONS
     assert "comment tu vas" in SYSTEM_INSTRUCTIONS
+    assert "ANSWER_AND_ACT" in SYSTEM_INSTRUCTIONS
+    assert "RECEIVE_DELIVERY" in SYSTEM_INSTRUCTIONS
+    assert "never DELIVER" in SYSTEM_INSTRUCTIONS
+
+
+def test_compound_turn_contract_preserves_information_and_action(provider):
+    provider.register_response(
+        task_name="message_understanding",
+        result={
+            "intent": "HELP",
+            "secondary_intents": ["CANCEL"],
+            "interaction_mode": "ANSWER_AND_ACT",
+            "action_requested": True,
+            "journey_goal": "NONE",
+            "standalone_question": "L'assistant est-il toute la plateforme ?",
+            "task_target": "CURRENT_TASK",
+            "confidence": 0.97,
+            "items": [],
+            "location_text": None,
+            "confirmation": None,
+            "missing_fields": [],
+            "ambiguities": [],
+            "language": "fr",
+            "order_action": None,
+            "target_reference": None,
+            "replacement": None,
+        },
+    )
+
+    result = MessageUnderstandingService(AIService(provider)).understand(
+        MessageUnderstandingInput(
+            current_message="Laisse tomber, WhatAssoh c'est toi ?",
+            limited_context={"active_task": "DRIVER_ONBOARDING"},
+        )
+    )
+
+    assert result.intent == MessageIntent.HELP
+    assert result.secondary_intents == (MessageIntent.CANCEL,)
+    assert result.interaction_mode == InteractionMode.ANSWER_AND_ACT
+    assert result.journey_goal == JourneyGoal.NONE
+    assert result.task_target == TaskTarget.CURRENT_TASK
 
 
 def test_multiple_items_preserve_requested_names_and_normalized_units(provider):
@@ -56,6 +109,12 @@ def test_multiple_items_preserve_requested_names_and_normalized_units(provider):
         task_name="message_understanding",
         result={
             "intent": "CREATE_OR_UPDATE_ORDER",
+            "secondary_intents": [],
+            "interaction_mode": "ACT",
+            "action_requested": True,
+            "journey_goal": "BUY_PRODUCTS",
+            "standalone_question": None,
+            "task_target": "ORDER",
             "confidence": 0.92,
             "items": [
                 {
@@ -108,6 +167,12 @@ def test_semantically_invalid_items_are_rejected(provider, invalid_item):
         task_name="message_understanding",
         result={
             "intent": "CREATE_OR_UPDATE_ORDER",
+            "secondary_intents": [],
+            "interaction_mode": "ACT",
+            "action_requested": True,
+            "journey_goal": "BUY_PRODUCTS",
+            "standalone_question": None,
+            "task_target": "ORDER",
             "confidence": 0.8,
             "items": [invalid_item],
             "location_text": None,
@@ -131,6 +196,12 @@ def test_forbidden_business_facts_are_rejected_by_strict_schema(provider):
         task_name="message_understanding",
         result={
             "intent": "CREATE_OR_UPDATE_ORDER",
+            "secondary_intents": [],
+            "interaction_mode": "ACT",
+            "action_requested": True,
+            "journey_goal": "BUY_PRODUCTS",
+            "standalone_question": None,
+            "task_target": "ORDER",
             "confidence": 0.8,
             "items": [
                 {
@@ -187,6 +258,12 @@ def test_understanding_logs_aggregate_confidence_without_message(provider, caplo
         task_name="message_understanding",
         result={
             "intent": "GREETING",
+            "secondary_intents": [],
+            "interaction_mode": "ANSWER",
+            "action_requested": False,
+            "journey_goal": "NONE",
+            "standalone_question": None,
+            "task_target": "NONE",
             "confidence": 0.9,
             "items": [],
             "location_text": None,

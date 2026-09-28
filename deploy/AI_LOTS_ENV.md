@@ -1,4 +1,4 @@
-# Configuration production des lots IA 1 a 5
+# Configuration production des lots IA 1 a 6
 
 ## Reponse courte sur les embeddings
 
@@ -44,7 +44,7 @@ cd /opt/whatAssoh/backend
 chmod +x deploy/configure-ai-lots.sh
 ./deploy/configure-ai-lots.sh baseline
 ./deploy/configure-ai-lots.sh shadow WHATSAPP
-./deploy/configure-ai-lots.sh active WHATSAPP 10
+./deploy/configure-ai-lots.sh active WHATSAPP 100
 ```
 
 Le script reutilise `OPENAI_API_KEY` et `AI_MODEL` deja presents. S'ils sont
@@ -84,11 +84,13 @@ reellement persistees.
 
 ### `active`
 
-- conserve LangGraph en shadow, car le lot 3 n'a pas de noeud d'execution actif;
+- active LangGraph et le registre pour les outils `R1` en lecture seule;
+- refuse les outils `R2` a `R4` et conserve toutes les ecritures agentiques coupees;
+- active la fenetre de contexte conversationnel bornee;
 - active le composeur naturel;
 - active le RAG hybride pour une cohorte stable;
-- utilise le troisieme argument comme pourcentage de rollout, `10` par defaut;
-- maintient les outils agentiques et mutations IA a `False`.
+- utilise le troisieme argument comme pourcentage de rollout, `100` par defaut;
+- maintient `AI_AGENT_WRITE_TOOLS_ENABLED=False`.
 
 Montee recommandee du RAG: `1`, `10`, `25`, `50`, puis `100` apres validation
 des metriques et conversations reelles.
@@ -104,7 +106,7 @@ des metriques et conversations reelles.
 | `OPENAI_API_KEY` | conserve/demandee | Secret commun au chat et aux embeddings OpenAI |
 | `AI_EMERGENCY_STOP` | `False` | Coupe chat, resumes, composeur, RAG et embeddings si mis a `True` |
 | `AI_DECISION_OBSERVABILITY_ENABLED` | `True` | Metriques de decision sans texte utilisateur |
-| `AI_VOICE_ENABLED` | `False` | Voix non activee dans les lots 1 a 5 |
+| `AI_VOICE_ENABLED` | `False` | Voix non activee dans les lots 1 a 6 |
 
 ## Lot 1
 
@@ -132,11 +134,11 @@ Valeurs de canaux valides: vide, `WHATSAPP`, `TELEGRAM` ou
 
 | Variable | Active | Role |
 |---|---:|---|
-| `AI_AGENT_ENABLED` | `False` | Reste coupe tant que l'agent actif n'est pas livre |
-| `AI_AGENT_SHADOW_ENABLED` | `True` | Compare le graphe sans changer la reponse |
-| `AI_AGENT_TOOLS_ENABLED` | `False` | Interdit l'execution agentique des outils |
+| `AI_AGENT_ENABLED` | profil | Active le graphe de lecture dans le profil actif |
+| `AI_AGENT_SHADOW_ENABLED` | profil | Compare le graphe dans le profil shadow |
+| `AI_AGENT_TOOLS_ENABLED` | profil | Autorise uniquement les outils admis par la politique |
 | `AI_AGENT_WRITE_TOOLS_ENABLED` | `False` | Interdit toute mutation proposee par l'agent |
-| `AI_AGENT_MEMORY_ENABLED` | `False` | Memoire du futur agent actif |
+| `AI_AGENT_MEMORY_ENABLED` | profil | Autorise le contexte gouverne de l'agent actif |
 | `AI_AGENT_MAX_PLAN_STEPS` | `4` | Nombre maximal d'etapes planifiees |
 | `AI_AGENT_SHADOW_CACHE_SECONDS` | `300` | Cache reconstructible des decisions shadow |
 | `AI_TOOL_MANIFEST_CACHE_SECONDS` | `300` | Cache du manifeste d'outils |
@@ -195,6 +197,23 @@ Valeurs de canaux valides: vide, `WHATSAPP`, `TELEGRAM` ou
 | `AI_RAG_AUDIT_ENABLED` | `True` | Audits sans texte utilisateur |
 | `AI_RAG_AUDIT_RETENTION_DAYS` | `30` | Retention des audits |
 
+## Lot 6: contexte et agent actif en lecture
+
+| Variable | Valeur active | Role |
+|---|---:|---|
+| `AI_CONTEXT_ENGINE_ENABLED` | `True` | Construit la fenetre conversationnelle bornee |
+| `AI_CONTEXT_MAX_RECENT_MESSAGES` | `8` | Nombre maximal de messages recents |
+| `AI_CONTEXT_MAX_MESSAGE_CHARACTERS` | `500` | Taille maximale par message |
+| `AI_CONTEXT_MAX_SUMMARY_CHARACTERS` | `2000` | Budget du dernier resume valide |
+| `AI_AGENT_ENABLED` | `True` | Active le routeur LangGraph `read-only-v2` |
+| `AI_AGENT_TOOLS_ENABLED` | `True` | Permet les lectures `R1` allowlistees |
+| `AI_AGENT_WRITE_TOOLS_ENABLED` | `False` | Refus permanent des mutations agentiques |
+| `AI_RAG_ROLLOUT_PERCENT` | `100` | Reponses documentaires pour tous les utilisateurs |
+
+Le contexte ne transporte ni coordonnees, ni identifiants metier, ni prix, ni stock,
+ni permission. Les resultats bruts des outils restent hors des checkpoints et de
+l'audit `AgentExecutionRun`.
+
 ## Application et verification
 
 Le script modifie uniquement le fichier. Appliquer ensuite la configuration par
@@ -216,6 +235,14 @@ Apres activation semantique et ingestion du corpus:
 docker-compose -p whatassoh --env-file .env.production \
   -f docker-compose.prod.yml run --rm web \
   python manage.py knowledge_reindex --embeddings --reset-failed
+```
+
+Verifier le profil actif sans afficher de secret:
+
+```bash
+docker-compose -p whatassoh --env-file .env.production \
+  -f docker-compose.prod.yml run --rm web \
+  python manage.py ai_runtime_status --require-lot6-active
 ```
 
 Pour couper uniquement les fonctions avancees, repasser en `baseline`. Pour un

@@ -10,8 +10,10 @@ class StubAI:
     def __init__(self, text, speech_acts=()):
         self.text = text
         self.speech_acts = list(speech_acts)
+        self.request = None
 
     def generate_structured(self, request):
+        self.request = request
         return SimpleNamespace(
             data={"text": self.text, "speech_acts": self.speech_acts}
         )
@@ -111,3 +113,26 @@ def test_composer_failure_does_not_replace_the_authoritative_response():
         fallback = response
 
     assert fallback is response
+
+
+def test_composer_receives_recent_messages_only_as_untrusted_context():
+    response = ResponsePlan(text="WhatAssoh est une plateforme locale.")
+    policy_brief = ResponseBrief(
+        objective="answer",
+        authoritative_text=response.text,
+        style={"register": "casual", "address_form": "tu"},
+        channel="WHATSAPP",
+        metadata={
+            "recent_messages": [
+                {"role": "assistant", "text": "Je suis l'assistant WhatAssoh."}
+            ]
+        },
+    )
+    ai = StubAI("WhatAssoh, c'est toute la plateforme locale.")
+
+    _, accepted = NaturalResponseComposer(ai).compose(policy_brief, response)
+
+    assert accepted is True
+    assert ai.request.conversation_context["recent_messages"][0]["role"] == (
+        "assistant"
+    )
