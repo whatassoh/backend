@@ -1336,7 +1336,7 @@ log "Ingestion de la documentation WhatAssoh"
     web \
     python manage.py \
     knowledge_ingest \
-    --file knowledge/customer-help/whatassoh-platform-fr.v1.json \
+    --file knowledge/customer-help/whatassoh-platform-fr.v2.json \
     --fail-on-quarantine
 
 "${COMPOSE[@]}" run \

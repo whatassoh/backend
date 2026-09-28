@@ -289,7 +289,8 @@ def build_business_tool_registry():
         ),
         (
             "add_item",
-            "Add a grounded product and positive quantity to the customer's draft order.",
+            "Add a grounded product and positive quantity to the customer's "
+            "draft order.",
             ToolRisk.R2,
             False,
             "orders.write_own",
@@ -415,7 +416,8 @@ def _register_extended_read_tools(registry):
         ),
         (
             "get_response_style",
-            "Read the resolved non-sensitive communication style for this conversation.",
+            "Read the resolved non-sensitive communication style for this "
+            "conversation.",
             EMPTY_SCHEMA,
             "conversation.read",
             _get_response_style,
@@ -429,7 +431,8 @@ def _register_extended_read_tools(registry):
         ),
         (
             "get_order_by_reference",
-            "Read one order by reference only when it belongs to the authenticated customer.",
+            "Read one order by reference only when it belongs to the authenticated "
+            "customer.",
             _string_schema("reference", 80),
             "orders.read_own",
             _get_order_by_reference,
@@ -471,7 +474,8 @@ def _register_extended_read_tools(registry):
         ),
         (
             "get_customer_delivery_tracking",
-            "Read status and location freshness for a customer-owned order; exact GPS is redacted.",
+            "Read status and location freshness for a customer-owned order; "
+            "exact GPS is redacted.",
             _string_schema("reference", 80),
             "deliveries.read_own",
             _get_customer_delivery_tracking,
@@ -540,7 +544,12 @@ def _list_orders(context):
         "OK",
         {
             "orders": [
-                {"id": str(item.id), "reference": item.reference, "status": item.status}
+                {
+                    "id": str(item.id),
+                    "reference": item.reference,
+                    "status": item.status,
+                    "status_label": item.get_status_display(),
+                }
                 for item in orders
             ]
         },
@@ -561,7 +570,12 @@ def _get_active_order(context):
         return ToolResult("NOT_FOUND", {})
     return ToolResult(
         "OK",
-        {"id": str(order.id), "reference": order.reference, "status": order.status},
+        {
+            "id": str(order.id),
+            "reference": order.reference,
+            "status": order.status,
+            "status_label": order.get_status_display(),
+        },
     )
 
 
@@ -801,10 +815,10 @@ def _get_active_delivery_mission(context):
 
 
 def _get_customer_delivery_tracking(context, reference):
-    from apps.drivers.application.tracking import DeliveryTrackingService
     from apps.drivers.application.delivery_execution import (
         DeliveryMissionAuthorizationError,
     )
+    from apps.drivers.application.tracking import DeliveryTrackingService
 
     try:
         tracking = DeliveryTrackingService().get_customer_tracking(

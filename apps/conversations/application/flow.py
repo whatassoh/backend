@@ -82,12 +82,18 @@ def process_inbound_conversation(conversation, message, *, correlation_id=None):
 
     rag_active = runtime_policy.rag_enabled and rag_enabled_for(conversation.user_id)
     knowledge_service = _knowledge_service(runtime_policy, ai_service, rag_active)
+    active_agent_service = None
+    if runtime_policy.agent_enabled and runtime_policy.tools_enabled:
+        from apps.ai.application.active_agent import ActiveReadAgentService
+
+        active_agent_service = ActiveReadAgentService()
     orchestrator = ConversationalOrchestrator(
         understanding_service=understanding_service,
         seller_catalog_conversation_service=seller_catalog_service,
         knowledge_answer_service=knowledge_service,
         knowledge_answer_enabled=rag_active,
         knowledge_answer_shadow=runtime_policy.rag_shadow_enabled,
+        active_agent_service=active_agent_service,
     )
     outcome = orchestrator.process_message(
         conversation, message, correlation_id=correlation_id

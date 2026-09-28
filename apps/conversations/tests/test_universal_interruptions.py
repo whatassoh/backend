@@ -1,9 +1,16 @@
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from django.contrib.gis.geos import Point
 
-from apps.ai.domain.understanding import MessageIntent, UserMessageUnderstanding
+from apps.ai.domain.understanding import (
+    InteractionMode,
+    JourneyGoal,
+    MessageIntent,
+    TaskTarget,
+    UserMessageUnderstanding,
+)
 from apps.catalog.application.services import (
     add_product_to_store,
     create_category,
@@ -73,6 +80,21 @@ def message(text=None, *, action_id=None, message_id="message-1"):
         text=text,
         metadata={"action_id": action_id} if action_id else {},
     )
+
+
+class GroundedKnowledgeStub:
+    def __init__(self, text):
+        self.text = text
+        self.calls = []
+
+    def answer(self, question, **kwargs):
+        self.calls.append((question, kwargs))
+        return SimpleNamespace(
+            answer=self.text,
+            grounded=True,
+            citations=(),
+            no_answer_reason=None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -246,6 +268,81 @@ def test_catalog_question_reads_live_products_without_consuming_seller_onboardin
 
 
 @pytest.mark.django_db
+def test_customer_asking_to_be_delivered_never_starts_driver_onboarding():
+    convo = conversation()
+    knowledge = GroundedKnowledgeStub(
+        "Pour être livré, préparez puis confirmez votre commande."
+    )
+    understanding = UnderstandingQueue(
+        UserMessageUnderstanding(
+            intent=MessageIntent.DELIVER,
+            confidence=Decimal(".99"),
+            interaction_mode=InteractionMode.ANSWER,
+            journey_goal=JourneyGoal.RECEIVE_DELIVERY,
+            standalone_question="Comment un client reçoit-il sa commande WhatAssoh ?",
+        )
+    )
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=understanding,
+        knowledge_answer_service=knowledge,
+        knowledge_answer_enabled=True,
+    ).process_message(
+        convo,
+        message("Comment faire pour être livré par WhatAssoh ?"),
+    )
+
+    convo.refresh_from_db()
+    assert "préparez puis confirmez" in outcome.response.text
+    assert ConversationContext.from_payload(convo.context).driver_onboarding is None
+    assert not DriverProfile.objects.exists()
+    assert knowledge.calls[0][1]["retrieval_query"].startswith("Comment un client")
+
+
+@pytest.mark.django_db
+def test_compound_help_and_explicit_cancel_answers_after_cancelling_current_task():
+    convo = conversation()
+    convo.context = ConversationContext(
+        active_journey=ActiveJourney.DELIVER,
+        flow=ConversationFlow.DRIVER_ONBOARDING,
+        driver_onboarding=DriverOnboardingDraft(
+            stage=DriverOnboardingStage.VEHICLE_TYPE
+        ),
+    ).to_payload()
+    convo.save(update_fields=["context", "updated_at"])
+    knowledge = GroundedKnowledgeStub(
+        "WhatAssoh est la plateforme; je suis son assistant conversationnel."
+    )
+    understanding = UnderstandingQueue(
+        UserMessageUnderstanding(
+            intent=MessageIntent.HELP,
+            secondary_intents=(MessageIntent.CANCEL,),
+            confidence=Decimal(".99"),
+            interaction_mode=InteractionMode.ANSWER_AND_ACT,
+            action_requested=True,
+            standalone_question="L'assistant est-il toute la plateforme WhatAssoh ?",
+            task_target=TaskTarget.CURRENT_TASK,
+        )
+    )
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=understanding,
+        knowledge_answer_service=knowledge,
+        knowledge_answer_enabled=True,
+    ).process_message(
+        convo,
+        message("Laissons tomber la tâche en cours, WhatAssoh c'est toi ?"),
+    )
+
+    convo.refresh_from_db()
+    context = ConversationContext.from_payload(convo.context)
+    assert "profil livreur a été annulée" in outcome.response.text
+    assert "plateforme" in outcome.response.text
+    assert outcome.metadata["compound_turn"] is True
+    assert context.driver_onboarding is None
+
+
+@pytest.mark.django_db
 def test_ambiguous_natural_cancel_never_mutates_the_active_task():
     convo = conversation()
     original = ConversationContext(
@@ -274,6 +371,39 @@ def test_ambiguous_natural_cancel_never_mutates_the_active_task():
     assert "Que souhaitez-vous annuler" in outcome.response.text
     assert context.seller_onboarding == original.seller_onboarding
     assert context.active_journey == ActiveJourney.SELL
+
+
+@pytest.mark.django_db
+def test_cancel_target_mismatch_never_cancels_another_active_task():
+    convo = conversation()
+    original = ConversationContext(
+        active_journey=ActiveJourney.SELL,
+        flow=ConversationFlow.SELLER_ONBOARDING,
+        seller_onboarding=SellerOnboardingDraft(
+            stage=SellerOnboardingStage.LOCATION, store_name="Chez Louis"
+        ),
+    )
+    convo.context = original.to_payload()
+    convo.save(update_fields=["context", "updated_at"])
+    understanding = UnderstandingQueue(
+        UserMessageUnderstanding(
+            intent=MessageIntent.CANCEL,
+            confidence=Decimal(".98"),
+            interaction_mode=InteractionMode.ACT,
+            action_requested=True,
+            task_target=TaskTarget.DRIVER_ONBOARDING,
+        )
+    )
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=understanding
+    ).process_message(convo, message("Annule mon inscription livreur"))
+
+    convo.refresh_from_db()
+    context = ConversationContext.from_payload(convo.context)
+    assert "Je n'ai rien modifié" in outcome.response.text
+    assert outcome.metadata["target_mismatch"] is True
+    assert context.seller_onboarding == original.seller_onboarding
 
 
 @pytest.mark.django_db

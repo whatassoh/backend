@@ -38,6 +38,43 @@ class AgentShadowRun(BaseModel):
         ]
 
 
+class AgentExecutionRun(BaseModel):
+    """Audit of an active read-only graph run without raw messages or tool data."""
+
+    conversation = models.ForeignKey(
+        "conversations.Conversation",
+        on_delete=models.CASCADE,
+        related_name="agent_execution_runs",
+    )
+    correlation_id = models.CharField(max_length=100, blank=True, null=True)
+    graph_version = models.CharField(max_length=40)
+    status = models.CharField(max_length=30)
+    route = models.CharField(max_length=50, blank=True)
+    planned_tools = models.JSONField(default=list)
+    executed_tools = models.JSONField(default=list)
+    result_statuses = models.JSONField(default=dict)
+    risk_level = models.CharField(max_length=4, blank=True)
+    policy_decision = models.CharField(max_length=40, blank=True)
+    latency_ms = models.PositiveIntegerField(blank=True, null=True)
+    error_category = models.CharField(max_length=80, blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["conversation", "correlation_id"],
+                name="ai_execution_conv_correlation_unique",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "created_at"], name="ai_execution_status_idx"
+            ),
+            models.Index(
+                fields=["conversation", "created_at"], name="ai_execution_conv_idx"
+            ),
+        ]
+
+
 class ResponseCompositionRun(BaseModel):
     """Auditable baseline/candidate pair for shadow evaluation and rollout."""
 
