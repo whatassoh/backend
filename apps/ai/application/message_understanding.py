@@ -32,6 +32,9 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "missing_fields",
         "ambiguities",
         "language",
+        "order_action",
+        "target_reference",
+        "replacement",
     ],
     "properties": {
         "intent": {

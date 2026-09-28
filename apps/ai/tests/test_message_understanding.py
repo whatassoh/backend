@@ -8,6 +8,7 @@ from apps.ai.application.message_understanding import MessageUnderstandingServic
 from apps.ai.application.service import AIService
 from apps.ai.domain.exceptions import AIInvalidResponseError
 from apps.ai.domain.understanding import MessageIntent, MessageUnderstandingInput
+from apps.ai.prompts.message_understanding import SYSTEM_INSTRUCTIONS
 from apps.ai.providers.mock import MockAIProvider
 from apps.messaging.domain.dtos import MessageLocation, NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
@@ -16,7 +17,14 @@ from apps.messaging.domain.enums import MessageType, MessagingChannel
 @pytest.fixture
 def examples():
     fixture_path = Path(__file__).parent / "fixtures" / "message_understanding_v1.json"
-    return json.loads(fixture_path.read_text())
+    examples = json.loads(fixture_path.read_text())
+    for example in examples:
+        example["result"].update(
+            order_action=None,
+            target_reference=None,
+            replacement=None,
+        )
+    return examples
 
 
 @pytest.fixture
@@ -35,6 +43,12 @@ def test_baseline_message_understanding_examples(provider, examples):
         )
         assert understanding.intent == example["result"]["intent"]
         assert len(understanding.items) == len(example["result"]["items"])
+
+
+def test_prompt_routes_platform_catalog_and_social_questions_explicitly():
+    assert "Questions about WhatAssoh" in SYSTEM_INSTRUCTIONS
+    assert "CATALOG_BROWSE" in SYSTEM_INSTRUCTIONS
+    assert "comment tu vas" in SYSTEM_INSTRUCTIONS
 
 
 def test_multiple_items_preserve_requested_names_and_normalized_units(provider):
@@ -62,6 +76,9 @@ def test_multiple_items_preserve_requested_names_and_normalized_units(provider):
             "missing_fields": [],
             "ambiguities": [],
             "language": "fr",
+            "order_action": None,
+            "target_reference": None,
+            "replacement": None,
         },
     )
     service = MessageUnderstandingService(AIService(provider))
@@ -98,6 +115,9 @@ def test_semantically_invalid_items_are_rejected(provider, invalid_item):
             "missing_fields": [],
             "ambiguities": [],
             "language": "fr",
+            "order_action": None,
+            "target_reference": None,
+            "replacement": None,
         },
     )
     with pytest.raises(AIInvalidResponseError):
@@ -127,6 +147,9 @@ def test_forbidden_business_facts_are_rejected_by_strict_schema(provider):
             "missing_fields": [],
             "ambiguities": [],
             "language": "fr",
+            "order_action": None,
+            "target_reference": None,
+            "replacement": None,
         },
     )
     with pytest.raises(AIInvalidResponseError):
@@ -171,6 +194,9 @@ def test_understanding_logs_aggregate_confidence_without_message(provider, caplo
             "missing_fields": [],
             "ambiguities": [],
             "language": "fr",
+            "order_action": None,
+            "target_reference": None,
+            "replacement": None,
         },
     )
     caplog.set_level(logging.INFO)

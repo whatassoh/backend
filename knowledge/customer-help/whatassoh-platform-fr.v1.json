@@ -1,0 +1,16 @@
+{
+  "key": "whatassoh-platform",
+  "title": "Comprendre WhatAssoh",
+  "content": "# Raison d'etre\n\nWhatAssoh facilite le commerce local depuis une conversation WhatsApp ou Telegram. La plateforme relie les clients, les boutiques et les livreurs afin qu'une demande puisse devenir une commande suivie sans obliger l'utilisateur a apprendre une interface complexe.\n\n# Clients\n\nUn client peut rechercher des produits, preparer une commande, preciser une adresse ou une position, confirmer son choix et suivre les etapes prises en charge par la plateforme. Les produits, prix et disponibilites ne sont jamais inventes par l'assistant : ils proviennent du catalogue et des declarations des boutiques.\n\n# Boutiques\n\nUn vendeur peut creer sa boutique, renseigner sa position, puis gerer son catalogue, ses prix et les disponibilites qu'il declare. Une creation interrompue peut etre reprise plus tard.\n\n# Livreurs\n\nUn livreur peut creer son profil, declarer sa disponibilite et recevoir les informations autorisees pour une mission. Les donnees de position et les changements d'etat restent controles par les regles metier.\n\n# Assistant conversationnel\n\nL'assistant comprend les demandes formulees naturellement, conserve le contexte utile et peut repondre a une question sans supprimer la tache en cours. Les expressions annuler, retour, plus tard et reprendre servent a piloter le parcours. Une action sensible, comme confirmer une commande ou modifier une donnee metier, reste soumise aux validations et autorisations de WhatAssoh.\n\n# Disponibilite des produits\n\nLa presence d'un produit dans le catalogue general ne garantit pas qu'une boutique active le propose actuellement. Pour repondre a une question sur les produits disponibles, WhatAssoh consulte les offres declarees disponibles par les boutiques actives.",
+  "source_type": "GUIDE",
+  "language": "fr",
+  "version": 1,
+  "namespace": "customer-help",
+  "audience": "PUBLIC",
+  "trust_level": "FIRST_PARTY",
+  "sensitivity": "PUBLIC",
+  "metadata": {
+    "owner": "whatassoh",
+    "reviewed": true
+  }
+}

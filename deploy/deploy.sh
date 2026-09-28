@@ -1232,6 +1232,15 @@ log "Application des migrations"
 
 MIGRATIONS_APPLIED=1
 
+log "Initialisation des checkpoints LangGraph"
+
+"${COMPOSE[@]}" run \
+    --rm \
+    --no-deps \
+    web \
+    python manage.py \
+    setup_agent_checkpoints
+
 
 # ==========================================================
 # 11. STATIC
@@ -1318,6 +1327,24 @@ fi
 
 log "Release applicative opérationnelle : web + worker + beat."
 log "Django répond correctement en local."
+
+log "Ingestion de la documentation WhatAssoh"
+
+"${COMPOSE[@]}" run \
+    --rm \
+    --no-deps \
+    web \
+    python manage.py \
+    knowledge_ingest \
+    --file knowledge/customer-help/whatassoh-platform-fr.v1.json \
+    --fail-on-quarantine
+
+"${COMPOSE[@]}" run \
+    --rm \
+    --no-deps \
+    web \
+    python manage.py \
+    knowledge_status
 
 TMP_NGINX=""
 

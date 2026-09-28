@@ -17,6 +17,7 @@ from apps.messaging.application.reliable_pipeline import (
     claim_outbox,
     enqueue_inbound_turn,
     process_claimed_inbox,
+    record_inbox_failure,
 )
 from apps.messaging.application.services import (
     create_channel_identity,
@@ -127,6 +128,55 @@ def test_processing_commits_response_intent_and_turn_together(monkeypatch):
     assert outbox.status == OutboxStatus.PENDING
     assert outbox.sequence == item.sequence
     assert outbox.idempotency_key == f"conversation-response:{item.id}"
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(CONVERSATION_INBOX_MAX_ATTEMPTS=1)
+def test_terminal_inbox_failure_sends_contextual_message_after_retry_budget(
+    monkeypatch,
+):
+    from apps.ai.domain.exceptions import AITemporaryError
+    from apps.conversations.domain.context import (
+        ActiveJourney,
+        ConversationContext,
+        ConversationFlow,
+        SellerOnboardingDraft,
+        SellerOnboardingStage,
+    )
+
+    monkeypatch.setattr(
+        "apps.messaging.tasks.drain_conversation_inbox.delay", lambda *_args: None
+    )
+    queued = []
+    monkeypatch.setattr(
+        "apps.messaging.tasks.deliver_conversation_outbox.delay",
+        lambda *args: queued.append(args),
+    )
+    conversation = make_conversation()
+    conversation.context = ConversationContext(
+        active_journey=ActiveJourney.SELL,
+        flow=ConversationFlow.SELLER_ONBOARDING,
+        seller_onboarding=SellerOnboardingDraft(
+            stage=SellerOnboardingStage.LOCATION,
+            store_name="Chez Louis",
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    item = enqueue(conversation, 1)
+    following = enqueue(conversation, 2)
+    assert claim_inbox(following.id) is None
+    token = claim_inbox(item.id)
+
+    status = record_inbox_failure(item.id, token, AITemporaryError("provider down"))
+
+    item.refresh_from_db()
+    outbox = ConversationOutboxItem.objects.get(inbox_item=item)
+    assert status == InboxStatus.DEAD_LETTER
+    assert item.status == InboxStatus.DEAD_LETTER
+    assert "création de votre boutique reste enregistrée" in outbox.payload["text"]
+    assert "Je n’arrive pas à traiter votre demande" not in outbox.payload["text"]
+    assert claim_inbox(following.id) is not None
+    assert len(queued) == 1
 
 
 @pytest.mark.django_db(transaction=True)

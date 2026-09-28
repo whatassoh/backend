@@ -449,6 +449,13 @@ def _register_extended_read_tools(registry):
             _list_product_categories,
         ),
         (
+            "list_marketplace_products",
+            "List products currently declared available by active stores.",
+            EMPTY_SCHEMA,
+            "catalog.read",
+            _list_marketplace_products,
+        ),
+        (
             "get_product_details",
             "Read an active product and its active variants after product search.",
             _uuid_schema("product_id"),
@@ -726,6 +733,23 @@ def _list_product_categories(context):
                 }
                 for category in categories
             ]
+        },
+    )
+
+
+def _list_marketplace_products(context):
+    from apps.catalog.application.selectors import get_marketplace_available_products
+
+    queryset = get_marketplace_available_products().order_by("name")
+    total = queryset.count()
+    return ToolResult(
+        "OK" if total else "NOT_FOUND",
+        {
+            "count": total,
+            "products": [
+                {"id": str(product.id), "name": product.name}
+                for product in queryset[:20]
+            ],
         },
     )
 

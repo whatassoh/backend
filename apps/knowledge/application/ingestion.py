@@ -120,6 +120,7 @@ class KnowledgeIngestionService:
         )
         valid_from, valid_until = self._validity(source_input)
         digest = hashlib.sha256(normalized.encode()).hexdigest()
+        grants = self._grants(source_input.grants)
         self._lock_source_family(source_input.namespace, source_input.key)
         current_active = (
             KnowledgeSource.objects.select_for_update()
@@ -135,6 +136,23 @@ class KnowledgeIngestionService:
             raise KnowledgeValidationError(
                 "An older knowledge version cannot replace the active version."
             )
+        if current_active and self._matches_active_source(
+            current_active,
+            source_input=source_input,
+            normalized_title=normalized_title,
+            digest=digest,
+            status=status,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            metadata=metadata,
+            security_report=report.as_dict(),
+            grants=grants,
+        ):
+            observe_ingestion(
+                status=current_active.status,
+                source_type=current_active.source_type,
+            )
+            return current_active
         if (
             current_active
             and current_active.version == source_input.version
@@ -174,7 +192,6 @@ class KnowledgeIngestionService:
             },
         )
         source.access_grants.all().delete()
-        grants = self._grants(source_input.grants)
         KnowledgeAccessGrant.objects.bulk_create(
             [
                 KnowledgeAccessGrant(
@@ -216,6 +233,46 @@ class KnowledgeIngestionService:
         transaction.on_commit(lambda: bump_corpus_revision(source.namespace))
         observe_ingestion(status=status, source_type=source.source_type)
         return source
+
+    @staticmethod
+    def _matches_active_source(
+        source,
+        *,
+        source_input,
+        normalized_title,
+        digest,
+        status,
+        valid_from,
+        valid_until,
+        metadata,
+        security_report,
+        grants,
+    ) -> bool:
+        """Keep indexed chunks intact when deployment replays identical input."""
+
+        expected_grants = {
+            (grant.principal_type, grant.principal_id) for grant in grants
+        }
+        persisted_grants = set(
+            source.access_grants.values_list("principal_type", "principal_id")
+        )
+        return (
+            source.version == source_input.version
+            and source.status == status == KnowledgeSourceStatus.ACTIVE
+            and source.title == normalized_title
+            and source.content_hash == digest
+            and source.canonical_url == (source_input.canonical_url or None)
+            and source.source_type == source_input.source_type
+            and source.language == source_input.language.lower().replace("_", "-")[:10]
+            and source.audience == source_input.audience
+            and source.trust_level == source_input.trust_level
+            and source.sensitivity == source_input.sensitivity
+            and source.valid_from == valid_from
+            and source.valid_until == valid_until
+            and source.metadata == metadata
+            and source.security_report == security_report
+            and persisted_grants == expected_grants
+        )
 
     @staticmethod
     def _validate(source_input: KnowledgeSourceInput) -> str:

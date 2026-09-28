@@ -37,6 +37,32 @@ def test_ingestion_replaces_chunks_without_duplication():
 
 
 @pytest.mark.django_db
+def test_identical_ingestion_preserves_existing_chunks():
+    service = KnowledgeIngestionService()
+    source = service.ingest(
+        KnowledgeSourceInput(
+            key="platform-help",
+            title="Aide plateforme",
+            source_type="GUIDE",
+            content="WhatAssoh relie les clients et les boutiques.",
+        )
+    )
+    chunk_ids = list(source.chunks.values_list("id", flat=True))
+
+    replayed = service.ingest(
+        KnowledgeSourceInput(
+            key="platform-help",
+            title="Aide plateforme",
+            source_type="GUIDE",
+            content="WhatAssoh relie les clients et les boutiques.",
+        )
+    )
+
+    assert replayed.pk == source.pk
+    assert list(replayed.chunks.values_list("id", flat=True)) == chunk_ids
+
+
+@pytest.mark.django_db
 def test_new_version_deactivates_previous_version():
     service = KnowledgeIngestionService()
     old = service.ingest(

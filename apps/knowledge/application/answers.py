@@ -50,7 +50,6 @@ ANSWER_SCHEMA = {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 3,
-                        "uniqueItems": True,
                         "items": {"type": "string"},
                     },
                     "evidence_quote": {
