@@ -1,8 +1,15 @@
 from decimal import Decimal
 
 import pytest
+from django.contrib.gis.geos import Point
 
 from apps.ai.domain.understanding import MessageIntent, UserMessageUnderstanding
+from apps.catalog.application.services import (
+    add_product_to_store,
+    create_category,
+    create_product,
+)
+from apps.catalog.domain.enums import ProductAvailability
 from apps.conversations.application.interruptions import (
     UniversalCommand,
     detect_universal_command,
@@ -29,6 +36,7 @@ from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.dtos import NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
+from apps.stores.application.services import create_store
 from apps.stores.infrastructure.models import Store
 
 
@@ -186,6 +194,55 @@ def test_natural_cancel_sentence_cancels_the_contextual_task():
     assert "Aucune boutique n'a été créée" in outcome.response.text
     assert context.seller_onboarding is None
     assert not Store.objects.exists()
+
+
+@pytest.mark.django_db
+def test_catalog_question_reads_live_products_without_consuming_seller_onboarding():
+    convo = conversation()
+    original = ConversationContext(
+        active_journey=ActiveJourney.SELL,
+        flow=ConversationFlow.SELLER_ONBOARDING,
+        seller_onboarding=SellerOnboardingDraft(
+            stage=SellerOnboardingStage.LOCATION,
+            store_name="Chez Louis",
+        ),
+    )
+    convo.context = original.to_payload()
+    convo.save(update_fields=["context", "updated_at"])
+    store = create_store(
+        name="Boutique active",
+        location=Point(9.7, 4.05, srid=4326),
+        city="Douala",
+    )
+    product = create_product(
+        name="Riz parfumé",
+        category=create_category(name="Alimentation"),
+    )
+    add_product_to_store(
+        store=store,
+        product=product,
+        availability_status=ProductAvailability.AVAILABLE,
+    )
+    understanding = UnderstandingQueue(
+        UserMessageUnderstanding(
+            intent=MessageIntent.CATALOG_BROWSE,
+            confidence=Decimal(".99"),
+        )
+    )
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=understanding
+    ).process_message(
+        convo,
+        message("Est-ce qu'il y a déjà des produits disponibles ?"),
+    )
+
+    convo.refresh_from_db()
+    assert "Riz parfumé" in outcome.response.text
+    assert outcome.metadata["authoritative"] is True
+    assert ConversationContext.from_payload(convo.context).seller_onboarding == (
+        original.seller_onboarding
+    )
 
 
 @pytest.mark.django_db

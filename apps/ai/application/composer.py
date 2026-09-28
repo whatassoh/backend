@@ -33,7 +33,6 @@ COMPOSER_SCHEMA = {
         "text": {"type": "string", "minLength": 1, "maxLength": 2000},
         "speech_acts": {
             "type": "array",
-            "uniqueItems": True,
             "items": {"type": "string", "enum": list(SPEECH_ACTS)},
         },
     },

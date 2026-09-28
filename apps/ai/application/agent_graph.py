@@ -35,6 +35,7 @@ def route_node(state: AgentGraphState):
         MessageIntent.PROVIDE_LOCATION,
         MessageIntent.ORDER_HISTORY,
         MessageIntent.ORDER_STATUS,
+        MessageIntent.CATALOG_BROWSE,
     }:
         route = AgentRoute.BUY
     elif intent in {MessageIntent.HELP, MessageIntent.OUT_OF_SCOPE}:
@@ -59,6 +60,8 @@ def plan_node(state: AgentGraphState):
         names = ["list_orders"]
     elif intent == MessageIntent.ORDER_STATUS:
         names = ["get_active_order"]
+    elif intent == MessageIntent.CATALOG_BROWSE:
+        names = ["list_marketplace_products"]
     elif route == AgentRoute.BUY:
         names = ["search_products"] if state.get("entities") else []
     elif route == AgentRoute.SELL:

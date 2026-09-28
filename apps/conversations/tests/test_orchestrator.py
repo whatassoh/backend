@@ -62,14 +62,14 @@ def test_greeting_does_not_create_order_or_call_catalog():
     assert context.processed == ["m-1"]
 
 
-def test_ai_failure_is_recoverable_and_not_marked_processed():
+def test_ai_failure_is_retried_by_the_inbox_and_not_marked_processed():
     context = ContextStub()
     orchestrator = ConversationalOrchestrator(
         understanding_service=UnderstandingStub(error=AITemporaryError("down")),
         context_service=context,
     )
-    outcome = orchestrator.process_message(SimpleNamespace(), message("Je veux du riz"))
-    assert outcome.status == ConversationalOutcomeStatus.RECOVERABLE_FAILURE
+    with pytest.raises(AITemporaryError, match="down"):
+        orchestrator.process_message(SimpleNamespace(), message("Je veux du riz"))
     assert context.processed == []
 
 

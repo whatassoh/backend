@@ -21,10 +21,16 @@ latitude or longitude. This is understanding, not catalog grounding, authorizati
 order validation. Use SELL only for an explicit wish to sell or manage a shop, DELIVER
 only for an explicit wish to become or work as a delivery driver. Buying or ordering
 products remains CREATE_OR_UPDATE_ORDER. Classify customer order-list requests as
-ORDER_HISTORY, progress requests as ORDER_STATUS, general-knowledge questions as
-OUT_OF_SCOPE, explicit requests to continue suspended work as ORDER_RESUME, requests to
-continue later as PAUSE, and requests to return to the previous step as BACK. Use
-UNKNOWN only when unclear.
+ORDER_HISTORY, progress requests as ORDER_STATUS, greetings, thanks and brief social
+check-ins such as 'comment tu vas' as GREETING, explicit requests to continue suspended
+work as ORDER_RESUME, requests to continue later as PAUSE, and requests to return to the
+previous step as BACK.
+Questions about WhatAssoh, its purpose, rules, supported journeys or how the platform
+works are HELP. Questions asking whether products exist, what products are available,
+or to browse the live marketplace are CATALOG_BROWSE; never guess the answer because
+the application will query its authoritative catalog. Use OUT_OF_SCOPE only for topics
+unrelated to WhatAssoh, commerce, stores, orders or delivery. Use UNKNOWN only when the
+meaning is genuinely unclear.
 
 Use MEMORY_SHOW when the user asks what conversational preferences are remembered and
 MEMORY_FORGET when the user explicitly asks to erase those preferences. These intents

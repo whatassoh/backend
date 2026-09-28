@@ -25,6 +25,7 @@ class MessageIntent(StrEnum):
     BACK = "BACK"
     MEMORY_SHOW = "MEMORY_SHOW"
     MEMORY_FORGET = "MEMORY_FORGET"
+    CATALOG_BROWSE = "CATALOG_BROWSE"
 
 
 class OrderAction(StrEnum):

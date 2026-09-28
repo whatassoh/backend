@@ -38,6 +38,18 @@ def test_bounded_route_plan_and_policy_for_cancellation(settings):
     assert state["policy_decision"] == "SHADOW_ONLY"
 
 
+def test_catalog_browse_plans_only_the_read_only_marketplace_tool(settings):
+    settings.AI_AGENT_MAX_PLAN_STEPS = 4
+    state = {"intent": MessageIntent.CATALOG_BROWSE.value, "plan": []}
+    state.update(route_node(state))
+    state.update(plan_node(state))
+    state.update(policy_node(state))
+
+    assert state["route"] == AgentRoute.BUY
+    assert state["plan"] == [{"tool": "list_marketplace_products", "arguments": {}}]
+    assert state["risk_level"] == "R1"
+
+
 def test_shadow_registry_rejects_every_mutating_tool():
     registry = build_business_tool_registry()
     context = ToolContext(user=object(), conversation=object(), shadow_mode=True)

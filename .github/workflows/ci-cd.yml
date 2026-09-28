@@ -20,19 +20,6 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      postgres:
-        image: postgis/postgis:17-3.5
-        env:
-          POSTGRES_DB: whatassoh_test
-          POSTGRES_USER: whatassoh
-          POSTGRES_PASSWORD: test-password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U whatassoh -d whatassoh_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
       redis:
         image: redis:7-alpine
         ports:
@@ -59,6 +46,55 @@ jobs:
       - name: Récupérer le code
         uses: actions/checkout@v4
 
+      - name: Construire et démarrer PostgreSQL de test
+        run: |
+          docker build \
+            --file docker/postgres/Dockerfile \
+            --tag whatassoh-postgres:ci \
+            .
+
+          docker run --detach \
+            --name whatassoh-postgres-ci \
+            --publish 5432:5432 \
+            --env POSTGRES_DB="$POSTGRES_DB" \
+            --env POSTGRES_USER="$POSTGRES_USER" \
+            --env POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --health-cmd "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            whatassoh-postgres:ci
+
+          for attempt in {1..30}; do
+            status="$(docker inspect \
+              --format='{{.State.Health.Status}}' \
+              whatassoh-postgres-ci)"
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              docker logs whatassoh-postgres-ci
+              exit 1
+            fi
+            sleep 2
+          done
+
+          test "$(docker inspect \
+            --format='{{.State.Health.Status}}' \
+            whatassoh-postgres-ci)" = "healthy"
+
+          docker exec whatassoh-postgres-ci \
+            psql -v ON_ERROR_STOP=1 \
+            -U "$POSTGRES_USER" \
+            -d "$POSTGRES_DB" \
+            -c 'CREATE EXTENSION IF NOT EXISTS postgis; CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;'
+
+          docker exec whatassoh-postgres-ci \
+            psql -v ON_ERROR_STOP=1 \
+            -U "$POSTGRES_USER" \
+            -d "$POSTGRES_DB" \
+            -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('postgis', 'pg_trgm', 'vector') ORDER BY extname;"
+
       - name: Installer Python
         uses: actions/setup-python@v5
         with:
@@ -79,6 +115,10 @@ jobs:
 
       - name: Exécuter les tests
         run: pytest
+
+      - name: Afficher les journaux PostgreSQL en cas d'échec
+        if: failure()
+        run: docker logs whatassoh-postgres-ci || true
 
   deploy:
     name: Déployer en production

@@ -17,6 +17,7 @@ from apps.conversations.application.observability import (
 )
 from apps.ai.domain.understanding import ExtractedItem, MessageIntent, OrderAction
 from apps.catalog.application.grounding import CatalogGroundingService
+from apps.catalog.application.selectors import get_marketplace_available_products
 from apps.conversations.application.active_orders import ActiveCustomerOrderService
 from apps.conversations.application.capabilities import (
     NOT_IMPLEMENTED_RESPONSES,
@@ -201,19 +202,16 @@ class ConversationalOrchestrator:
             outcome = self._process(conversation, context, message, correlation_id)
         except AIError as exc:
             observe_ai_failure(channel=message.channel, error=exc)
-            outcome = self._outcome(
-                ConversationalOutcomeStatus.RECOVERABLE_FAILURE,
-                "Je n’arrive pas à traiter votre demande pour le moment. Réessayez.",
-                context,
+            logger.warning(
+                "conversation_ai_processing_failed",
+                extra={
+                    "correlation_id": correlation_id,
+                    "channel": message.channel,
+                    "error_category": exc.__class__.__name__,
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                },
             )
-            observe_decision(
-                conversation=conversation,
-                message=message,
-                outcome=outcome,
-                flow_before=flow_before,
-                timer=timer,
-            )
-            return outcome
+            raise
         except Exception:
             logger.exception(
                 "conversation_orchestration_unexpected",
@@ -395,6 +393,8 @@ class ConversationalOrchestrator:
             return self._back_current_task(conversation, context)
         if understanding.intent == MessageIntent.ORDER_HISTORY:
             return self._order_history_outcome(conversation, context)
+        if understanding.intent == MessageIntent.CATALOG_BROWSE:
+            return self._catalog_availability_outcome(context)
         if understanding.intent == MessageIntent.HELP:
             return self._handle_knowledge_or_unknown(
                 conversation,
@@ -2169,6 +2169,38 @@ class ConversationalOrchestrator:
             },
         )
 
+    def _catalog_availability_outcome(self, context):
+        products = get_marketplace_available_products().order_by("name")
+        total = products.count()
+        names = list(products.values_list("name", flat=True)[:8])
+        if not names:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Je viens de vérifier le catalogue : aucun produit n'est déclaré "
+                "disponible par une boutique active pour le moment.",
+                context,
+                metadata={
+                    "capability": "catalog_browse",
+                    "authoritative": True,
+                    "product_count": 0,
+                },
+            )
+        preview = ", ".join(names)
+        remainder = total - len(names)
+        suffix = f", ainsi que {remainder} autre(s) produit(s)" if remainder else ""
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Oui. Je viens de vérifier le catalogue : {total} produit(s) sont "
+            f"actuellement disponibles, notamment {preview}{suffix}. "
+            "Dites-moi ce que vous recherchez et je vérifierai les correspondances.",
+            context,
+            metadata={
+                "capability": "catalog_browse",
+                "authoritative": True,
+                "product_count": total,
+            },
+        )
+
     @staticmethod
     def _has_pending_task(context):
         return has_resumable_work(context)
@@ -2236,6 +2268,7 @@ class ConversationalOrchestrator:
                 MessageIntent.CREATE_OR_UPDATE_ORDER,
                 MessageIntent.MEMORY_SHOW,
                 MessageIntent.MEMORY_FORGET,
+                MessageIntent.CATALOG_BROWSE,
             }
         )
         if not is_universal:
@@ -2260,6 +2293,8 @@ class ConversationalOrchestrator:
             )
         if understanding.intent == MessageIntent.ORDER_HISTORY:
             return self._order_history_outcome(conversation, context)
+        if understanding.intent == MessageIntent.CATALOG_BROWSE:
+            return self._catalog_availability_outcome(context)
         if understanding.intent == MessageIntent.MEMORY_SHOW:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:

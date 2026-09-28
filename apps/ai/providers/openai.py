@@ -45,12 +45,13 @@ class OpenAIProvider(AIProvider):
     def generate_structured(
         self, request: AIStructuredRequest
     ) -> AIStructuredResult[dict]:
+        response_format = _response_format(request)
         try:
             response = self.client.responses.create(
                 model=settings.AI_MODEL,
                 instructions=request.system_instructions,
                 input=_build_input(request),
-                text={"format": _response_format(request)},
+                text={"format": response_format},
                 timeout=settings.AI_TIMEOUT_SECONDS,
                 store=False,
             )
@@ -90,8 +91,65 @@ def _build_input(request: AIStructuredRequest) -> str:
 
 def _response_format(request: AIStructuredRequest) -> dict[str, Any]:
     schema = dict(request.response_schema)
+    _validate_strict_schema(schema)
     name = schema.get("title") or request.task_name.replace("-", "_")[:64]
     return {"type": "json_schema", "name": name, "schema": schema, "strict": True}
+
+
+def _validate_strict_schema(schema: dict[str, Any], path: str = "$") -> None:
+    """Fail locally when a schema cannot satisfy OpenAI strict outputs."""
+
+    unsupported = {
+        "allOf",
+        "not",
+        "dependentRequired",
+        "dependentSchemas",
+        "if",
+        "then",
+        "else",
+        "unevaluatedProperties",
+        "propertyNames",
+        "minProperties",
+        "maxProperties",
+        "unevaluatedItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "uniqueItems",
+    }
+    invalid_keywords = sorted(unsupported.intersection(schema))
+    if invalid_keywords:
+        raise AIConfigurationError(
+            f"Strict schema {path} uses unsupported keywords: {invalid_keywords}."
+        )
+
+    node_type = schema.get("type")
+    is_object = node_type == "object" or (
+        isinstance(node_type, list) and "object" in node_type
+    )
+    if is_object:
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if schema.get("additionalProperties") is not False:
+            raise AIConfigurationError(
+                f"Strict schema object {path} must forbid additional properties."
+            )
+        if set(required) != set(properties):
+            missing = sorted(set(properties) - set(required))
+            unknown = sorted(set(required) - set(properties))
+            raise AIConfigurationError(
+                f"Strict schema object {path} has inconsistent required fields "
+                f"(missing={missing}, unknown={unknown})."
+            )
+        for name, child in properties.items():
+            if isinstance(child, dict):
+                _validate_strict_schema(child, f"{path}.{name}")
+    if node_type == "array" and isinstance(schema.get("items"), dict):
+        _validate_strict_schema(schema["items"], f"{path}[]")
+    for keyword in ("anyOf", "oneOf"):
+        for index, child in enumerate(schema.get(keyword, ())):
+            if isinstance(child, dict):
+                _validate_strict_schema(child, f"{path}.{keyword}[{index}]")
 
 
 def _usage_from_response(usage: Any) -> AIUsage | None:
