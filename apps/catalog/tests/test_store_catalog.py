@@ -272,8 +272,6 @@ def test_marketplace_available_products_uses_live_store_catalog_state():
     inactive_store_product = create_test_product("Huile")
     active_store = create_test_store("Active")
     inactive_store = create_test_store("Inactive")
-    inactive_store.status = StoreStatus.INACTIVE
-    inactive_store.save(update_fields=["status", "updated_at"])
     add_product_to_store(
         store=active_store,
         product=available,
@@ -289,6 +287,11 @@ def test_marketplace_available_products_uses_live_store_catalog_state():
         product=inactive_store_product,
         availability_status=ProductAvailability.AVAILABLE,
     )
+    # Catalog entries are created while the store is active, then retained as
+    # historical data after deactivation.  Marketplace visibility is governed
+    # by the live store state, not by deleting the StoreProduct relationship.
+    inactive_store.status = StoreStatus.INACTIVE
+    inactive_store.save(update_fields=["status", "updated_at"])
 
     assert list(get_marketplace_available_products()) == [available]
 

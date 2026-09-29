@@ -91,6 +91,7 @@ class ExtractedItem:
     requested_name: str
     quantity: Decimal | None = None
     unit: ExtractedUnit | None = None
+    variant_hint: str | None = None
     notes: str | None = None
 
 
@@ -196,6 +197,7 @@ def _parse_item(data: dict[str, Any]) -> ExtractedItem:
         requested_name=data["requested_name"].strip(),
         quantity=parsed_quantity,
         unit=unit,
+        variant_hint=_optional_text(data.get("variant_hint")),
         notes=data.get("notes"),
     )
 

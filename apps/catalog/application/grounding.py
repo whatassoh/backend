@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass
 from time import monotonic
 
@@ -237,6 +238,13 @@ class CatalogGroundingService:
         started = monotonic()
         candidates = self.retriever.retrieve(item.requested_name)
         resolution = self.resolver.resolve(item.requested_name, candidates)
+        if (
+            item.variant_hint
+            and resolution.status == OrderItemResolutionStatus.AMBIGUOUS
+            and resolution.reason == CatalogResolutionReason.VARIANT_SELECTION_REQUIRED
+            and candidates
+        ):
+            resolution = self._resolve_variant(item, candidates[0], resolution)
         logger.info(
             "catalog_item_grounded",
             extra={
@@ -249,6 +257,50 @@ class CatalogGroundingService:
             },
         )
         return resolution
+
+    @staticmethod
+    def _resolve_variant(item, product_candidate, base_resolution):
+        variants = list(
+            ProductVariant.objects.filter(
+                product_id=product_candidate.product_id,
+                status=ProductVariantStatus.ACTIVE,
+            ).order_by("normalized_name", "id")
+        )
+        hint = _normalize_variant_hint(item.variant_hint)
+        matches = [
+            variant for variant in variants
+            if _variant_hint_matches(hint, _normalize_variant_hint(variant.name))
+        ]
+        candidates = tuple(
+            CatalogCandidate(
+                product_id=product_candidate.product_id,
+                variant_id=variant.id,
+                canonical_name=f"{product_candidate.canonical_name} — {variant.name}",
+                matched_on=CatalogMatchStrategy.EXACT_VARIANT,
+                score=1.0,
+                metadata={"variant_label": variant.name},
+            )
+            for variant in variants
+        )
+        if len(matches) == 1:
+            return CatalogResolution(
+                status=OrderItemResolutionStatus.MATCHED,
+                requested_name=item.requested_name,
+                product_id=product_candidate.product_id,
+                variant_id=matches[0].id,
+                candidates=candidates,
+                reason=CatalogResolutionReason.EXACT_MATCH,
+                score=base_resolution.score,
+            )
+        return CatalogResolution(
+            status=OrderItemResolutionStatus.UNMATCHED,
+            requested_name=item.requested_name,
+            product_id=product_candidate.product_id,
+            variant_id=None,
+            candidates=candidates,
+            reason=CatalogResolutionReason.VARIANT_NOT_FOUND,
+            score=base_resolution.score,
+        )
 
     def ground_items(self, items: tuple[ExtractedItem, ...]) -> list[CatalogResolution]:
         return [self.ground_item(item) for item in items]
@@ -274,3 +326,37 @@ def _deduplicate_and_limit(candidates, limit):
     return sorted(
         unique.values(), key=lambda c: (-c.score, c.canonical_name, str(c.product_id))
     )[:limit]
+
+
+def _normalize_variant_hint(value: str | None) -> str:
+    """Small deterministic equivalence for catalogue variant labels."""
+    normalized = (value or "").casefold()
+    normalized = re.sub(r"(\d)\s*(millilitres?|ml)\b", r"\1 ml", normalized)
+    normalized = re.sub(r"(\d)\s*(litres?|l)\b", r"\1 l", normalized)
+    normalized = re.sub(r"(\d)\s*(kilogrammes?|kgs?|kg)\b", r"\1 kg", normalized)
+    normalized = normalize_product_name(normalized)
+    normalized = normalized.replace("litres", "l").replace("litre", "l")
+    normalized = normalized.replace("kilogrammes", "kg").replace("kilogramme", "kg")
+    normalized = normalized.replace("millilitres", "ml").replace("millilitre", "ml")
+    normalized = normalized.replace("taille", "size")
+    return " ".join(normalized.split())
+
+
+def _variant_hint_matches(hint: str, variant_name: str) -> bool:
+    """Match a short normalized format against a real product variant only."""
+    if not hint:
+        return False
+    compact_hint = re.sub(r"[^a-z0-9]", "", hint)
+    compact_variant = re.sub(r"[^a-z0-9]", "", variant_name)
+    if hint == variant_name or compact_hint == compact_variant:
+        return True
+    # Packaging words are catalogue presentation, not part of the requested
+    # format: ``5kg`` must resolve ``Sac 5 kg``.
+    hint_measure = re.search(r"\d+\s*(?:ml|l|kg)\b", hint)
+    variant_measure = re.search(r"\d+\s*(?:ml|l|kg)\b", variant_name)
+    return bool(
+        hint_measure
+        and variant_measure
+        and hint_measure.group().replace(" ", "")
+        == variant_measure.group().replace(" ", "")
+    )

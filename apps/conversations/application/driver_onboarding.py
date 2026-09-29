@@ -124,7 +124,7 @@ class DriverOnboardingService:
         self._audit("driver_onboarding_cancelled", conversation)
         return DriverOnboardingOutcome(
             status=DriverOnboardingStatus.CANCELLED,
-            text="Création du profil livreur annulée. Aucun profil n'a été créé.",
+            text="La création de votre profil livreur a été annulée. Aucun profil n'a été créé.",
             metadata={"driver_onboarding": True, "task_cancelled": True},
         )
 

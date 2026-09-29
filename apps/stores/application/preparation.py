@@ -2,6 +2,7 @@
 
 import logging
 from enum import StrEnum
+from uuid import UUID
 
 from django.db import transaction
 
@@ -17,6 +18,36 @@ from apps.stores.infrastructure.models import StoreOffer
 from common.events import publish
 
 logger = logging.getLogger(__name__)
+
+STORE_ORDER_ACTIONS = (
+    "store_order.start_preparation",
+    "store_order.mark_ready",
+)
+STORE_ORDER_CALLBACK_ALIASES = {
+    "store_order.start_preparation": "store_order.start",
+    "store_order.mark_ready": "store_order.ready",
+}
+STORE_ORDER_CALLBACK_ACTIONS = {
+    callback_id: action_id
+    for action_id, callback_id in STORE_ORDER_CALLBACK_ALIASES.items()
+}
+
+
+def encode_store_order_action(action_id: str, order_id) -> str:
+    if action_id not in STORE_ORDER_ACTIONS:
+        raise ValueError("Unsupported store order action.")
+    return f"{STORE_ORDER_CALLBACK_ALIASES[action_id]}:{UUID(str(order_id))}"
+
+
+def decode_store_order_action(callback_id: str) -> tuple[str, UUID] | None:
+    action_id, separator, raw_order_id = (callback_id or "").partition(":")
+    canonical_action = STORE_ORDER_CALLBACK_ACTIONS.get(action_id)
+    if not separator or canonical_action is None:
+        return None
+    try:
+        return canonical_action, UUID(raw_order_id)
+    except (ValueError, AttributeError):
+        return None
 
 
 class StorePreparationResult(StrEnum):
@@ -48,12 +79,17 @@ class StorePreparationService:
 
     def available_order_for(self, *, actor, target):
         """Resolve a chat button without accepting a store id from its payload."""
+        orders = self.available_orders_for(actor=actor, target=target)
+        return orders[0].id if len(orders) == 1 else None
+
+    def available_orders_for(self, *, actor, target):
+        """List authorized candidates for text-action clarification."""
         statuses = [OrderStatus.STORE_ACCEPTED] if target == OrderStatus.PREPARING else [OrderStatus.PREPARING]
         offers = StoreOffer.objects.filter(
             status=StoreOfferStatus.ACCEPTED, order__status__in=statuses
         ).select_related("order", "store")
         allowed = [offer for offer in offers if self.authorization_policy.can_view_offer(actor, offer)]
-        return allowed[0].order_id if len(allowed) == 1 else None
+        return tuple(offer.order for offer in allowed)
 
     def _transition(self, *, actor, order_id, target, correlation_id):
         with transaction.atomic():

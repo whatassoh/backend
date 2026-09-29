@@ -309,7 +309,19 @@ class ActiveCustomerOrderService:
             actor=locked.user,
             correlation_id=correlation_id,
         )
-        self._detach_locked(locked, self._context(locked))
+        # Only clear order-scoped state.  A customer can also be preparing a
+        # seller catalogue or onboarding task, which must remain resumable.
+        context = self._context(locked)
+        metadata = dict(context.metadata)
+        metadata.pop("awaiting_delivery_instructions", None)
+        locked.context = replace(
+            context,
+            flow=ConversationFlow.IDLE,
+            active_order_id=None,
+            pending_clarification=None,
+            metadata=metadata,
+        ).to_payload()
+        locked.save(update_fields=["context", "updated_at"])
         self._trace("draft_abandoned", locked, order, correlation_id)
         return ActiveOrderDecision(
             status=ActiveOrderDecisionStatus.ABANDONED, order=order

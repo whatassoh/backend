@@ -26,13 +26,21 @@ class DriverMatchingOrchestrator:
             attempt, created = DriverMatchingAttempt.objects.select_for_update().get_or_create(
                 order=order, defaults={"strategy_version": self.matching_service.strategy_version}
             )
-            if not created:
+            resumable = (
+                not created
+                and attempt.status == DriverMatchingAttemptStatus.RUNNING
+                and order.status == OrderStatus.MATCHING_DRIVERS
+                and not attempt.candidate_snapshot
+                and not DriverOffer.objects.filter(order=order).exists()
+            )
+            if not created and not resumable:
                 return attempt
-            if order.status != OrderStatus.READY_FOR_PICKUP:
+            if created and order.status != OrderStatus.READY_FOR_PICKUP:
                 attempt.status = DriverMatchingAttemptStatus.CANCELLED
                 attempt.completed_at = timezone.now(); attempt.save(update_fields=["status", "completed_at", "updated_at"])
                 return attempt
-            start_driver_matching(order, correlation_id=correlation_id)
+            if created:
+                start_driver_matching(order, correlation_id=correlation_id)
         result = self.matching_service.find_candidates(order)
         with transaction.atomic():
             attempt = DriverMatchingAttempt.objects.select_for_update().get(pk=attempt.pk)

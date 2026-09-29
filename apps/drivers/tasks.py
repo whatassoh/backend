@@ -1,10 +1,35 @@
 from celery import shared_task
+from django.db import InterfaceError, OperationalError
 from django.utils import timezone
 
 from apps.drivers.domain.enums import DriverOfferNotificationStatus, DriverOfferStatus
 from apps.drivers.infrastructure.models import DriverOffer, DriverOfferNotification
-from apps.messaging.application.orchestration import send_conversation_text
+from apps.messaging.application.orchestration import send_conversation_interactive
 from common.async_tasks import WhatassohTask
+
+
+@shared_task(
+    bind=True,
+    base=WhatassohTask,
+    name="drivers.start_driver_matching",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    autoretry_for=(OperationalError, InterfaceError),
+    retry_backoff=True,
+    retry_jitter=True,
+)
+def start_driver_matching_for_order(self, order_id, correlation_id=None):
+    from apps.drivers.application.dispatch import DriverMatchingOrchestrator
+    from apps.orders.domain.enums import OrderStatus
+    from apps.orders.infrastructure.models import Order
+
+    order = Order.objects.filter(pk=order_id).only("id", "status").first()
+    if order is None:
+        return {"status": "NOOP", "reason": "ORDER_NOT_FOUND"}
+    if order.status not in {OrderStatus.READY_FOR_PICKUP, OrderStatus.MATCHING_DRIVERS}:
+        return {"status": "NOOP", "reason": f"ORDER_{order.status}"}
+    attempt = DriverMatchingOrchestrator().start_matching(order.id, correlation_id=correlation_id)
+    return {"status": "STARTED", "attempt_id": str(attempt.id), "attempt_status": attempt.status}
 
 
 @shared_task(bind=True, base=WhatassohTask, name="drivers.deliver_driver_offer_notification", acks_late=True, reject_on_worker_lost=True)
@@ -16,8 +41,47 @@ def deliver_driver_offer_notification(self, notification_id, correlation_id=None
     notification.status = DriverOfferNotificationStatus.SENDING; notification.save(update_fields=["status", "updated_at"])
     snapshot = notification.presentation_snapshot
     try:
-        # send_conversation_text enforces the WhatsApp service-window policy.
-        result = send_conversation_text(conversation=notification.conversation, text=f"Nouvelle livraison disponible\nRetrait : {snapshot.get('pickup_store_name', '')}\nRépondez avant {snapshot.get('expires_at', '')}.", metadata={"driver_offer_id": snapshot["offer_id"], "actions": snapshot["actions"]}, correlation_id=correlation_id)
+        text = (
+            f"Nouvelle livraison disponible\n\nCommande : {snapshot.get('order_reference', '')}"
+            f"\nRetrait : {snapshot.get('pickup_store_name', '')}"
+            f"\nRépondez avant {snapshot.get('expires_at', '')}."
+        )
+        metadata = {"driver_offer_id": snapshot["offer_id"], "actions": snapshot["actions"]}
+        actions = [
+            {"id": item["id"], "label": "Accepter" if item["action"].endswith("accept") else "Refuser"}
+            for item in snapshot["actions"]
+        ]
+        if notification.channel == "WHATSAPP":
+            from apps.whatsapp.application.outbound import (
+                send_whatsapp_interactive_reply_buttons,
+                send_whatsapp_template_to_conversation,
+            )
+            from apps.whatsapp.domain.dtos import WhatsAppReplyButton
+            from apps.whatsapp.domain.enums import WhatsAppOutboundDecision, WhatsAppTemplateKey
+            from apps.whatsapp.domain.outbound_policy import WhatsAppOutboundPolicy
+
+            if WhatsAppOutboundPolicy().decide(notification.conversation) == WhatsAppOutboundDecision.TEMPLATE_REQUIRED:
+                result = send_whatsapp_template_to_conversation(
+                    conversation=notification.conversation,
+                    template_key=WhatsAppTemplateKey.OPERATIONAL_ACTION_REQUIRED,
+                    body_parameters={"recipient_name": notification.recipient.first_name or "partenaire"},
+                    metadata=metadata,
+                )
+            else:
+                result = send_whatsapp_interactive_reply_buttons(
+                    conversation=notification.conversation,
+                    body=text,
+                    buttons=[WhatsAppReplyButton(action_id=item["id"], label=item["label"]) for item in actions],
+                    metadata=metadata,
+                )
+        else:
+            result = send_conversation_interactive(
+                conversation=notification.conversation,
+                text=text,
+                actions=actions,
+                metadata=metadata,
+                correlation_id=correlation_id,
+            )
     except Exception:
         notification.status = DriverOfferNotificationStatus.FAILED_RETRYABLE; notification.failed_at = timezone.now(); notification.save(update_fields=["status", "failed_at", "updated_at"]); raise
     notification.status = DriverOfferNotificationStatus.SENT; notification.sent_at = timezone.now(); notification.save(update_fields=["status", "sent_at", "updated_at"])
