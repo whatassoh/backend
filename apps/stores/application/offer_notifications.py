@@ -25,7 +25,11 @@ from apps.messaging.domain.exceptions import (
     MessagingRateLimitError,
     MessagingTemporaryError,
 )
-from apps.stores.application.offer_actions import StoreRecipientResolver, present_offer
+from apps.stores.application.offer_actions import (
+    StoreRecipientResolver,
+    encode_store_offer_action,
+    present_offer,
+)
 from apps.stores.domain.enums import (
     StoreOfferNotificationAttemptStatus,
     StoreOfferNotificationStatus,
@@ -196,7 +200,14 @@ class StoreOfferNotificationService:
             "offer_id": presentation.offer_id, "order_reference": presentation.order_reference,
             "items": list(presentation.items), "distance_meters": presentation.distance_meters,
             "expires_at": presentation.expires_at,
-            "actions": [{"id": action, "offer_id": presentation.offer_id} for action in presentation.available_actions],
+            "actions": [
+                {
+                    "action": action,
+                    "id": encode_store_offer_action(action, presentation.offer_id),
+                    "offer_id": presentation.offer_id,
+                }
+                for action in presentation.available_actions
+            ],
         }
 
     @transaction.atomic

@@ -1241,6 +1241,19 @@ log "Initialisation des checkpoints LangGraph"
     python manage.py \
     setup_agent_checkpoints
 
+# ----------------------------------------------------------
+# Seed des données initiales WhatAssoh
+# ----------------------------------------------------------
+
+log "Seed des données initiales WhatAssoh"
+
+"${COMPOSE[@]}" run \
+    --rm \
+    --no-deps \
+    web \
+    python manage.py \
+    seed_phase2
+
 
 # ==========================================================
 # 11. STATIC

@@ -78,7 +78,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["requested_name", "quantity", "unit", "notes"],
+                "required": ["requested_name", "quantity", "unit", "variant_hint", "notes"],
                 "properties": {
                     "requested_name": {"type": "string", "minLength": 1},
                     "quantity": {"type": ["number", "null"], "exclusiveMinimum": 0},
@@ -97,6 +97,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
                             None,
                         ],
                     },
+                    "variant_hint": {"type": ["string", "null"], "maxLength": 120},
                     "notes": {"type": ["string", "null"]},
                 },
             },
@@ -119,7 +120,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "replacement": {
             "type": ["object", "null"],
             "additionalProperties": False,
-            "required": ["requested_name", "quantity", "unit", "notes"],
+            "required": ["requested_name", "quantity", "unit", "variant_hint", "notes"],
             "properties": {
                 "requested_name": {"type": "string", "minLength": 1},
                 "quantity": {"type": ["number", "null"], "exclusiveMinimum": 0},
@@ -136,9 +137,10 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
                         "BAG",
                         "OTHER",
                         None,
-                    ],
-                },
-                "notes": {"type": ["string", "null"]},
+                        ],
+                    },
+                    "variant_hint": {"type": ["string", "null"], "maxLength": 120},
+                    "notes": {"type": ["string", "null"]},
             },
         },
     },

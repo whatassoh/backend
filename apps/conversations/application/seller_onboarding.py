@@ -183,6 +183,11 @@ class SellerOnboardingService:
         return SellerOnboardingOutcome(
             status=SellerOnboardingStatus.CANCELLED,
             text="Création de boutique annulée. Aucune boutique n'a été créée.",
+            actions=(
+                SellerOnboardingAction(action_id="journey.select.buy", label="Acheter"),
+                SellerOnboardingAction(action_id="journey.select.sell", label="Vendre"),
+                SellerOnboardingAction(action_id="journey.select.deliver", label="Livrer"),
+            ),
             metadata={"seller_onboarding": True, "task_cancelled": True},
         )
 

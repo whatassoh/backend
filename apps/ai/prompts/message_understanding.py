@@ -65,4 +65,13 @@ contains only the user's words, never an ID. REPLACE_ITEM requires target_refere
 replacement. MODIFY_QUANTITY requires target_reference and an item containing the
 requested quantity and/or unit. Never emit an order, item, product, variant, store, or
 driver ID.
+
+For every requested item, keep the ordered quantity distinct from a product variant.
+variant_hint is the textual catalogue characteristic (for example "1 L", "5 kg" or
+"Taille M"). Thus "2 huiles Mayor de 1L" means requested_name "Huile Mayor",
+quantity 2, unit BOTTLE when expressed or inferable, and variant_hint "1 L". "un sac
+de riz de 5kg" means quantity 1, unit BAG and variant_hint "5 kg". Never turn a format
+such as 1 L or 5 kg into the ordered quantity when a packaging word makes it a variant.
+If only "Huile Mayor 1L" is given, preserve variant_hint and leave quantity null unless
+the user explicitly supplied one.
 """

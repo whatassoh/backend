@@ -2,7 +2,12 @@ from decimal import Decimal
 
 import pytest
 
-from apps.ai.domain.understanding import MessageIntent, UserMessageUnderstanding
+from apps.ai.domain.understanding import (
+    ExtractedItem,
+    ExtractedUnit,
+    MessageIntent,
+    UserMessageUnderstanding,
+)
 from apps.conversations.application.journey import JourneyRoutingStatus
 from apps.conversations.application.orchestrator import (
     ConversationalOrchestrator,
@@ -539,6 +544,132 @@ def test_replayed_replacement_callback_is_idempotently_non_mutating():
 
 
 @pytest.mark.django_db
+def test_variant_callback_uses_variant_identity_and_preserves_quantity():
+    from apps.catalog.application.services import (
+        create_category,
+        create_product,
+        create_product_variant,
+    )
+    from apps.catalog.domain.enums import ProductUnit
+    from apps.conversations.domain.context import (
+        ClarificationKind,
+        PendingClarification,
+    )
+    from apps.orders.application.services import create_order_draft
+
+    conversation = make_conversation()
+    order = create_order_draft(customer=conversation.user)
+    product = create_product(name="Huile Mayor", category=create_category(name="Huiles"))
+    first = create_product_variant(product=product, name="500 ml")
+    chosen = create_product_variant(product=product, name="1 L")
+    conversation.context = ConversationContext(
+        active_order_id=str(order.id),
+        pending_clarification=PendingClarification(
+            kind=ClarificationKind.AMBIGUOUS_PRODUCT,
+            field="product",
+            candidate_ids=(str(first.id), str(chosen.id)),
+            metadata={
+                "operation": "ADD_ITEM", "selection": "variant",
+                "item": {
+                    "requested_name": "Huile Mayor", "quantity": "2",
+                    "unit": "BOTTLE", "variant_hint": None, "notes": None,
+                },
+            },
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+
+    result = ConversationalOrchestrator(understanding_service=UnderstandingStub()).process_message(
+        conversation, inbound(action_id=f"clarification.select_variant.{chosen.id}")
+    )
+
+    item = order.items.get()
+    assert item.product_id == product.id
+    assert item.product_variant_id == chosen.id
+    assert item.quantity == 2
+    assert result.actions_performed == ("order_item_added",)
+
+
+@pytest.mark.django_db
+def test_variant_replacement_callback_is_idempotent_and_keeps_original_target():
+    from apps.catalog.application.services import create_category, create_product, create_product_variant
+    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.orders.application.services import add_order_item, create_order_draft
+
+    conversation = make_conversation()
+    order = create_order_draft(customer=conversation.user)
+    rice = add_order_item(order=order, requested_name="Riz", quantity=1, unit="BAG")
+    product = create_product(name="Huile Mayor", category=create_category(name="Remplacement"))
+    other = create_product_variant(product=product, name="500 ml")
+    chosen = create_product_variant(product=product, name="1 L")
+    conversation.context = ConversationContext(
+        active_order_id=str(order.id),
+        pending_clarification=PendingClarification(
+            kind=ClarificationKind.AMBIGUOUS_PRODUCT, field="product",
+            candidate_ids=(str(other.id), str(chosen.id)),
+            metadata={"operation": "UNMATCHED_ITEM_REPLACE", "selection": "variant",
+                      "target_order_item_id": str(rice.id),
+                      "replacement": {"requested_name": "Huile Mayor", "quantity": "2", "unit": "BOTTLE", "variant_hint": None, "notes": None}},
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    app = ConversationalOrchestrator(understanding_service=UnderstandingStub())
+    first = app.process_message(conversation, inbound(action_id=f"clarification.select_variant.{chosen.id}", message_id="variant-replace"))
+    conversation.refresh_from_db()
+    stale = app.process_message(conversation, inbound(action_id=f"clarification.select_variant.{other.id}", message_id="variant-stale"))
+    rice.refresh_from_db()
+    assert (rice.product_id, rice.product_variant_id, rice.quantity) == (product.id, chosen.id, 2)
+    assert order.items.count() == 1
+    assert first.actions_performed == ("order_item_replaced",)
+    assert stale.status == ConversationalOutcomeStatus.REJECTED
+
+
+@pytest.mark.django_db
+def test_conversation_persists_each_product_variant_in_a_complete_multi_item_request():
+    """A fully specified multi-item request must not need a clarification."""
+    from apps.catalog.application.services import (
+        create_category,
+        create_product,
+        create_product_variant,
+    )
+    from apps.catalog.domain.enums import ProductUnit
+
+    category = create_category(name="Epicerie variantes")
+    mayor = create_product(name="Huile Mayor", category=category, default_unit=ProductUnit.BOTTLE)
+    create_product_variant(product=mayor, name="500 ml")
+    mayor_one_litre = create_product_variant(product=mayor, name="1 L")
+    rice = create_product(name="Riz", category=category, default_unit=ProductUnit.BAG)
+    rice_five_kg = create_product_variant(product=rice, name="Sac 5 kg")
+    create_product_variant(product=rice, name="Sac 25 kg")
+    from apps.catalog.application.grounding import CatalogGroundingService
+    from apps.catalog.application.grounding import _normalize_variant_hint, _variant_hint_matches
+    assert _variant_hint_matches(_normalize_variant_hint("5kg"), _normalize_variant_hint("Sac 5 kg"))
+    assert CatalogGroundingService().ground_item(
+        ExtractedItem(requested_name="Riz", quantity=Decimal("1"), unit=ExtractedUnit.BAG, variant_hint="5kg")
+    ).variant_id == rice_five_kg.id
+    conversation = make_conversation()
+    understanding = UserMessageUnderstanding(
+        intent=MessageIntent.CREATE_OR_UPDATE_ORDER, confidence=Decimal(".99"),
+        items=(
+            ExtractedItem(requested_name="Huile Mayor", quantity=Decimal("2"), unit=ExtractedUnit.BOTTLE, variant_hint="1L"),
+            ExtractedItem(requested_name="Riz", quantity=Decimal("1"), unit=ExtractedUnit.BAG, variant_hint="5kg"),
+        ),
+    )
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=UnderstandingStub(understanding)
+    ).process_message(conversation, inbound(text="Je veux 2 huiles Mayor de 1L et un sac de riz de 5kg"))
+
+    order = Order.objects.get(customer=conversation.user)
+    lines = {line.product_id: line for line in order.items.all()}
+    # The next step may be delivery location, but neither item requires a
+    # product/variant clarification.
+    assert "format" not in outcome.response.text.casefold()
+    assert (lines[mayor.id].product_variant_id, lines[mayor.id].quantity, lines[mayor.id].resolution_status) == (mayor_one_litre.id, 2, "MATCHED")
+    assert (lines[rice.id].product_variant_id, lines[rice.id].quantity, lines[rice.id].resolution_status) == (rice_five_kg.id, 1, "MATCHED")
+
+
+@pytest.mark.django_db
 def test_replacement_callback_with_deleted_target_is_safe():
     from apps.catalog.application.services import create_category, create_product
     from apps.conversations.domain.context import (
@@ -586,3 +717,101 @@ def test_replacement_callback_with_deleted_target_is_safe():
     )
     assert outcome.status == ConversationalOutcomeStatus.REJECTED
     assert order.items.count() == 0
+
+
+@pytest.mark.django_db
+def test_unmatched_replacement_keeps_target_and_merges_slots_progressively():
+    from apps.catalog.application.services import create_category, create_product
+    from apps.catalog.domain.grounding import (
+        CatalogResolution,
+        CatalogResolutionReason,
+    )
+    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.orders.application.services import add_order_item, create_order_draft
+    from apps.orders.domain.enums import OrderItemResolutionStatus
+
+    conversation = make_conversation()
+    order = create_order_draft(customer=conversation.user)
+    rice = add_order_item(
+        order=order,
+        requested_name="riz",
+        quantity=2,
+        unit="KG",
+        resolution_status=OrderItemResolutionStatus.UNMATCHED,
+    )
+    diapers = create_product(name="Couches", category=create_category(name="Bébé"))
+
+    class Grounding:
+        def ground_item(self, item):
+            return CatalogResolution(
+                status=OrderItemResolutionStatus.MATCHED,
+                requested_name=item.requested_name,
+                product_id=diapers.id,
+                variant_id=None,
+                candidates=(),
+                reason=CatalogResolutionReason.EXACT_MATCH,
+            )
+
+    conversation.context = ConversationContext(
+        active_order_id=str(order.id),
+        active_journey=ActiveJourney.BUY,
+        pending_clarification=PendingClarification(
+            kind=ClarificationKind.OTHER,
+            field="unmatched_item",
+            item_reference="riz",
+            metadata={
+                "operation": "UNMATCHED_ITEM",
+                "order_id": str(order.id),
+                "target_order_item_id": str(rice.id),
+            },
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    app = ConversationalOrchestrator(
+        understanding_service=UnderstandingStub(), grounding_service=Grounding()
+    )
+
+    app._handle_unmatched_action(conversation, ConversationContext.from_payload(conversation.context), "order.unmatched.replace", None)
+    conversation.refresh_from_db()
+    after_action = ConversationContext.from_payload(conversation.context)
+    assert after_action.pending_clarification.metadata["operation"] == "UNMATCHED_ITEM_REPLACE"
+    assert after_action.pending_clarification.metadata["target_order_item_id"] == str(rice.id)
+
+    app._complete_unmatched_replacement(
+        conversation,
+        after_action,
+        UserMessageUnderstanding(
+            intent=MessageIntent.CREATE_OR_UPDATE_ORDER,
+            confidence=Decimal(".99"),
+            items=(ExtractedItem(requested_name="couches taille M"),),
+        ),
+        None,
+    )
+    conversation.refresh_from_db()
+    partial = ConversationContext.from_payload(conversation.context).pending_clarification
+    assert partial.metadata["replacement"]["requested_name"] == "couches taille M"
+    assert partial.metadata["replacement"]["quantity"] is None
+    assert partial.metadata["target_order_item_id"] == str(rice.id)
+
+    app._complete_unmatched_replacement(
+        conversation,
+        ConversationContext.from_payload(conversation.context),
+        UserMessageUnderstanding(
+            intent=MessageIntent.CREATE_OR_UPDATE_ORDER,
+            confidence=Decimal(".99"),
+            items=(
+                ExtractedItem(
+                    requested_name="2 paquets",
+                    quantity=Decimal("2"),
+                    unit=ExtractedUnit.PACK,
+                ),
+            ),
+        ),
+        None,
+    )
+    rice.refresh_from_db()
+    conversation.refresh_from_db()
+    assert rice.product_id == diapers.id
+    assert rice.requested_name == "couches taille M"
+    assert rice.quantity == Decimal("2") and rice.unit == "PACK"
+    assert ConversationContext.from_payload(conversation.context).pending_clarification is None

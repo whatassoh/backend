@@ -31,7 +31,7 @@ def resolution(name, item):
 
 
 @pytest.mark.django_db
-def test_add_keeps_duplicate_lines_as_distinct_customer_intents():
+def test_add_merges_an_identical_catalog_line():
     user = User.objects.create_user(whatsapp_phone="+237699887766")
     order = create_order_draft(customer=user)
     mayor = product("Mayor")
@@ -43,7 +43,9 @@ def test_add_keeps_duplicate_lines_as_distinct_customer_intents():
     service.add(order, item, resolution("Mayor", mayor))
     service.add(order, item, resolution("Mayor", mayor))
 
-    assert len(service.summary(order)) == 2
+    summary = service.summary(order)
+    assert len(summary) == 1
+    assert summary[0]["quantity"] == "4.000"
 
 
 @pytest.mark.django_db

@@ -100,6 +100,9 @@ class OrderReviewService:
             if item.resolution_status == OrderItemResolutionStatus.UNMATCHED
             else ()
         )
+        identity = item.product.name if item.product else item.requested_name
+        if item.product_variant:
+            identity = f"{identity} — {item.product_variant.name}"
         return OrderReviewItem(
             order_item_id=str(item.id),
             requested_name=item.requested_name,
@@ -108,7 +111,7 @@ class OrderReviewService:
             quantity=str(item.quantity),
             unit=item.unit,
             resolution_status=item.resolution_status,
-            display_label=f"{item.quantity} {item.unit} {item.requested_name}",
+            display_label=f"{item.quantity} × {identity}",
             warnings=warnings,
         )
 
