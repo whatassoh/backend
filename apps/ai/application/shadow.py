@@ -8,10 +8,10 @@ from django.db import IntegrityError
 
 from apps.ai.application.agent_graph import GRAPH_VERSION, build_compiled_graph
 from apps.ai.application.cache import EphemeralCache
-from apps.ai.application.tools import build_business_tool_registry
 from apps.ai.domain.agent_state import AgentRoute
 from apps.ai.infrastructure.checkpoints import postgres_saver
 from apps.ai.infrastructure.models import AgentShadowRun
+from apps.conversations.application.ai_tools import build_business_tool_registry
 from apps.conversations.application.interruptions import active_task_kind
 from apps.conversations.domain.context import ConversationContext
 

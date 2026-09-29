@@ -104,7 +104,7 @@ def policy_node(state: AgentGraphState):
 def _registered_tool_risks():
     """Keep graph policy aligned with the registry's single risk declaration."""
 
-    from apps.ai.application.tools import build_business_tool_registry
+    from apps.conversations.application.ai_tools import build_business_tool_registry
 
     return {
         name: specification.risk
