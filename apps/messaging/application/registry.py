@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from collections.abc import Callable
 
@@ -65,7 +66,21 @@ def supports(channel: MessagingChannel | str, capability: str) -> bool:
 
 
 def get_channel_configuration_status() -> dict[str, dict[str, bool]]:
-    cache_key = "whatassoh:v1:messaging:channel-configuration"
+    # Settings can change while the process is alive. Scope the cached result to
+    # a non-reversible fingerprint to avoid both stale status and secret-bearing
+    # cache keys.
+    configuration = (
+        getattr(settings, "WHATSAPP_ENABLED", False),
+        getattr(settings, "WHATSAPP_ACCESS_TOKEN", ""),
+        getattr(settings, "WHATSAPP_PHONE_NUMBER_ID", ""),
+        getattr(settings, "WHATSAPP_VERIFY_TOKEN", ""),
+        getattr(settings, "WHATSAPP_APP_SECRET", ""),
+        getattr(settings, "TELEGRAM_ENABLED", False),
+        getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
+        getattr(settings, "TELEGRAM_WEBHOOK_SECRET", ""),
+    )
+    fingerprint = hashlib.sha256(repr(configuration).encode()).hexdigest()[:16]
+    cache_key = f"whatassoh:v1:messaging:channel-configuration:{fingerprint}"
     try:
         cached = cache.get(cache_key)
     except Exception:
