@@ -51,6 +51,19 @@ def get_active_products() -> QuerySet[Product]:
     )
 
 
+def get_marketplace_available_products() -> QuerySet[Product]:
+    """Return products currently offered by an active store as available."""
+
+    return (
+        get_active_products()
+        .filter(
+            store_products__store__status=StoreStatus.ACTIVE,
+            store_products__availability_status=ProductAvailability.AVAILABLE,
+        )
+        .distinct()
+    )
+
+
 def get_products_by_category(category: Category) -> QuerySet[Product]:
     return get_active_products().filter(category=category)
 

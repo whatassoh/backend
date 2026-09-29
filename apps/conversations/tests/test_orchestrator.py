@@ -1,5 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
+
 import pytest
 
 from apps.ai.domain.exceptions import AITemporaryError
@@ -62,14 +63,14 @@ def test_greeting_does_not_create_order_or_call_catalog():
     assert context.processed == ["m-1"]
 
 
-def test_ai_failure_is_recoverable_and_not_marked_processed():
+def test_ai_failure_is_retried_by_the_inbox_and_not_marked_processed():
     context = ContextStub()
     orchestrator = ConversationalOrchestrator(
         understanding_service=UnderstandingStub(error=AITemporaryError("down")),
         context_service=context,
     )
-    outcome = orchestrator.process_message(SimpleNamespace(), message("Je veux du riz"))
-    assert outcome.status == ConversationalOutcomeStatus.RECOVERABLE_FAILURE
+    with pytest.raises(AITemporaryError, match="down"):
+        orchestrator.process_message(SimpleNamespace(), message("Je veux du riz"))
     assert context.processed == []
 
 
@@ -125,6 +126,25 @@ def test_bare_confirmation_is_non_mutating_outside_review_context():
 
     assert outcome.status == ConversationalOutcomeStatus.PROCESSED
     assert "après son récapitulatif" in outcome.response.text
+
+
+def test_help_fallback_distinguishes_platform_from_assistant():
+    context = ContextStub()
+    app = ConversationalOrchestrator(
+        understanding_service=UnderstandingStub(
+            UserMessageUnderstanding(
+                intent=MessageIntent.HELP, confidence=Decimal(".99")
+            )
+        ),
+        context_service=context,
+    )
+
+    outcome = app.process_message(
+        SimpleNamespace(), message("WhatAssoh, c'est toi ?")
+    )
+
+    assert "toute la plateforme" in outcome.response.text
+    assert "assistant conversationnel" in outcome.response.text
 
 
 def test_unexpected_orchestration_error_is_logged_and_reraised(caplog):

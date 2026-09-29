@@ -125,7 +125,7 @@ def claim_inbox(item_id):
             conversation=item.conversation,
             sequence__lt=item.sequence,
         )
-        .exclude(status=InboxStatus.PROCESSED)
+        .exclude(status__in=INBOX_TERMINAL)
         .exists()
     )
     if blocked:
@@ -258,6 +258,33 @@ def record_inbox_failure(item_id, token, exc):
     MessageEvent.objects.filter(pk=item.message_event_id).update(
         status=MessageStatus.FAILED
     )
+    outbox = None
+    if not retryable:
+        from apps.conversations.application.customer_responses import (
+            terminal_processing_message,
+        )
+
+        response = ResponsePlan(
+            text=terminal_processing_message(
+                item.conversation,
+                attempts=item.attempts,
+            ),
+            metadata={
+                "processing_failure": True,
+                "retry_exhausted": True,
+            },
+        )
+        outbox, _ = ConversationOutboxItem.objects.get_or_create(
+            inbox_item=item,
+            defaults={
+                "conversation": item.conversation,
+                "sequence": item.sequence,
+                "payload": _serialize_response(response),
+                "idempotency_key": f"conversation-response:{item.id}",
+            },
+        )
+        _enqueue_outbox_after_commit(outbox)
+        _enqueue_next_inbox_after_commit(item)
     logger.warning(
         "conversation_inbox_failed",
         extra={
@@ -267,6 +294,7 @@ def record_inbox_failure(item_id, token, exc):
             "attempt": item.attempts,
             "status": item.status,
             "error_category": item.last_error_category,
+            "terminal_response_created": outbox is not None,
         },
     )
     return item.status

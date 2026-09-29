@@ -1,22 +1,28 @@
-import re
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from uuid import UUID
 from enum import StrEnum
 from typing import Any
+from uuid import UUID
 
 from django.contrib.gis.geos import Point
 from django.utils import timezone
 
 from apps.ai.domain.exceptions import AIError
-from apps.conversations.application.observability import (
-    DecisionTimer,
-    observe_ai_failure,
-    observe_decision,
+from apps.ai.domain.understanding import (
+    ExtractedItem,
+    ExtractedUnit,
+    InteractionMode,
+    JourneyGoal,
+    MessageIntent,
+    OrderAction,
+    TaskTarget,
 )
-from apps.ai.domain.understanding import ExtractedItem, MessageIntent, OrderAction
 from apps.catalog.application.grounding import CatalogGroundingService
+from apps.catalog.application.selectors import get_marketplace_available_products
+from apps.catalog.domain.enums import ProductStatus, ProductVariantStatus
+from apps.catalog.infrastructure.models import Product, ProductVariant
 from apps.conversations.application.active_orders import ActiveCustomerOrderService
 from apps.conversations.application.capabilities import (
     NOT_IMPLEMENTED_RESPONSES,
@@ -28,6 +34,10 @@ from apps.conversations.application.capabilities import (
 )
 from apps.conversations.application.clarification import ClarificationEngine
 from apps.conversations.application.context import ConversationContextService
+from apps.conversations.application.context_window import (
+    ConversationContextWindowBuilder,
+)
+from apps.conversations.application.driver_onboarding import DriverOnboardingService
 from apps.conversations.application.interruptions import (
     UniversalCommand,
     active_task_kind,
@@ -36,6 +46,15 @@ from apps.conversations.application.interruptions import (
     has_resumable_work,
     resume_last_task,
     suspend_active_task,
+)
+from apps.conversations.application.journey import (
+    JourneyRoutingService,
+    JourneyRoutingStatus,
+)
+from apps.conversations.application.observability import (
+    DecisionTimer,
+    observe_ai_failure,
+    observe_decision,
 )
 from apps.conversations.application.order_building import (
     ItemReference,
@@ -47,24 +66,21 @@ from apps.conversations.application.recovery import (
     RecoveryStatus,
 )
 from apps.conversations.application.seller_onboarding import SellerOnboardingService
-from apps.conversations.application.driver_onboarding import DriverOnboardingService
 from apps.conversations.domain.context import (
     ActiveJourney,
     ClarificationKind,
+    ConversationFlow,
     ConversationSocialState,
     ConversationTaskKind,
-    ConversationFlow,
     DriverOnboardingStage,
     PendingClarification,
     SellerOnboardingStage,
 )
-from apps.conversations.application.journey import (
-    JourneyRoutingService,
-    JourneyRoutingStatus,
-)
 from apps.conversations.infrastructure.models import Conversation
 from apps.messaging.domain.dtos import NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType
+from apps.orders.application.review import OrderReviewService
+from apps.orders.application.selectors import get_customer_orders
 from apps.orders.application.services import (
     confirm_order,
     mark_awaiting_location,
@@ -72,11 +88,7 @@ from apps.orders.application.services import (
     set_delivery_instructions,
     set_delivery_location,
 )
-from apps.orders.application.review import OrderReviewService
 from apps.orders.domain.enums import OrderItemResolutionStatus
-from apps.catalog.infrastructure.models import Product
-from apps.catalog.domain.enums import ProductStatus
-from apps.orders.application.selectors import get_customer_orders
 from apps.stores.application.preparation import (
     StorePreparationResult,
     StorePreparationService,
@@ -140,6 +152,9 @@ class ConversationalOrchestrator:
         driver_onboarding_service=None,
         seller_catalog_conversation_service=None,
         store_preparation_service=None,
+        store_offer_action_service=None,
+        context_window_builder=None,
+        active_agent_service=None,
     ) -> None:
         self.understanding_service = understanding_service
         self.grounding_service = grounding_service or CatalogGroundingService()
@@ -170,6 +185,11 @@ class ConversationalOrchestrator:
         self.store_preparation_service = (
             store_preparation_service or StorePreparationService()
         )
+        self.store_offer_action_service = store_offer_action_service
+        self.context_window_builder = (
+            context_window_builder or ConversationContextWindowBuilder()
+        )
+        self.active_agent_service = active_agent_service
 
     def process_message(
         self,
@@ -201,19 +221,16 @@ class ConversationalOrchestrator:
             outcome = self._process(conversation, context, message, correlation_id)
         except AIError as exc:
             observe_ai_failure(channel=message.channel, error=exc)
-            outcome = self._outcome(
-                ConversationalOutcomeStatus.RECOVERABLE_FAILURE,
-                "Je n’arrive pas à traiter votre demande pour le moment. Réessayez.",
-                context,
+            logger.warning(
+                "conversation_ai_processing_failed",
+                extra={
+                    "correlation_id": correlation_id,
+                    "channel": message.channel,
+                    "error_category": exc.__class__.__name__,
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                },
             )
-            observe_decision(
-                conversation=conversation,
-                message=message,
-                outcome=outcome,
-                flow_before=flow_before,
-                timer=timer,
-            )
-            return outcome
+            raise
         except Exception:
             logger.exception(
                 "conversation_orchestration_unexpected",
@@ -253,8 +270,28 @@ class ConversationalOrchestrator:
         return outcome
 
     def _process(self, conversation, context, message, correlation_id):
+        conversation_context = self.context_window_builder.build(
+            conversation,
+            context,
+            current_message_id=message.external_message_id,
+        )
+        if not message.metadata.get("action_id"):
+            resumed_store_offer = self._resume_whatsapp_store_offer(
+                conversation, context, message
+            )
+            if resumed_store_offer is not None:
+                return resumed_store_offer
+            resumed_driver_offer = self._resume_whatsapp_driver_offer(
+                conversation, context, message
+            )
+            if resumed_driver_offer is not None:
+                return resumed_driver_offer
         universal = self._try_universal_interrupt(
-            conversation, context, message, correlation_id
+            conversation,
+            context,
+            message,
+            correlation_id,
+            conversation_context,
         )
         if universal is not None:
             return universal
@@ -317,6 +354,16 @@ class ConversationalOrchestrator:
             )
             if choice is not None:
                 return choice
+            store_offer = self._store_offer_action(
+                conversation, context, action_id, correlation_id
+            )
+            if store_offer is not None:
+                return store_offer
+            store_order = self._store_order_action(
+                conversation, context, action_id, correlation_id
+            )
+            if store_order is not None:
+                return store_order
             driver_offer = self._driver_offer_action(
                 conversation, context, action_id, correlation_id
             )
@@ -344,7 +391,9 @@ class ConversationalOrchestrator:
         if availability is not None:
             return availability
         understanding = self.understanding_service.understand_normalized(
-            message, correlation_id=correlation_id
+            message,
+            limited_context=conversation_context,
+            correlation_id=correlation_id,
         )
         if understanding is None:
             return self._outcome(
@@ -352,11 +401,35 @@ class ConversationalOrchestrator:
                 "Cette action n'est pas disponible.",
                 context,
             )
+        understanding = self._normalize_understanding(understanding)
+        compound = self._handle_compound_turn(
+            conversation,
+            context,
+            understanding,
+            message,
+            correlation_id,
+            conversation_context,
+        )
+        if compound is not None:
+            return compound
+        agent_decision = self._run_active_agent(
+            conversation, message, understanding, correlation_id
+        )
+        variant_text_choice = self._complete_variant_text_selection(
+            conversation, context, understanding, correlation_id
+        )
+        if variant_text_choice is not None:
+            return variant_text_choice
         replacement = self._complete_unmatched_replacement(
             conversation, context, understanding, correlation_id
         )
         if replacement is not None:
             return replacement
+        pending_item = self._complete_pending_item_slots(
+            conversation, context, understanding, correlation_id
+        )
+        if pending_item is not None:
+            return pending_item
         if understanding.intent == MessageIntent.MEMORY_SHOW:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:
@@ -375,6 +448,12 @@ class ConversationalOrchestrator:
         )
         if float(understanding.confidence) < self.confidence_threshold:
             return self._capability_outcome(context, None, conversation=conversation)
+        if understanding.intent == MessageIntent.ORDER_STATUS:
+            status_outcome = self._agent_order_status_outcome(
+                context, agent_decision
+            )
+            if status_outcome is not None:
+                return status_outcome
         if capability.status != CapabilityStatus.SUPPORTED:
             return self._capability_outcome(
                 context, capability, conversation=conversation
@@ -388,13 +467,24 @@ class ConversationalOrchestrator:
                 self.journey_routing_service.select(conversation, ActiveJourney.BUY)
                 context = replace(context, active_journey=ActiveJourney.BUY)
         if understanding.intent == MessageIntent.ORDER_RESUME:
-            return self._resume_workflow(conversation, context, correlation_id)
+            return self._resume_workflow(
+                conversation,
+                context,
+                correlation_id,
+                target=understanding.task_target,
+            )
         if understanding.intent == MessageIntent.PAUSE:
             return self._pause_current_task(conversation, context)
         if understanding.intent == MessageIntent.BACK:
             return self._back_current_task(conversation, context)
         if understanding.intent == MessageIntent.ORDER_HISTORY:
-            return self._order_history_outcome(conversation, context)
+            return self._order_history_outcome(
+                conversation, context, agent_decision=agent_decision
+            )
+        if understanding.intent == MessageIntent.CATALOG_BROWSE:
+            return self._catalog_availability_outcome(
+                context, agent_decision=agent_decision
+            )
         if understanding.intent == MessageIntent.HELP:
             return self._handle_knowledge_or_unknown(
                 conversation,
@@ -402,11 +492,15 @@ class ConversationalOrchestrator:
                 message.text or "",
                 understanding.intent,
                 correlation_id,
+                retrieval_query=understanding.standalone_question,
+                conversation_context=conversation_context,
             )
         if (
             understanding.intent == MessageIntent.CANCEL
             or understanding.order_action == OrderAction.CANCEL
         ):
+            if not self._task_target_matches_context(understanding, context):
+                return self._task_target_clarification(context, understanding)
             return self._cancel_current_task(
                 conversation, context, correlation_id=correlation_id
             )
@@ -423,7 +517,12 @@ class ConversationalOrchestrator:
                 )
             return self._confirm_active_order(conversation, context, correlation_id)
         if understanding.order_action == OrderAction.RESUME:
-            return self._resume_workflow(conversation, context, correlation_id)
+            return self._resume_workflow(
+                conversation,
+                context,
+                correlation_id,
+                target=understanding.task_target,
+            )
         if understanding.order_action == OrderAction.CHANGE_LOCATION:
             return self._start_location_change(conversation, context)
         if understanding.location_text and not understanding.items:
@@ -440,6 +539,86 @@ class ConversationalOrchestrator:
             )
         return self._handle_order_items(
             conversation, context, understanding, correlation_id
+        )
+
+    def _resume_whatsapp_store_offer(self, conversation, context, message):
+        """After a template reply, present one still-live offer with exact callbacks."""
+        if (
+            message.channel != "WHATSAPP"
+            or not message.text
+            or not getattr(conversation, "pk", None)
+            or not getattr(conversation, "user_id", None)
+        ):
+            return None
+        from apps.stores.domain.enums import StoreOfferStatus
+        from apps.stores.infrastructure.models import StoreOfferNotification
+
+        notification = (
+            StoreOfferNotification.objects.filter(
+                conversation=conversation,
+                recipient_id=conversation.user_id,
+                offer__status=StoreOfferStatus.PENDING,
+                offer__expires_at__gt=timezone.now(),
+            )
+            .select_related("offer", "offer__order")
+            .order_by("offer__expires_at", "created_at")
+            .first()
+        )
+        if notification is None:
+            return None
+        snapshot = notification.presentation_snapshot
+        items = "\n".join(f"- {item}" for item in snapshot.get("items", ()))
+        actions = tuple(
+            ResponseAction(
+                action_id=item["id"],
+                label="Accepter" if item.get("action", "").endswith("accept") else "Refuser",
+            )
+            for item in snapshot.get("actions", ())
+        )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Nouvelle commande {snapshot.get('order_reference', '')}\n{items}\nRépondez avant {snapshot.get('expires_at', '')}.",
+            context,
+            actions=actions,
+            metadata={"store_offer_resumed": True, "offer_id": str(notification.offer_id)},
+        )
+
+    def _resume_whatsapp_driver_offer(self, conversation, context, message):
+        if (
+            message.channel != "WHATSAPP"
+            or not message.text
+            or not getattr(conversation, "pk", None)
+            or not getattr(conversation, "user_id", None)
+        ):
+            return None
+        from apps.drivers.domain.enums import DriverOfferStatus
+        from apps.drivers.infrastructure.models import DriverOfferNotification
+
+        notification = (
+            DriverOfferNotification.objects.filter(
+                conversation=conversation,
+                recipient_id=conversation.user_id,
+                offer__status=DriverOfferStatus.PENDING,
+                offer__expires_at__gt=timezone.now(),
+            )
+            .order_by("offer__expires_at", "created_at")
+            .first()
+        )
+        if notification is None:
+            return None
+        snapshot = notification.presentation_snapshot
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Nouvelle livraison disponible\n\nCommande : {snapshot.get('order_reference', '')}\nRetrait : {snapshot.get('pickup_store_name', '')}\nRépondez avant {snapshot.get('expires_at', '')}.",
+            context,
+            actions=tuple(
+                ResponseAction(
+                    action_id=item["id"],
+                    label="Accepter" if item.get("action", "").endswith("accept") else "Refuser",
+                )
+                for item in snapshot.get("actions", ())
+            ),
+            metadata={"driver_offer_resumed": True, "offer_id": str(notification.offer_id)},
         )
 
     def _ask_journey(self, conversation, context):
@@ -466,7 +645,11 @@ class ConversationalOrchestrator:
     def _select_journey(self, conversation, context, journey):
         if context.active_journey not in {None, journey}:
             context, _ = suspend_active_task(context, reason="topic_change")
-            self.context_service.update_context(conversation, context)
+            updated = self.context_service.update_context(conversation, context)
+            # `JourneyRoutingService.select()` immediately reads the passed
+            # instance. Keep it aligned with the locked write so it cannot
+            # overwrite the freshly suspended task with stale JSON.
+            conversation.context = updated.context
         decision = self.journey_routing_service.select(conversation, journey)
         metadata = {**context.metadata}
         metadata.pop("task_paused", None)
@@ -641,19 +824,33 @@ class ConversationalOrchestrator:
         )
 
     def _driver_offer_action(self, conversation, context, action_id, correlation_id):
-        if action_id not in {"driver_offer.accept", "driver_offer.reject"}:
+        from apps.drivers.application.offers import decode_driver_offer_action
+
+        decoded = decode_driver_offer_action(action_id)
+        if decoded is not None:
+            action_id, offer_id = decoded
+        elif action_id in {"driver_offer.accept", "driver_offer.reject"}:
+            # Backward compatibility for already-sent legacy buttons only.
+            offer_id = (
+                context.metadata.get("driver_offer_id")
+                if hasattr(context, "metadata")
+                else None
+            )
+        elif action_id.startswith("driver_offer."):
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette proposition n'est plus disponible.",
+                context,
+            )
+        else:
             return None
-        offer_id = (
-            context.metadata.get("driver_offer_id")
-            if hasattr(context, "metadata")
-            else None
-        )
         if not offer_id:
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
                 "Cette proposition n'est plus disponible.",
                 context,
             )
+
         from apps.drivers.application.dispatch import DriverMatchingOrchestrator
         from apps.drivers.infrastructure.models import DriverOffer
 
@@ -706,6 +903,146 @@ class ConversationalOrchestrator:
                 "Cette proposition n'est plus disponible.",
                 context,
             )
+
+    def _store_offer_action(self, conversation, context, callback_id, correlation_id):
+        from apps.stores.application.offer_actions import (
+            StoreOfferActionResult,
+            StoreOfferActionService,
+            decode_store_offer_action,
+        )
+
+        decoded = decode_store_offer_action(callback_id)
+        if decoded is None:
+            if callback_id.startswith("store_offer."):
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Cette offre n'est plus disponible.",
+                    context,
+                )
+            return None
+        action_id, offer_id = decoded
+        service = self.store_offer_action_service or StoreOfferActionService()
+        result = service.handle(
+            actor=conversation.user,
+            offer_id=offer_id,
+            action_id=action_id,
+        )
+        if result == StoreOfferActionResult.ACCEPTED:
+            from apps.stores.application.offer_actions import present_offer
+            from apps.stores.application.preparation import encode_store_order_action
+            from apps.stores.infrastructure.models import StoreOffer
+
+            offer = StoreOffer.objects.select_related("order").get(pk=offer_id)
+            presentation = present_offer(offer)
+            items = "\n".join(presentation.items)
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                f"Commande {presentation.order_reference} acceptée.\n\n{items}\n\nVous pouvez maintenant commencer sa préparation.",
+                context,
+                metadata={"store_offer": result.value, "offer_id": str(offer_id)},
+                actions=(ResponseAction(
+                    action_id=encode_store_order_action(
+                        "store_order.start_preparation", offer.order_id
+                    ),
+                    label="Démarrer la préparation",
+                ),),
+            )
+        if result == StoreOfferActionResult.REJECTED:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Cette commande a été refusée.",
+                context,
+                metadata={"store_offer": result.value, "offer_id": str(offer_id)},
+            )
+        text = (
+            "Vous n'êtes pas autorisé à traiter cette offre."
+            if result == StoreOfferActionResult.NOT_AUTHORIZED
+            else "Cette offre n'est plus disponible."
+        )
+        return self._outcome(
+            ConversationalOutcomeStatus.REJECTED,
+            text,
+            context,
+            metadata={"store_offer": result.value, "offer_id": str(offer_id)},
+        )
+
+    def _store_order_action(self, conversation, context, callback_id, correlation_id):
+        from apps.orders.infrastructure.models import Order
+        from apps.stores.application.preparation import (
+            StorePreparationResult,
+            decode_store_order_action,
+            encode_store_order_action,
+        )
+
+        decoded = decode_store_order_action(callback_id)
+        if decoded is None:
+            if callback_id.startswith("store_order.") and ":" in callback_id:
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Cette action n'est plus disponible.",
+                    context,
+                )
+            return None
+        action_id, order_id = decoded
+        operation = (
+            self.store_preparation_service.start_preparation
+            if action_id == "store_order.start_preparation"
+            else self.store_preparation_service.mark_ready_for_pickup
+        )
+        result = operation(
+            actor=conversation.user,
+            order_id=order_id,
+            correlation_id=correlation_id,
+        )
+        order = Order.objects.filter(pk=order_id).only("reference").first()
+        reference = order.reference if order else ""
+        if result in {
+            StorePreparationResult.STARTED,
+            StorePreparationResult.ALREADY_PREPARING,
+        }:
+            text = (
+                f"Préparation de la commande {reference} démarrée."
+                if result == StorePreparationResult.STARTED
+                else f"La commande {reference} est déjà en préparation."
+            )
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                text + "\n\nLorsque la commande est prête à être récupérée, indiquez-le ici.",
+                context,
+                actions=(ResponseAction(
+                    action_id=encode_store_order_action(
+                        "store_order.mark_ready", order_id
+                    ),
+                    label="Commande prête",
+                ),),
+                metadata={"store_preparation": result.value, "order_id": str(order_id)},
+            )
+        if result in {
+            StorePreparationResult.READY,
+            StorePreparationResult.ALREADY_READY,
+        }:
+            text = (
+                f"Commande {reference} marquée comme prête pour la récupération."
+                if result == StorePreparationResult.READY
+                else f"La commande {reference} est déjà prête pour la récupération."
+            )
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                text,
+                context,
+                metadata={"store_preparation": result.value, "order_id": str(order_id)},
+            )
+        text = (
+            "Vous n'êtes pas autorisé à traiter cette commande."
+            if result == StorePreparationResult.NOT_AUTHORIZED
+            else "Cette action n'est plus disponible pour cette commande."
+        )
+        return self._outcome(
+            ConversationalOutcomeStatus.REJECTED,
+            text,
+            context,
+            metadata={"store_preparation": result.value, "order_id": str(order_id)},
+        )
 
     def _delivery_action(self, conversation, context, action_id, correlation_id):
         issue_actions = {
@@ -973,12 +1310,19 @@ class ConversationalOrchestrator:
         if unresolved:
             item, resolution, reason = unresolved[0]
             if reason == "ambiguous":
+                selecting_variant = (
+                    resolution.reason.value == "VARIANT_SELECTION_REQUIRED"
+                )
                 pending = PendingClarification(
                     kind=ClarificationKind.AMBIGUOUS_PRODUCT,
                     field="product",
                     item_reference=item.requested_name,
                     candidate_ids=tuple(
-                        str(candidate.product_id) for candidate in resolution.candidates
+                        str(
+                            candidate.variant_id
+                            if selecting_variant else candidate.product_id
+                        )
+                        for candidate in resolution.candidates
                     ),
                     metadata={
                         "operation": OrderAction.ADD_ITEM.value,
@@ -987,8 +1331,10 @@ class ConversationalOrchestrator:
                             "requested_name": item.requested_name,
                             "quantity": str(item.quantity),
                             "unit": item.unit.value,
+                            "variant_hint": item.variant_hint,
                             "notes": item.notes,
                         },
+                        "selection": "variant" if selecting_variant else "product",
                     },
                 )
                 self.context_service.set_pending_clarification(
@@ -996,27 +1342,49 @@ class ConversationalOrchestrator:
                 )
                 return self._outcome(
                     ConversationalOutcomeStatus.PROCESSED,
-                    "Plusieurs produits correspondent. Lequel souhaitez-vous ?",
+                    (
+                        f"Quel format de {item.requested_name} souhaitez-vous ?"
+                        if selecting_variant
+                        else "Plusieurs produits correspondent. Lequel souhaitez-vous ?"
+                    ),
                     context,
                     actions=tuple(
                         ResponseAction(
-                            action_id=f"clarification.select_product.{candidate.product_id}",
-                            label=candidate.canonical_name,
+                            action_id=(
+                                f"clarification.select_variant.{candidate.variant_id}"
+                                if selecting_variant
+                                else f"clarification.select_product.{candidate.product_id}"
+                            ),
+                            label=(
+                                candidate.metadata.get("variant_label", candidate.canonical_name)
+                                if selecting_variant else candidate.canonical_name
+                            ),
                         )
                         for candidate in resolution.candidates
                     ),
                     metadata={"pending_operation": "ADD_ITEM"},
                 )
-            clarification = self.clarification_engine.decide(
-                context=context, understanding=understanding
+            pending = PendingClarification(
+                kind=(
+                    ClarificationKind.MISSING_QUANTITY
+                    if item.quantity is None
+                    else ClarificationKind.MISSING_UNIT
+                ),
+                field="quantity" if item.quantity is None else "unit",
+                item_reference=item.requested_name,
+                metadata={
+                    "operation": OrderAction.ADD_ITEM.value,
+                    "order_id": str(order.id),
+                    "item": self._item_draft(item),
+                },
             )
             self.context_service.set_pending_clarification(
                 conversation,
-                clarification.pending_clarification,
-                flow=clarification.next_flow,
+                pending,
+                flow=ConversationFlow.AWAITING_CLARIFICATION,
             )
-            return self._from_clarification(
-                clarification, context, actions=("order_draft_updated",)
+            return self._ask_for_item_slots(
+                context, pending, actions=("order_draft_updated",)
             )
         unmatched = self._unmatched_outcome(conversation, context, order)
         if unmatched is not None:
@@ -1267,7 +1635,10 @@ class ConversationalOrchestrator:
         if action_id not in {"order.unmatched.remove", "order.unmatched.replace"}:
             return None
         pending = context.pending_clarification
-        if not pending or pending.metadata.get("operation") != "UNMATCHED_ITEM":
+        if not pending or pending.metadata.get("operation") not in {
+            "UNMATCHED_ITEM",
+            "UNMATCHED_ITEM_REPLACE",
+        }:
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
                 "Cette action n’est plus disponible.",
@@ -1299,11 +1670,27 @@ class ConversationalOrchestrator:
                 target.item, actor=conversation.user, correlation_id=correlation_id
             )
             return self._modified_outcome(conversation, order, "unmatched_item_removed")
+        if pending.metadata.get("operation") == "UNMATCHED_ITEM_REPLACE":
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                f"Par quel autre produit souhaitez-vous remplacer "
+                f"{target.item.requested_name} ?",
+                context,
+            )
         self.context_service.set_pending_clarification(
             conversation,
             replace(
                 pending,
-                metadata={**pending.metadata, "operation": "UNMATCHED_ITEM_REPLACE"},
+                metadata={
+                    **pending.metadata,
+                    "operation": "UNMATCHED_ITEM_REPLACE",
+                    "replacement": {
+                        "requested_name": None,
+                        "quantity": None,
+                        "unit": None,
+                        "notes": None,
+                    },
+                },
             ),
             flow=ConversationFlow.AWAITING_CLARIFICATION,
         )
@@ -1323,11 +1710,16 @@ class ConversationalOrchestrator:
         summary = self.order_building_service.summary(order)
         if not summary:
             self.context_service.clear_pending_clarification(
-                conversation, flow=ConversationFlow.IDLE
+                conversation, flow=ConversationFlow.ORDER_BUILDING
             )
             return ConversationalOutcome(
                 status=ConversationalOutcomeStatus.PROCESSED,
-                response=ResponsePlan(text="Votre commande est vide."),
+                response=ResponsePlan(
+                    text=(
+                        "Votre commande est maintenant vide. "
+                        "Que souhaitez-vous ajouter ?"
+                    )
+                ),
                 actions_performed=(action,),
                 active_order_id=str(order.id),
             )
@@ -1404,6 +1796,7 @@ class ConversationalOrchestrator:
 
     def _handle_driver_location(self, conversation, context, message):
         from django.utils import timezone
+
         from apps.drivers.application.availability import DriverAvailabilityService
         from apps.drivers.application.location import (
             DriverLocationService,
@@ -1489,8 +1882,8 @@ class ConversationalOrchestrator:
                 context,
             )
         if action_id == "order.status":
-            from apps.orders.infrastructure.models import Order
             from apps.orders.domain.enums import OrderStatus
+            from apps.orders.infrastructure.models import Order
 
             order = (
                 Order.objects.filter(customer=conversation.user)
@@ -1600,6 +1993,25 @@ class ConversationalOrchestrator:
                 actor=conversation.user, target=target
             )
             if order_id is None:
+                orders = self.store_preparation_service.available_orders_for(
+                    actor=conversation.user, target=target
+                )
+                if len(orders) > 1:
+                    from apps.stores.application.preparation import encode_store_order_action
+
+                    return self._outcome(
+                        ConversationalOutcomeStatus.PROCESSED,
+                        "Quelle commande souhaitez-vous préparer ?",
+                        context,
+                        actions=tuple(
+                            ResponseAction(
+                                action_id=encode_store_order_action(action_id, order.id),
+                                label=order.reference,
+                            )
+                            for order in orders
+                        ),
+                        metadata={"store_order_clarification": True},
+                    )
                 return self._outcome(
                     ConversationalOutcomeStatus.REJECTED,
                     "Aucune commande de boutique unique ne correspond à cette action.",
@@ -1639,6 +2051,15 @@ class ConversationalOrchestrator:
                 context,
             )
         if action_id == "order.confirm":
+            if context.flow != ConversationFlow.AWAITING_CONFIRMATION:
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    (
+                        "Cette confirmation n'est plus disponible. "
+                        "Vérifiez d'abord votre commande."
+                    ),
+                    context,
+                )
             return self._confirm_active_order(
                 conversation,
                 context,
@@ -1792,7 +2213,21 @@ class ConversationalOrchestrator:
         order = confirm_order(
             order, actor=conversation.user, correlation_id=correlation_id
         )
-        self.context_service.clear_context(conversation)
+        # Do not erase unrelated suspended work (for example a seller catalog).
+        # The confirmed order is no longer an editable active basket.
+        latest_context = self.context_service.get_context(conversation)
+        metadata = dict(latest_context.metadata)
+        metadata.pop("awaiting_delivery_instructions", None)
+        self.context_service.update_context(
+            conversation,
+            replace(
+                latest_context,
+                flow=ConversationFlow.IDLE,
+                active_order_id=None,
+                pending_clarification=None,
+                metadata=metadata,
+            ),
+        )
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
             response=ResponsePlan(
@@ -1825,8 +2260,177 @@ class ConversationalOrchestrator:
             active_order_id=str(order.id),
         )
 
+    @staticmethod
+    def _normalize_understanding(understanding):
+        """Correct a dangerous delivery ambiguity before journey routing.
+
+        The model may describe customer delivery with the legacy DELIVER intent. The
+        explicit goal is the finer signal: RECEIVE_DELIVERY is informational/customer
+        work and must never start driver onboarding.
+        """
+
+        if (
+            understanding.intent == MessageIntent.DELIVER
+            and understanding.journey_goal == JourneyGoal.RECEIVE_DELIVERY
+        ):
+            secondary = tuple(
+                item
+                for item in understanding.secondary_intents
+                if item != MessageIntent.HELP
+            )
+            return replace(
+                understanding,
+                intent=MessageIntent.HELP,
+                secondary_intents=secondary,
+                interaction_mode=InteractionMode.ANSWER,
+                action_requested=False,
+            )
+        return understanding
+
+    @staticmethod
+    def _task_target_matches_context(understanding, context):
+        if understanding.task_target in {TaskTarget.NONE, TaskTarget.CURRENT_TASK}:
+            return True
+        expected = {
+            TaskTarget.ORDER: ConversationTaskKind.ORDER,
+            TaskTarget.STORE_ONBOARDING: ConversationTaskKind.SELLER_ONBOARDING,
+            TaskTarget.DRIVER_ONBOARDING: ConversationTaskKind.DRIVER_ONBOARDING,
+            TaskTarget.SELLER_CATALOG: ConversationTaskKind.SELLER_CATALOG,
+        }.get(understanding.task_target)
+        return expected is not None and expected == active_task_kind(context)
+
+    def _task_target_clarification(self, context, understanding):
+        target = {
+            TaskTarget.ORDER: "la commande",
+            TaskTarget.STORE_ONBOARDING: "la création de boutique",
+            TaskTarget.DRIVER_ONBOARDING: "la création du profil livreur",
+            TaskTarget.SELLER_CATALOG: "la gestion du catalogue",
+        }.get(understanding.task_target, "la tâche mentionnée")
+        current = active_task_kind(context)
+        current_text = self._task_label(current) if current else "aucune tâche"
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Vous avez demandé d'annuler {target}, mais la tâche active est "
+            f"{current_text}. Je n'ai rien modifié. Précisez la tâche à annuler.",
+            context,
+            metadata={
+                "capability": "cancel",
+                "clarification_required": True,
+                "target_mismatch": True,
+            },
+        )
+
+    def _handle_compound_turn(
+        self,
+        conversation,
+        context,
+        understanding,
+        message,
+        correlation_id,
+        conversation_context,
+    ):
+        """Execute one explicit navigation action and answer the same turn.
+
+        This path is intentionally limited to deterministic conversation navigation.
+        Orders, stores, catalog mutations and delivery state never execute here.
+        """
+
+        if (
+            understanding.interaction_mode != InteractionMode.ANSWER_AND_ACT
+            or not understanding.action_requested
+        ):
+            return None
+        intents = (understanding.intent, *understanding.secondary_intents)
+        if MessageIntent.HELP not in intents:
+            return None
+        navigation = next(
+            (
+                item
+                for item in intents
+                if item
+                in {
+                    MessageIntent.CANCEL,
+                    MessageIntent.PAUSE,
+                    MessageIntent.BACK,
+                    MessageIntent.ORDER_RESUME,
+                }
+            ),
+            None,
+        )
+        if navigation is None:
+            return None
+        if navigation == MessageIntent.CANCEL:
+            action = (
+                self._cancel_current_task(
+                    conversation, context, correlation_id=correlation_id
+                )
+                if self._task_target_matches_context(understanding, context)
+                else self._task_target_clarification(context, understanding)
+            )
+        elif navigation == MessageIntent.PAUSE:
+            action = self._pause_current_task(conversation, context)
+        elif navigation == MessageIntent.BACK:
+            action = self._back_current_task(conversation, context)
+        else:
+            action = self._resume_workflow(
+                conversation,
+                context,
+                correlation_id,
+                target=understanding.task_target,
+            )
+        if getattr(conversation, "pk", None):
+            conversation.refresh_from_db(fields=["context", "updated_at"])
+            context = self.context_service.get_context(conversation)
+            conversation_context = self.context_window_builder.build(
+                conversation,
+                context,
+                current_message_id=message.external_message_id,
+            )
+        answer = self._handle_knowledge_or_unknown(
+            conversation,
+            context,
+            message.text or "",
+            MessageIntent.HELP,
+            correlation_id,
+            retrieval_query=understanding.standalone_question,
+            conversation_context=conversation_context,
+        )
+        response = replace(
+            answer.response,
+            text=f"{action.response.text}\n\n{answer.response.text}",
+            actions=tuple(
+                dict.fromkeys((*action.response.actions, *answer.response.actions))
+            ),
+            metadata={
+                **action.response.metadata,
+                **answer.response.metadata,
+                "compound_turn": True,
+            },
+        )
+        return replace(
+            answer,
+            response=response,
+            actions_performed=tuple(
+                dict.fromkeys((*action.actions_performed, *answer.actions_performed))
+            ),
+            metadata={
+                **action.metadata,
+                **answer.metadata,
+                "compound_turn": True,
+                "navigation_intent": navigation.value,
+            },
+        )
+
     def _handle_knowledge_or_unknown(
-        self, conversation, context, text, intent, correlation_id
+        self,
+        conversation,
+        context,
+        text,
+        intent,
+        correlation_id,
+        *,
+        retrieval_query=None,
+        conversation_context=None,
     ):
         if intent == MessageIntent.HELP and self.knowledge_answer_service:
             try:
@@ -1836,6 +2440,8 @@ class ConversationalOrchestrator:
                     text,
                     principal=principal_for_user(conversation.user),
                     language=conversation.user.preferred_language,
+                    retrieval_query=retrieval_query,
+                    conversation_context=conversation_context,
                     correlation_id=correlation_id,
                 )
                 if self.knowledge_answer_enabled and answer.grounded:
@@ -1867,7 +2473,7 @@ class ConversationalOrchestrator:
                     },
                 )
         if intent == MessageIntent.HELP:
-            return self._help_outcome(context)
+            return self._help_outcome(context, question=text)
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
             "Je n'ai pas bien compris votre demande. Pouvez-vous la reformuler ?",
@@ -2141,9 +2747,20 @@ class ConversationalOrchestrator:
             ),
         )
 
-    def _order_history_outcome(self, conversation, context):
-        orders = list(
-            get_customer_orders(conversation.user).order_by("-created_at")[:5]
+    def _order_history_outcome(
+        self, conversation, context, *, agent_decision=None
+    ):
+        result = (
+            agent_decision.tool_results.get("list_orders")
+            if agent_decision is not None
+            else None
+        )
+        orders = (
+            result.data.get("orders", ())[:5]
+            if result is not None
+            else list(
+                get_customer_orders(conversation.user).order_by("-created_at")[:5]
+            )
         )
         if not orders:
             return self._outcome(
@@ -2153,12 +2770,20 @@ class ConversationalOrchestrator:
                 metadata={
                     "capability": "order_history",
                     "capability_status": CapabilityStatus.SUPPORTED.value,
+                    "agent_read": result is not None,
                 },
             )
         lines = ["Vos commandes récentes :"]
-        lines.extend(
-            f"{order.reference} — {order.get_status_display()}" for order in orders
-        )
+        if result is not None:
+            lines.extend(
+                f"{order['reference']} — "
+                f"{order.get('status_label', order['status'])}"
+                for order in orders
+            )
+        else:
+            lines.extend(
+                f"{order.reference} — {order.get_status_display()}" for order in orders
+            )
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
             "\n".join(lines),
@@ -2166,6 +2791,108 @@ class ConversationalOrchestrator:
             metadata={
                 "capability": "order_history",
                 "capability_status": CapabilityStatus.SUPPORTED.value,
+                "agent_read": result is not None,
+            },
+        )
+
+    def _run_active_agent(
+        self, conversation, message, understanding, correlation_id
+    ):
+        if (
+            self.active_agent_service is None
+            or not getattr(conversation, "pk", None)
+            or understanding.intent
+            not in {
+                MessageIntent.CATALOG_BROWSE,
+                MessageIntent.ORDER_HISTORY,
+                MessageIntent.ORDER_STATUS,
+            }
+        ):
+            return None
+        from apps.ai.application.active_agent import run_active_agent_safely
+
+        return run_active_agent_safely(
+            service=self.active_agent_service,
+            conversation=conversation,
+            message=message,
+            understanding=understanding,
+            correlation_id=correlation_id,
+        )
+
+    def _agent_order_status_outcome(self, context, agent_decision):
+        if agent_decision is None:
+            return None
+        result = agent_decision.tool_results.get("get_active_order")
+        if result is None:
+            return None
+        if result.status != "OK":
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous n'avez aucune commande active à suivre pour le moment.",
+                context,
+                metadata={
+                    "capability": "order_status",
+                    "authoritative": True,
+                    "agent_read": True,
+                },
+            )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"La commande {result.data['reference']} est actuellement au statut "
+            f"{result.data.get('status_label', result.data['status'])}.",
+            context,
+            metadata={
+                "capability": "order_status",
+                "authoritative": True,
+                "agent_read": True,
+                "order_status": result.data["status"],
+            },
+        )
+
+    def _catalog_availability_outcome(self, context, *, agent_decision=None):
+        result = (
+            agent_decision.tool_results.get("list_marketplace_products")
+            if agent_decision is not None
+            else None
+        )
+        if result is not None:
+            total = int(result.data.get("count", 0))
+            names = [
+                str(item.get("name", ""))
+                for item in result.data.get("products", ())[:8]
+                if item.get("name")
+            ]
+        else:
+            products = get_marketplace_available_products().order_by("name")
+            total = products.count()
+            names = list(products.values_list("name", flat=True)[:8])
+        if not names:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Je viens de vérifier le catalogue : aucun produit n'est déclaré "
+                "disponible par une boutique active pour le moment.",
+                context,
+                metadata={
+                    "capability": "catalog_browse",
+                    "authoritative": True,
+                    "product_count": 0,
+                    "agent_read": result is not None,
+                },
+            )
+        preview = ", ".join(names)
+        remainder = total - len(names)
+        suffix = f", ainsi que {remainder} autre(s) produit(s)" if remainder else ""
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Oui. Je viens de vérifier le catalogue : {total} produit(s) sont "
+            f"actuellement disponibles, notamment {preview}{suffix}. "
+            "Dites-moi ce que vous recherchez et je vérifierai les correspondances.",
+            context,
+            metadata={
+                "capability": "catalog_browse",
+                "authoritative": True,
+                "product_count": total,
+                "agent_read": result is not None,
             },
         )
 
@@ -2173,7 +2900,14 @@ class ConversationalOrchestrator:
     def _has_pending_task(context):
         return has_resumable_work(context)
 
-    def _try_universal_interrupt(self, conversation, context, message, correlation_id):
+    def _try_universal_interrupt(
+        self,
+        conversation,
+        context,
+        message,
+        correlation_id,
+        conversation_context,
+    ):
         """Handle safe conversational detours without consuming the pending task.
 
         Structured callbacks and native locations remain deterministic and never enter
@@ -2195,15 +2929,42 @@ class ConversationalOrchestrator:
                 message.text,
                 correlation_id,
             )
+        # Seller and driver onboarding own their deterministic free-text slots.
+        # Do not make an LLM call before those handlers get a chance to consume
+        # their input; explicit universal commands above remain available.
+        if active_task_kind(context) in {
+            ConversationTaskKind.SELLER_ONBOARDING,
+            ConversationTaskKind.DRIVER_ONBOARDING,
+        } and not re.search(
+            r"\b(annul\w*|laissons tomber|ne veux plus|continu\w*|repren\w*|"
+            r"revenir|retour\w*|catalog\w*|produit\w*|est\W*ce|aide|help|"
+            r"bonjour|bonsoir|salut)\b",
+            message.text.casefold(),
+        ):
+            return None
         if not self._has_pending_task(context):
             return None
         understanding = self.understanding_service.understand_normalized(
             message,
-            limited_context=self._limited_interrupt_context(context),
+            limited_context=conversation_context,
             correlation_id=correlation_id,
         )
         if understanding is None:
             return None
+        understanding = self._normalize_understanding(understanding)
+        compound = self._handle_compound_turn(
+            conversation,
+            context,
+            understanding,
+            message,
+            correlation_id,
+            conversation_context,
+        )
+        if compound is not None:
+            return compound
+        agent_decision = self._run_active_agent(
+            conversation, message, understanding, correlation_id
+        )
         replacement = self._complete_unmatched_replacement(
             conversation, context, understanding, correlation_id
         )
@@ -2236,6 +2997,7 @@ class ConversationalOrchestrator:
                 MessageIntent.CREATE_OR_UPDATE_ORDER,
                 MessageIntent.MEMORY_SHOW,
                 MessageIntent.MEMORY_FORGET,
+                MessageIntent.CATALOG_BROWSE,
             }
         )
         if not is_universal:
@@ -2254,18 +3016,33 @@ class ConversationalOrchestrator:
         )
         if float(understanding.confidence) < self.confidence_threshold:
             return self._capability_outcome(context, None, conversation=conversation)
+        if understanding.intent == MessageIntent.ORDER_STATUS:
+            status_outcome = self._agent_order_status_outcome(
+                context, agent_decision
+            )
+            if status_outcome is not None:
+                return status_outcome
         if capability.status != CapabilityStatus.SUPPORTED:
             return self._capability_outcome(
                 context, capability, conversation=conversation
             )
         if understanding.intent == MessageIntent.ORDER_HISTORY:
-            return self._order_history_outcome(conversation, context)
+            return self._order_history_outcome(
+                conversation, context, agent_decision=agent_decision
+            )
+        if understanding.intent == MessageIntent.CATALOG_BROWSE:
+            return self._catalog_availability_outcome(
+                context, agent_decision=agent_decision
+            )
         if understanding.intent == MessageIntent.MEMORY_SHOW:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:
             return self._memory_forget_outcome(conversation, context)
         if understanding.intent == MessageIntent.CANCEL:
-            if understanding.ambiguities:
+            if understanding.ambiguities and not (
+                understanding.task_target == TaskTarget.CURRENT_TASK
+                and active_task_kind(context) is not None
+            ):
                 return self._outcome(
                     ConversationalOutcomeStatus.PROCESSED,
                     "Que souhaitez-vous annuler exactement ? "
@@ -2277,11 +3054,18 @@ class ConversationalOrchestrator:
                         "ambiguities": understanding.ambiguities,
                     },
                 )
+            if not self._task_target_matches_context(understanding, context):
+                return self._task_target_clarification(context, understanding)
             return self._cancel_current_task(
                 conversation, context, correlation_id=correlation_id
             )
         if understanding.intent == MessageIntent.ORDER_RESUME:
-            return self._resume_workflow(conversation, context, correlation_id)
+            return self._resume_workflow(
+                conversation,
+                context,
+                correlation_id,
+                target=understanding.task_target,
+            )
         if understanding.intent == MessageIntent.PAUSE:
             return self._pause_current_task(conversation, context)
         if understanding.intent == MessageIntent.BACK:
@@ -2301,6 +3085,8 @@ class ConversationalOrchestrator:
                 message.text,
                 understanding.intent,
                 correlation_id,
+                retrieval_query=understanding.standalone_question,
+                conversation_context=conversation_context,
             )
         return None
 
@@ -2312,7 +3098,7 @@ class ConversationalOrchestrator:
         logger.info(
             "conversation_deterministic_interrupt",
             extra={
-                "channel": conversation.channel,
+                "channel": getattr(conversation, "channel", None),
                 "command": command.value,
                 "active_task": active_task_kind(context),
                 "correlation_id": correlation_id,
@@ -2335,7 +3121,7 @@ class ConversationalOrchestrator:
             return self._memory_show_outcome(conversation, context)
         if command == UniversalCommand.MEMORY_FORGET:
             return self._memory_forget_outcome(conversation, context)
-        return self._help_outcome(context)
+        return self._help_outcome(context, question=text)
 
     def _memory_show_outcome(self, conversation, context):
         from apps.conversations.application.memory import ConversationMemoryService
@@ -2526,8 +3312,16 @@ class ConversationalOrchestrator:
             )
         return self._select_journey(conversation, context, target)
 
-    def _resume_workflow(self, conversation, context, correlation_id):
-        resumed = resume_last_task(context)
+    def _resume_workflow(
+        self, conversation, context, correlation_id, *, target=TaskTarget.NONE
+    ):
+        target_kind = {
+            TaskTarget.ORDER: ConversationTaskKind.ORDER,
+            TaskTarget.STORE_ONBOARDING: ConversationTaskKind.SELLER_ONBOARDING,
+            TaskTarget.DRIVER_ONBOARDING: ConversationTaskKind.DRIVER_ONBOARDING,
+            TaskTarget.SELLER_CATALOG: ConversationTaskKind.SELLER_CATALOG,
+        }.get(target)
+        resumed = resume_last_task(context, target=target_kind)
         if resumed.task is not None:
             context = resumed.context
             self.context_service.update_context(conversation, context)
@@ -2594,6 +3388,127 @@ class ConversationalOrchestrator:
         return self._recovery_outcome(conversation, context, recovery)
 
     @staticmethod
+    def _item_draft(item):
+        return {
+            "requested_name": item.requested_name,
+            "quantity": str(item.quantity) if item.quantity is not None else None,
+            "unit": item.unit.value if item.unit else None,
+            "variant_hint": item.variant_hint,
+            "notes": item.notes,
+        }
+
+    @staticmethod
+    def _draft_item(values):
+        return ExtractedItem(
+            requested_name=values.get("requested_name") or "",
+            quantity=(Decimal(values["quantity"]) if values.get("quantity") else None),
+            unit=ExtractedUnit(values["unit"]) if values.get("unit") else None,
+            variant_hint=values.get("variant_hint"),
+            notes=values.get("notes"),
+        )
+
+    @staticmethod
+    def _merge_item_draft(values, candidate):
+        merged = dict(values or {})
+        if candidate is None:
+            return merged
+        # The active PendingClarification owns the product identity.  A short
+        # answer such as "2 paquets" must only fill slots, not overwrite it.
+        if candidate.quantity is None and candidate.requested_name:
+            merged["requested_name"] = candidate.requested_name
+        if candidate.quantity is not None:
+            merged["quantity"] = str(candidate.quantity)
+        if candidate.unit is not None:
+            merged["unit"] = candidate.unit.value
+        if candidate.variant_hint is not None:
+            merged["variant_hint"] = candidate.variant_hint
+        if candidate.notes is not None:
+            merged["notes"] = candidate.notes
+        return merged
+
+    def _ask_for_item_slots(self, context, pending, *, actions=()):
+        values = pending.metadata.get("replacement") or pending.metadata.get("item", {})
+        if not values.get("requested_name"):
+            text = "Quel produit souhaitez-vous ajouter ?"
+        elif not values.get("quantity"):
+            text = f"Quelle quantité de {values['requested_name']} souhaitez-vous ?"
+        else:
+            text = f"Quelle unité souhaitez-vous pour {values['requested_name']} ?"
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=ResponsePlan(text=text),
+            actions_performed=actions,
+            active_order_id=context.active_order_id,
+            requires_followup=True,
+        )
+
+    def _complete_pending_item_slots(self, conversation, context, understanding, correlation_id):
+        pending = context.pending_clarification
+        if not pending or pending.metadata.get("operation") != OrderAction.ADD_ITEM.value:
+            return None
+        values = self._merge_item_draft(
+            pending.metadata.get("item", {}),
+            understanding.items[0] if understanding.items else None,
+        )
+        updated = replace(
+            pending,
+            item_reference=values.get("requested_name") or pending.item_reference,
+            kind=(ClarificationKind.MISSING_QUANTITY if not values.get("quantity") else ClarificationKind.MISSING_UNIT),
+            field="quantity" if not values.get("quantity") else "unit",
+            metadata={**pending.metadata, "item": values},
+        )
+        if not values.get("requested_name") or not values.get("quantity") or not values.get("unit"):
+            self.context_service.set_pending_clarification(conversation, updated)
+            return self._ask_for_item_slots(context, updated)
+        order = self._active_order(conversation, context)
+        if order is None:
+            return self._outcome(ConversationalOutcomeStatus.REJECTED, "Cette commande n'est plus disponible.", context)
+        item = self._draft_item(values)
+        resolution = self.grounding_service.ground_item(item)
+        self.order_building_service.add(order, item, resolution, actor=conversation.user, correlation_id=correlation_id)
+        self.context_service.clear_pending_clarification(conversation, flow=ConversationFlow.ORDER_BUILDING)
+        unmatched = self._unmatched_outcome(conversation, context, order)
+        if unmatched is not None:
+            return unmatched
+        return self._modified_outcome(conversation, order, "order_item_added")
+
+    def _complete_variant_text_selection(self, conversation, context, understanding, correlation_id):
+        """Treat a textual format answer as the same selection as a variant button."""
+        pending = context.pending_clarification
+        if not pending or pending.metadata.get("selection") != "variant":
+            return None
+        candidate = understanding.items[0] if understanding.items else None
+        hint = candidate.variant_hint if candidate else None
+        if not hint and candidate:
+            hint = candidate.requested_name
+        if not hint:
+            return None
+        facts = pending.metadata.get("item") or pending.metadata.get("replacement") or {}
+        resolution = self.grounding_service.ground_item(
+            ExtractedItem(
+                requested_name=facts.get("requested_name", pending.item_reference or ""),
+                quantity=Decimal(facts["quantity"]) if facts.get("quantity") else None,
+                unit=ExtractedUnit(facts["unit"]) if facts.get("unit") else None,
+                variant_hint=hint,
+            )
+        )
+        if (
+            resolution.status == OrderItemResolutionStatus.MATCHED
+            and str(resolution.variant_id) in pending.candidate_ids
+        ):
+            return self._clarification_choice_action(
+                conversation,
+                context,
+                f"clarification.select_variant.{resolution.variant_id}",
+                correlation_id,
+            )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Je ne trouve pas ce format pour {pending.item_reference}. Choisissez un format proposé.",
+            context,
+        )
+
+    @staticmethod
     def _task_label(kind):
         return {
             ConversationTaskKind.ORDER: "la commande",
@@ -2604,20 +3519,61 @@ class ConversationalOrchestrator:
             ConversationTaskKind.JOURNEY: "le parcours en cours",
         }[kind]
 
-    def _help_outcome(self, context):
+    def _help_outcome(self, context, *, question=""):
+        """Useful deterministic fallback when grounded generation is unavailable."""
+
         task = active_task_kind(context)
         suffix = (
             f" {self._task_label(task).capitalize()} reste en cours."
             if task is not None
             else ""
         )
+        normalized = re.sub(r"[^a-z0-9\s]", " ", question.casefold())
+        if "whatasso" in normalized and any(
+            phrase in normalized for phrase in ("c est toi", "es tu", "qui es tu")
+        ):
+            text = (
+                "WhatAssoh est toute la plateforme de commerce local. "
+                "Je suis son assistant conversationnel : je vous aide à l'utiliser, "
+                "mais WhatAssoh comprend aussi les boutiques, le catalogue, les "
+                "commandes et la livraison."
+            )
+        elif "whatasso" in normalized and any(
+            word in normalized.split() for word in ("sert", "but", "raison")
+        ):
+            text = (
+                "WhatAssoh relie clients, boutiques et livreurs pour rechercher des "
+                "produits, commander, vendre et organiser une livraison depuis une "
+                "conversation."
+            )
+        elif "livr" in normalized:
+            text = (
+                "Pour recevoir une livraison, préparez votre commande comme client; "
+                "cela ne crée pas de profil livreur. Le parcours livreur sert aux "
+                "personnes qui veulent effectuer des livraisons."
+            )
+        elif "annul" in normalized and "comment" in normalized:
+            text = (
+                "Vous pouvez demander l'annulation en nommant la tâche concernée. "
+                "Demander comment annuler donne seulement une explication; aucune "
+                "action n'est exécutée sans demande explicite."
+            )
+        else:
+            text = (
+                "Je peux vous aider à acheter des produits, créer ou gérer une "
+                "boutique, et utiliser le parcours livreur. Vous pouvez aussi dire "
+                "« retour », « plus tard », « reprendre » ou « annuler »."
+            )
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
-            "Je peux vous aider à acheter des produits, créer ou gérer une boutique, "
-            "et utiliser le parcours livreur. Vous pouvez aussi dire « retour », "
-            f"« plus tard », « reprendre » ou « annuler ».{suffix}",
+            f"{text}{suffix}",
             context,
-            metadata={"capability": "help", "task_preserved": task is not None},
+            metadata={
+                "capability": "help",
+                "task_preserved": task is not None,
+                "grounded": False,
+                "support_fallback": True,
+            },
         )
 
     def _complete_unmatched_replacement(
@@ -2650,39 +3606,73 @@ class ConversationalOrchestrator:
         replacement = understanding.replacement or (
             understanding.items[0] if understanding.items else None
         )
-        if (
-            replacement is None
-            or replacement.quantity is None
-            or replacement.unit is None
-        ):
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                "Indiquez le produit de remplacement avec sa quantité.",
-                context,
-            )
+        values = self._merge_item_draft(
+            pending.metadata.get("replacement", {}), replacement
+        )
+        updated = replace(
+            pending,
+            item_reference=values.get("requested_name") or pending.item_reference,
+            kind=(
+                ClarificationKind.MISSING_QUANTITY
+                if not values.get("quantity")
+                else ClarificationKind.MISSING_UNIT
+            ),
+            field="quantity" if not values.get("quantity") else "unit",
+            metadata={**pending.metadata, "replacement": values},
+        )
+        if not values.get("requested_name") or not values.get("quantity") or not values.get("unit"):
+            self.context_service.set_pending_clarification(conversation, updated)
+            return self._ask_for_item_slots(context, updated)
+        replacement = self._draft_item(values)
         resolution = self.grounding_service.ground_item(replacement)
         if resolution.status == OrderItemResolutionStatus.UNMATCHED:
-            return self._unmatched_outcome(
-                conversation, context, order, "replacement_unavailable"
+            # The original unmatched line stays targeted, but a rejected
+            # replacement must not leak its quantity/unit into the next choice.
+            retry_pending = replace(
+                updated,
+                item_reference=target.item.requested_name,
+                metadata={
+                    **updated.metadata,
+                    "replacement": {
+                        "requested_name": None,
+                        "quantity": None,
+                        "unit": None,
+                        "notes": None,
+                    },
+                },
+            )
+            self.context_service.set_pending_clarification(conversation, retry_pending)
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                f"{replacement.requested_name} n’est pas disponible non plus. "
+                f"Quel autre produit souhaitez-vous utiliser pour remplacer "
+                f"{target.item.requested_name} ?",
+                context,
+                actions=(
+                    ResponseAction(
+                        action_id="order.unmatched.remove", label="Continuer sans"
+                    ),
+                ),
             )
         if resolution.status == OrderItemResolutionStatus.AMBIGUOUS:
+            selecting_variant = resolution.reason.value == "VARIANT_SELECTION_REQUIRED"
             pending = PendingClarification(
                 kind=ClarificationKind.AMBIGUOUS_PRODUCT,
                 field="product",
                 item_reference=replacement.requested_name,
-                candidate_ids=tuple(
-                    str(candidate.product_id) for candidate in resolution.candidates
-                ),
+                candidate_ids=tuple(str(candidate.variant_id if selecting_variant else candidate.product_id) for candidate in resolution.candidates),
                 metadata={
-                    "operation": OrderAction.REPLACE_ITEM.value,
+                    "operation": "UNMATCHED_ITEM_REPLACE",
                     "order_id": str(order.id),
                     "target_order_item_id": str(target.item.id),
                     "replacement": {
                         "requested_name": replacement.requested_name,
                         "quantity": str(replacement.quantity),
                         "unit": replacement.unit.value,
+                        "variant_hint": replacement.variant_hint,
                         "notes": replacement.notes,
                     },
+                    "selection": "variant" if selecting_variant else "product",
                 },
             )
             self.context_service.set_pending_clarification(
@@ -2690,24 +3680,32 @@ class ConversationalOrchestrator:
             )
             return self._outcome(
                 ConversationalOutcomeStatus.PROCESSED,
-                "Plusieurs produits correspondent. Lequel souhaitez-vous ?",
+                f"Quel format de {replacement.requested_name} souhaitez-vous ?" if selecting_variant else "Plusieurs produits correspondent. Lequel souhaitez-vous ?",
                 context,
                 actions=tuple(
                     ResponseAction(
-                        action_id=f"clarification.select_product.{candidate.product_id}",
-                        label=candidate.canonical_name,
+                        action_id=(f"clarification.select_variant.{candidate.variant_id}" if selecting_variant else f"clarification.select_product.{candidate.product_id}"),
+                        label=candidate.metadata.get("variant_label", candidate.canonical_name) if selecting_variant else candidate.canonical_name,
                     )
                     for candidate in resolution.candidates
                 ),
             )
         if resolution.status != OrderItemResolutionStatus.MATCHED:
-            return self._unmatched_outcome(
-                conversation, context, order, "replacement_unavailable"
-            )
+            self.context_service.set_pending_clarification(conversation, updated)
+            return self._ask_for_item_slots(context, updated)
         self.order_building_service.replace(
             target.item,
             replacement,
             resolution,
+            actor=conversation.user,
+            correlation_id=correlation_id,
+        )
+        # Replacement identity and customer-requested slots are separate in the
+        # existing order service: persist the collected quantity/unit explicitly.
+        self.order_building_service.update(
+            target.item,
+            quantity=replacement.quantity,
+            unit=replacement.unit,
             actor=conversation.user,
             correlation_id=correlation_id,
         )
@@ -2817,8 +3815,13 @@ class ConversationalOrchestrator:
     def _clarification_choice_action(
         self, conversation, context, action_id, correlation_id
     ):
-        prefix = "clarification.select_product."
-        if not action_id.startswith(prefix):
+        product_prefix = "clarification.select_product."
+        variant_prefix = "clarification.select_variant."
+        if action_id.startswith(product_prefix):
+            prefix, selecting_variant = product_prefix, False
+        elif action_id.startswith(variant_prefix):
+            prefix, selecting_variant = variant_prefix, True
+        else:
             return None
         pending = context.pending_clarification
         candidate_id = action_id.removeprefix(prefix)
@@ -2826,6 +3829,7 @@ class ConversationalOrchestrator:
             not pending
             or pending.kind != ClarificationKind.AMBIGUOUS_PRODUCT
             or candidate_id not in pending.candidate_ids
+            or (pending.metadata.get("selection") == "variant") != selecting_variant
         ):
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
@@ -2836,6 +3840,7 @@ class ConversationalOrchestrator:
         if operation not in {
             OrderAction.REPLACE_ITEM.value,
             OrderAction.ADD_ITEM.value,
+            "UNMATCHED_ITEM_REPLACE",
         }:
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
@@ -2865,9 +3870,19 @@ class ConversationalOrchestrator:
                 "Ce choix n'est plus disponible.",
                 context,
             )
-        product = Product.objects.filter(
-            pk=candidate_id, status=ProductStatus.ACTIVE
-        ).first()
+        product = None
+        variant = None
+        if selecting_variant:
+            variant = ProductVariant.objects.filter(
+                pk=candidate_id,
+                status=ProductVariantStatus.ACTIVE,
+                product__status=ProductStatus.ACTIVE,
+            ).select_related("product").first()
+            product = variant.product if variant else None
+        else:
+            product = Product.objects.filter(
+                pk=candidate_id, status=ProductStatus.ACTIVE
+            ).first()
         if operation == OrderAction.ADD_ITEM.value:
             if product is None:
                 return self._outcome(
@@ -2880,6 +3895,7 @@ class ConversationalOrchestrator:
                 requested_name=facts["requested_name"],
                 quantity=Decimal(facts["quantity"]),
                 unit=facts["unit"],
+                variant_hint=facts.get("variant_hint"),
                 notes=facts.get("notes"),
             )
             from apps.catalog.domain.grounding import (
@@ -2891,7 +3907,7 @@ class ConversationalOrchestrator:
                 status=OrderItemResolutionStatus.MATCHED,
                 requested_name=item.requested_name,
                 product_id=product.id,
-                variant_id=None,
+                variant_id=variant.id if variant else None,
                 candidates=(),
                 reason=CatalogResolutionReason.EXACT_MATCH,
             )
@@ -2919,6 +3935,7 @@ class ConversationalOrchestrator:
             if facts.get("quantity")
             else target.item.quantity,
             unit=facts.get("unit") or target.item.unit,
+            variant_hint=facts.get("variant_hint"),
             notes=facts.get("notes"),
         )
         from apps.catalog.domain.grounding import (
@@ -2930,7 +3947,7 @@ class ConversationalOrchestrator:
             status=OrderItemResolutionStatus.MATCHED,
             requested_name=replacement.requested_name,
             product_id=product.id,
-            variant_id=None,
+            variant_id=variant.id if variant else None,
             candidates=(),
             reason=CatalogResolutionReason.EXACT_MATCH,
         )

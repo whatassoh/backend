@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 from django.test import override_settings
 
+from apps.ai.application.composer import COMPOSER_SCHEMA
+from apps.ai.application.conversation_memory import SUMMARY_SCHEMA
+from apps.ai.application.message_understanding import MESSAGE_UNDERSTANDING_SCHEMA
 from apps.ai.application.registry import get_ai_provider
+from apps.ai.application.seller_catalog_understanding import SCHEMA as SELLER_SCHEMA
 from apps.ai.application.service import AIService
 from apps.ai.contracts.requests import AIStructuredRequest
 from apps.ai.domain.exceptions import (
@@ -19,7 +23,8 @@ from apps.ai.domain.exceptions import (
 )
 from apps.ai.domain.value_objects import PromptReference
 from apps.ai.providers.mock import MockAIProvider
-from apps.ai.providers.openai import OpenAIProvider
+from apps.ai.providers.openai import OpenAIProvider, _validate_strict_schema
+from apps.knowledge.application.answers import ANSWER_SCHEMA
 
 SCHEMA = {
     "title": "test_result",
@@ -135,6 +140,66 @@ def test_openai_uses_structured_outputs_and_extracts_usage():
     assert result.usage.total_tokens == 5
     assert result.usage.cached_input_tokens == 1
     assert result.provider_request_id == "resp-1"
+
+
+@override_settings(OPENAI_API_KEY="test-key", AI_MODEL="configured")
+def test_openai_rejects_non_strict_schema_before_network_call():
+    called = False
+
+    def create(**kwargs):
+        nonlocal called
+        called = True
+
+    client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    invalid_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "required_value": {"type": "string"},
+            "optional_value": {"type": ["string", "null"]},
+        },
+        "required": ["required_value"],
+    }
+
+    with pytest.raises(AIConfigurationError, match="optional_value"):
+        OpenAIProvider(client=client).generate_structured(
+            request(response_schema=invalid_schema)
+        )
+
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        MESSAGE_UNDERSTANDING_SCHEMA,
+        COMPOSER_SCHEMA,
+        SUMMARY_SCHEMA,
+        SELLER_SCHEMA,
+        ANSWER_SCHEMA,
+    ],
+    ids=["understanding", "composer", "memory", "seller", "knowledge-answer"],
+)
+def test_every_openai_response_schema_is_strict_compatible(schema):
+    _validate_strict_schema(schema)
+
+
+def test_openai_rejects_unsupported_strict_schema_keyword():
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["values"],
+        "properties": {
+            "values": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"type": "string"},
+            }
+        },
+    }
+
+    with pytest.raises(AIConfigurationError, match="uniqueItems"):
+        _validate_strict_schema(schema)
 
 
 def test_logs_are_correlated_but_do_not_include_user_content(caplog):

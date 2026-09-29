@@ -31,6 +31,7 @@ class AgentGraphState(TypedDict, total=False):
     active_task: str | None
     active_journey: str | None
     intent: str
+    journey_goal: str
     confidence: float
     ambiguities: list[str]
     entities: list[dict[str, Any]]

@@ -559,7 +559,19 @@ Mesurer comprehension par champ, selection d'outil, arguments, succes de tache, 
 
 **Passage :** recall/groundedness cibles et zero fuite inter-tenant dans les tests.
 
-### Lot 6 - Voix
+### Lot 6 - Contexte multi-intention et agent actif en lecture
+
+- fenetre de contexte bornee et securisee pour la comprehension et le composeur;
+- contrat multi-intention distinguant expliquer, agir et expliquer puis agir;
+- distinction explicite entre etre livre et devenir livreur;
+- LangGraph actif uniquement pour les outils `R1` en lecture;
+- RAG contextuel generalise sur la documentation publique autorisee.
+
+**Passage :** les dialogues reels sur l'identite de WhatAssoh, l'annulation composee
+et la livraison client reussissent sans demarrer un mauvais parcours; aucune ecriture
+agentique n'est executable.
+
+### Lot 7 - Voix
 
 - normalisation media WhatsApp/Telegram;
 - telechargement prive, controles, transcription et retention;
@@ -567,7 +579,7 @@ Mesurer comprehension par champ, selection d'outil, arguments, succes de tache, 
 
 **Passage :** corpus audio, limites, erreurs et suppression valides; ordre preserve.
 
-### Lot 7 - Canari puis generalisation
+### Lot 8 - Canari puis generalisation
 
 - personnel/interne, puis faible pourcentage, puis cohortes;
 - comparaison KPI et rollback automatique;

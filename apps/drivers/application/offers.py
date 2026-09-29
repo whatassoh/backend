@@ -2,6 +2,7 @@
 
 import logging
 from datetime import timedelta
+from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -26,6 +27,24 @@ from apps.orders.infrastructure.models import Order
 from common.events import publish
 
 logger = logging.getLogger(__name__)
+
+DRIVER_OFFER_ACTIONS = ("driver_offer.accept", "driver_offer.reject")
+
+
+def encode_driver_offer_action(action_id: str, offer_id) -> str:
+    if action_id not in DRIVER_OFFER_ACTIONS:
+        raise ValueError("Unsupported DriverOffer action.")
+    return f"{action_id}:{UUID(str(offer_id))}"
+
+
+def decode_driver_offer_action(callback_id: str) -> tuple[str, UUID] | None:
+    action_id, separator, raw_offer_id = (callback_id or "").partition(":")
+    if not separator or action_id not in DRIVER_OFFER_ACTIONS:
+        return None
+    try:
+        return action_id, UUID(raw_offer_id)
+    except (ValueError, AttributeError):
+        return None
 
 
 class DriverOfferService:

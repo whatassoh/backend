@@ -2,6 +2,21 @@
 
 Backend principal de **Whatassoh**, une marketplace conversationnelle accessible principalement via **WhatsApp**.
 
+## Données de démonstration
+
+Après les migrations, la commande suivante crée un catalogue idempotent avec des
+produits, variantes, aliases et deux boutiques de démonstration à Douala :
+
+```bash
+python manage.py seed_phase2
+```
+
+- Marché Bonamoussadi — `674242450`
+- Épicerie Akwa — `696767542`
+
+Les coordonnées sont uniquement destinées à la démonstration et ne représentent
+pas des commerces réels.
+
 L'objectif est de permettre à un utilisateur de rechercher, commander et faire livrer des produits à travers une conversation naturelle, tout en conservant un backend métier fiable, transactionnel et indépendant de l'IA ou du canal WhatsApp.
 
 Le projet est construit principalement avec :

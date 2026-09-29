@@ -8,6 +8,9 @@ from apps.ai.application.composer import NaturalResponseComposer
 from apps.ai.application.response_evaluation import evaluate_response
 from apps.ai.application.service import AIService
 from apps.ai.domain.response import ResponseBrief
+from apps.conversations.application.context_window import (
+    ConversationContextWindowBuilder,
+)
 from apps.conversations.application.interruptions import active_task_kind
 from apps.conversations.application.memory import ConversationMemoryService
 from apps.conversations.application.response_policies import select_response_policy
@@ -39,6 +42,7 @@ def compose_outcome_safely(
     policy = select_response_policy(outcome, context)
     if not policy.composable:
         return outcome
+    dialogue_context = ConversationContextWindowBuilder().build(conversation, context)
     brief = ResponseBrief(
         objective=policy.objective,
         authoritative_text=outcome.response.text,
@@ -64,6 +68,7 @@ def compose_outcome_safely(
         metadata={
             "greeting_count": context.social_state.greeting_count,
             "introduced": bool(context.social_state.introduced_at),
+            "recent_messages": dialogue_context.get("recent_messages", [])[-6:],
         },
     )
     accepted = False

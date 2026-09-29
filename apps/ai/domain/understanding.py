@@ -25,6 +25,39 @@ class MessageIntent(StrEnum):
     BACK = "BACK"
     MEMORY_SHOW = "MEMORY_SHOW"
     MEMORY_FORGET = "MEMORY_FORGET"
+    CATALOG_BROWSE = "CATALOG_BROWSE"
+
+
+class InteractionMode(StrEnum):
+    """Whether the turn asks for information, an action, or both."""
+
+    ANSWER = "ANSWER"
+    ACT = "ACT"
+    ANSWER_AND_ACT = "ANSWER_AND_ACT"
+    CLARIFY = "CLARIFY"
+
+
+class JourneyGoal(StrEnum):
+    """User goal kept separate from the coarse routing intent."""
+
+    NONE = "NONE"
+    BUY_PRODUCTS = "BUY_PRODUCTS"
+    RECEIVE_DELIVERY = "RECEIVE_DELIVERY"
+    BECOME_SELLER = "BECOME_SELLER"
+    MANAGE_STORE = "MANAGE_STORE"
+    BECOME_DRIVER = "BECOME_DRIVER"
+    WORK_AS_DRIVER = "WORK_AS_DRIVER"
+
+
+class TaskTarget(StrEnum):
+    """Contextual target expressed by the user, never a business identifier."""
+
+    NONE = "NONE"
+    CURRENT_TASK = "CURRENT_TASK"
+    ORDER = "ORDER"
+    STORE_ONBOARDING = "STORE_ONBOARDING"
+    DRIVER_ONBOARDING = "DRIVER_ONBOARDING"
+    SELLER_CATALOG = "SELLER_CATALOG"
 
 
 class OrderAction(StrEnum):
@@ -58,6 +91,7 @@ class ExtractedItem:
     requested_name: str
     quantity: Decimal | None = None
     unit: ExtractedUnit | None = None
+    variant_hint: str | None = None
     notes: str | None = None
 
 
@@ -72,6 +106,12 @@ class ItemTargetReference:
 class UserMessageUnderstanding:
     intent: MessageIntent
     confidence: Decimal
+    secondary_intents: tuple[MessageIntent, ...] = ()
+    interaction_mode: InteractionMode = InteractionMode.ANSWER
+    action_requested: bool = False
+    journey_goal: JourneyGoal = JourneyGoal.NONE
+    standalone_question: str | None = None
+    task_target: TaskTarget = TaskTarget.NONE
     items: tuple[ExtractedItem, ...] = ()
     location_text: str | None = None
     confirmation: bool | None = None
@@ -103,6 +143,16 @@ def parse_understanding(data: dict[str, Any]) -> UserMessageUnderstanding:
         result = UserMessageUnderstanding(
             intent=MessageIntent(data["intent"]),
             confidence=confidence,
+            secondary_intents=tuple(
+                MessageIntent(value) for value in data.get("secondary_intents", ())
+            ),
+            interaction_mode=InteractionMode(
+                data.get("interaction_mode", InteractionMode.ANSWER)
+            ),
+            action_requested=data.get("action_requested", False),
+            journey_goal=JourneyGoal(data.get("journey_goal", JourneyGoal.NONE)),
+            standalone_question=_optional_text(data.get("standalone_question")),
+            task_target=TaskTarget(data.get("task_target", TaskTarget.NONE)),
             items=items,
             location_text=data.get("location_text"),
             confirmation=data.get("confirmation"),
@@ -128,6 +178,14 @@ def _parse_target(data: dict[str, Any] | None) -> ItemTargetReference | None:
     return ItemTargetReference(text=text.strip())
 
 
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Optional text must be null or non-empty.")
+    return value.strip()
+
+
 def _parse_item(data: dict[str, Any]) -> ExtractedItem:
     quantity = data.get("quantity")
     try:
@@ -139,6 +197,7 @@ def _parse_item(data: dict[str, Any]) -> ExtractedItem:
         requested_name=data["requested_name"].strip(),
         quantity=parsed_quantity,
         unit=unit,
+        variant_hint=_optional_text(data.get("variant_hint")),
         notes=data.get("notes"),
     )
 
@@ -148,6 +207,29 @@ def _validate_understanding(result: UserMessageUnderstanding) -> None:
         raise AIInvalidResponseError("Confidence must be between zero and one.")
     if result.confirmation is not None and not isinstance(result.confirmation, bool):
         raise AIInvalidResponseError("Confirmation must be a boolean or null.")
+    if not isinstance(result.action_requested, bool):
+        raise AIInvalidResponseError("action_requested must be a boolean.")
+    if result.intent in result.secondary_intents:
+        raise AIInvalidResponseError("Primary intent cannot be repeated as secondary.")
+    if len(set(result.secondary_intents)) != len(result.secondary_intents):
+        raise AIInvalidResponseError("Secondary intents must be unique.")
+    if len(result.secondary_intents) > 3:
+        raise AIInvalidResponseError("Too many secondary intents.")
+    if result.interaction_mode == InteractionMode.ANSWER_AND_ACT and not (
+        result.action_requested and result.secondary_intents
+    ):
+        raise AIInvalidResponseError(
+            "ANSWER_AND_ACT requires an explicit action and a secondary intent."
+        )
+    if result.interaction_mode == InteractionMode.ACT and not result.action_requested:
+        raise AIInvalidResponseError("ACT requires an explicit action request.")
+    if result.interaction_mode in {
+        InteractionMode.ANSWER,
+        InteractionMode.CLARIFY,
+    } and result.action_requested:
+        raise AIInvalidResponseError(
+            "Informational or clarification turns cannot request an action."
+        )
     for item in (
         *result.items,
         *(() if result.replacement is None else (result.replacement,)),

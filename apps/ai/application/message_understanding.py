@@ -4,9 +4,12 @@ from typing import Any
 from apps.ai.application.service import AIService
 from apps.ai.contracts.requests import AIStructuredRequest
 from apps.ai.domain.understanding import (
+    InteractionMode,
+    JourneyGoal,
     MessageIntent,
     MessageUnderstandingInput,
     OrderAction,
+    TaskTarget,
     UserMessageUnderstanding,
     parse_understanding,
 )
@@ -25,6 +28,12 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": [
         "intent",
+        "secondary_intents",
+        "interaction_mode",
+        "action_requested",
+        "journey_goal",
+        "standalone_question",
+        "task_target",
         "confidence",
         "items",
         "location_text",
@@ -32,11 +41,36 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "missing_fields",
         "ambiguities",
         "language",
+        "order_action",
+        "target_reference",
+        "replacement",
     ],
     "properties": {
         "intent": {
             "type": "string",
             "enum": [intent.value for intent in MessageIntent],
+        },
+        "secondary_intents": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "string",
+                "enum": [intent.value for intent in MessageIntent],
+            },
+        },
+        "interaction_mode": {
+            "type": "string",
+            "enum": [mode.value for mode in InteractionMode],
+        },
+        "action_requested": {"type": "boolean"},
+        "journey_goal": {
+            "type": "string",
+            "enum": [goal.value for goal in JourneyGoal],
+        },
+        "standalone_question": {"type": ["string", "null"], "minLength": 1},
+        "task_target": {
+            "type": "string",
+            "enum": [target.value for target in TaskTarget],
         },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "items": {
@@ -44,7 +78,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["requested_name", "quantity", "unit", "notes"],
+                "required": ["requested_name", "quantity", "unit", "variant_hint", "notes"],
                 "properties": {
                     "requested_name": {"type": "string", "minLength": 1},
                     "quantity": {"type": ["number", "null"], "exclusiveMinimum": 0},
@@ -63,6 +97,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
                             None,
                         ],
                     },
+                    "variant_hint": {"type": ["string", "null"], "maxLength": 120},
                     "notes": {"type": ["string", "null"]},
                 },
             },
@@ -85,7 +120,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "replacement": {
             "type": ["object", "null"],
             "additionalProperties": False,
-            "required": ["requested_name", "quantity", "unit", "notes"],
+            "required": ["requested_name", "quantity", "unit", "variant_hint", "notes"],
             "properties": {
                 "requested_name": {"type": "string", "minLength": 1},
                 "quantity": {"type": ["number", "null"], "exclusiveMinimum": 0},
@@ -102,9 +137,10 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
                         "BAG",
                         "OTHER",
                         None,
-                    ],
-                },
-                "notes": {"type": ["string", "null"]},
+                        ],
+                    },
+                    "variant_hint": {"type": ["string", "null"], "maxLength": 120},
+                    "notes": {"type": ["string", "null"]},
             },
         },
     },
@@ -157,6 +193,8 @@ class MessageUnderstandingService:
             return UserMessageUnderstanding(
                 intent=MessageIntent.PROVIDE_LOCATION,
                 confidence=1,
+                interaction_mode=InteractionMode.ACT,
+                action_requested=True,
             )
         if MessageType(message.message_type) == MessageType.INTERACTIVE and (
             message.metadata.get("action_id")

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-# Configure the production switches delivered by AI lots 1 through 5 without
+# Configure the production switches delivered by AI lots 1 through 6 without
 # sourcing the environment file or exposing secrets in process arguments.
 
 PROFILE="${1:-shadow}"
@@ -23,7 +23,7 @@ case "$PROFILE" in
         ;;
     active)
         DEFAULT_CHANNELS="WHATSAPP"
-        DEFAULT_ROLLOUT=10
+        DEFAULT_ROLLOUT=100
         ;;
     *)
         printf '[ERROR] Profil invalide: %s (baseline, shadow ou active).\n' \
@@ -168,7 +168,11 @@ case "$EMBEDDING_PROVIDER" in
 esac
 
 AGENT_SHADOW=False
+AGENT_ACTIVE=False
+AGENT_TOOLS=False
+AGENT_MEMORY=False
 STYLE=False
+CONTEXT_ENGINE=False
 CONVERSATION_MEMORY=False
 MEMORY_SUMMARY=False
 COMPOSER_SHADOW=False
@@ -178,17 +182,21 @@ RAG_SHADOW=False
 RAG_SEMANTIC=False
 
 if [[ "$PROFILE" == "shadow" || "$PROFILE" == "active" ]]; then
-    AGENT_SHADOW=True
     STYLE=True
+    CONTEXT_ENGINE=True
     CONVERSATION_MEMORY=True
     MEMORY_SUMMARY=True
     RAG_SEMANTIC=True
 fi
 if [[ "$PROFILE" == "shadow" ]]; then
+    AGENT_SHADOW=True
     COMPOSER_SHADOW=True
     RAG_SHADOW=True
 fi
 if [[ "$PROFILE" == "active" ]]; then
+    AGENT_ACTIVE=True
+    AGENT_TOOLS=True
+    AGENT_MEMORY=True
     COMPOSER_ACTIVE=True
     RAG_ACTIVE=True
 fi
@@ -213,12 +221,12 @@ env_set CONVERSATION_RETRY_BASE_SECONDS 15
 env_set CONVERSATION_RETRY_MAX_SECONDS 300
 env_set CONVERSATION_RECONCILIATION_BATCH_SIZE 100
 
-# Lot 3: the graph remains shadow-only; no production execution node exists yet.
-env_set AI_AGENT_ENABLED False
+# Lots 3 and 6: LangGraph is shadowed or active with R1 read tools only.
+env_set AI_AGENT_ENABLED "$AGENT_ACTIVE"
 env_set AI_AGENT_SHADOW_ENABLED "$AGENT_SHADOW"
-env_set AI_AGENT_TOOLS_ENABLED False
+env_set AI_AGENT_TOOLS_ENABLED "$AGENT_TOOLS"
 env_set AI_AGENT_WRITE_TOOLS_ENABLED False
-env_set AI_AGENT_MEMORY_ENABLED False
+env_set AI_AGENT_MEMORY_ENABLED "$AGENT_MEMORY"
 env_set AI_AGENT_MAX_PLAN_STEPS 4
 env_set AI_AGENT_SHADOW_CACHE_SECONDS 300
 env_set AI_TOOL_MANIFEST_CACHE_SECONDS 300
@@ -235,6 +243,12 @@ env_set AI_MEMORY_SUMMARY_MIN_MESSAGES 8
 env_set AI_MEMORY_SUMMARY_BATCH_SIZE 24
 env_set AI_MEMORY_FACT_TTL_DAYS 365
 env_set AI_MEMORY_RECONCILIATION_BATCH_SIZE 100
+
+# Lot 6: bounded conversational context; it is never an authorization source.
+env_set AI_CONTEXT_ENGINE_ENABLED "$CONTEXT_ENGINE"
+env_set AI_CONTEXT_MAX_RECENT_MESSAGES 8
+env_set AI_CONTEXT_MAX_MESSAGE_CHARACTERS 500
+env_set AI_CONTEXT_MAX_SUMMARY_CHARACTERS 2000
 
 # Lot 5: ACL-first hybrid RAG.
 env_set AI_RAG_ENABLED "$RAG_ACTIVE"
@@ -278,7 +292,7 @@ fi
 mv "$WORK_FILE" "$ENV_FILE"
 WORK_FILE=""
 
-printf '[OK] Configuration IA lots 1-5 mise a jour.\n'
+printf '[OK] Configuration IA lots 1-6 mise a jour.\n'
 printf '     profil=%s canaux=%s rag_rollout=%s%%\n' \
     "$PROFILE" "${CHANNELS:-aucun}" "$RAG_ROLLOUT"
 printf '     env=%s\n' "$ENV_FILE"

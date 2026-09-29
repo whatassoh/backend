@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 from apps.catalog.application.selectors import (
     get_available_store_products,
     get_candidate_store_products,
+    get_marketplace_available_products,
     get_store_catalog,
     get_store_product,
     get_store_products,
@@ -262,6 +263,37 @@ def test_candidate_store_products_excludes_non_operational_records():
 
     assert list(get_candidate_store_products(product)) == [available]
     assert unavailable not in get_candidate_store_products(product)
+
+
+@pytest.mark.django_db
+def test_marketplace_available_products_uses_live_store_catalog_state():
+    available = create_test_product("Riz")
+    unavailable = create_test_product("Savon")
+    inactive_store_product = create_test_product("Huile")
+    active_store = create_test_store("Active")
+    inactive_store = create_test_store("Inactive")
+    add_product_to_store(
+        store=active_store,
+        product=available,
+        availability_status=ProductAvailability.AVAILABLE,
+    )
+    add_product_to_store(
+        store=active_store,
+        product=unavailable,
+        availability_status=ProductAvailability.UNAVAILABLE,
+    )
+    add_product_to_store(
+        store=inactive_store,
+        product=inactive_store_product,
+        availability_status=ProductAvailability.AVAILABLE,
+    )
+    # Catalog entries are created while the store is active, then retained as
+    # historical data after deactivation.  Marketplace visibility is governed
+    # by the live store state, not by deleting the StoreProduct relationship.
+    inactive_store.status = StoreStatus.INACTIVE
+    inactive_store.save(update_fields=["status", "updated_at"])
+
+    assert list(get_marketplace_available_products()) == [available]
 
 
 @pytest.mark.django_db
