@@ -8,14 +8,14 @@ from typing import Any
 from django.conf import settings
 
 from apps.ai.application.agent_graph import GRAPH_VERSION, build_compiled_graph
-from apps.ai.application.tools import (
+from apps.ai.domain.agent_state import ToolRisk
+from apps.ai.infrastructure.checkpoints import postgres_saver
+from apps.ai.infrastructure.models import AgentExecutionRun
+from apps.conversations.application.ai_tools import (
     ToolContext,
     ToolResult,
     build_business_tool_registry,
 )
-from apps.ai.domain.agent_state import ToolRisk
-from apps.ai.infrastructure.checkpoints import postgres_saver
-from apps.ai.infrastructure.models import AgentExecutionRun
 from apps.conversations.application.interruptions import active_task_kind
 from apps.conversations.domain.context import ConversationContext
 
