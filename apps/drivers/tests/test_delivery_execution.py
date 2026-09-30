@@ -8,13 +8,19 @@ from apps.drivers.application.delivery_execution import (
     DeliveryExecutionService,
     DeliveryMissionAuthorizationError,
     DeliveryMissionNotFound,
+    decode_delivery_action,
+    encode_delivery_action,
 )
 from apps.drivers.application.services import activate_driver, create_driver_profile
 from apps.drivers.infrastructure.models import DriverAssignment, DriverOffer
 from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
 from apps.messaging.domain.enums import MessagingChannel
-from apps.orders.application.services import mark_delivered, mark_in_delivery, mark_picked_up
+from apps.orders.application.services import (
+    mark_delivered,
+    mark_in_delivery,
+    mark_picked_up,
+)
 from apps.orders.domain.enums import OrderStatus
 from apps.orders.infrastructure.models import Order
 from apps.stores.domain.enums import StoreOfferStatus
@@ -104,3 +110,18 @@ def test_allowed_actions_follow_order_state_without_any_llm_or_conversation_cont
     mark_in_delivery(item.order)
     mission = DeliveryExecutionService().get_active_mission(item.driver.user)
     assert mission.allowed_actions == ("delivery.confirm_delivered", "delivery.report_issue")
+
+
+def test_delivery_callback_codec_targets_one_assignment_and_rejects_malformed_ids():
+    from uuid import uuid4
+
+    assignment_id = uuid4()
+    encoded = encode_delivery_action("delivery.confirm_pickup", assignment_id)
+    assert encoded == f"delivery.confirm_pickup:{assignment_id}"
+    assert decode_delivery_action(encoded) == (
+        "delivery.confirm_pickup",
+        assignment_id,
+    )
+    assert decode_delivery_action("delivery.confirm_pickup:not-a-uuid") is None
+    assert decode_delivery_action("delivery.confirm_pickup") is None
+    assert decode_delivery_action(f"delivery.unknown:{assignment_id}") is None
