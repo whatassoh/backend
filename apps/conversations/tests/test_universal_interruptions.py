@@ -20,6 +20,7 @@ from apps.catalog.domain.enums import ProductAvailability
 from apps.conversations.application.interruptions import (
     UniversalCommand,
     detect_universal_command,
+    resume_last_task,
     suspend_active_task,
 )
 from apps.conversations.application.orchestrator import ConversationalOrchestrator
@@ -151,6 +152,64 @@ def test_extended_context_round_trip_is_backward_compatible():
         ),
     )
     assert ConversationContext.from_payload(context.to_payload()) == context
+
+
+def test_targeted_resume_selects_order_without_discarding_seller_catalog():
+    context = ConversationContext(
+        active_journey=ActiveJourney.SELL,
+        suspended_tasks=(
+            SuspendedConversationTask(
+                kind=ConversationTaskKind.ORDER,
+                journey=ActiveJourney.BUY,
+                flow=ConversationFlow.AWAITING_CLARIFICATION,
+                suspended_at="2026-09-29T10:00:00+00:00",
+                reason="topic_change",
+            ),
+            SuspendedConversationTask(
+                kind=ConversationTaskKind.SELLER_CATALOG,
+                journey=ActiveJourney.SELL,
+                flow=ConversationFlow.IDLE,
+                suspended_at="2026-09-29T10:01:00+00:00",
+                reason="topic_change",
+            ),
+        ),
+    )
+
+    resumed = resume_last_task(context, target=ConversationTaskKind.ORDER)
+
+    assert resumed.task.kind == ConversationTaskKind.ORDER
+    assert resumed.context.active_journey == ActiveJourney.BUY
+    assert resumed.context.flow == ConversationFlow.AWAITING_CLARIFICATION
+    assert any(
+        task.kind == ConversationTaskKind.SELLER_CATALOG
+        for task in resumed.context.suspended_tasks
+    )
+
+
+def test_generic_resume_keeps_lifo_semantics_with_multiple_suspended_tasks():
+    context = ConversationContext(
+        suspended_tasks=(
+            SuspendedConversationTask(
+                kind=ConversationTaskKind.ORDER,
+                journey=ActiveJourney.BUY,
+                flow=ConversationFlow.ORDER_BUILDING,
+                suspended_at="2026-09-29T10:00:00+00:00",
+                reason="topic_change",
+            ),
+            SuspendedConversationTask(
+                kind=ConversationTaskKind.SELLER_CATALOG,
+                journey=ActiveJourney.SELL,
+                flow=ConversationFlow.IDLE,
+                suspended_at="2026-09-29T10:01:00+00:00",
+                reason="topic_change",
+            ),
+        )
+    )
+
+    resumed = resume_last_task(context)
+
+    assert resumed.task.kind == ConversationTaskKind.SELLER_CATALOG
+    assert resumed.context.suspended_tasks[0].kind == ConversationTaskKind.ORDER
 
 
 @pytest.mark.django_db

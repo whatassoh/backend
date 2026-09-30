@@ -114,6 +114,33 @@ def send_conversation_text(
     return result
 
 
+def send_conversation_interactive(
+    *,
+    conversation: Conversation,
+    text: str,
+    actions: list[dict[str, str]],
+    metadata: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+) -> ProviderSendResult:
+    """Send channel-neutral interactive actions through the conversation boundary."""
+    message_metadata = dict(metadata or {})
+    message_metadata["actions"] = actions
+    message = _conversation_outbound_message(
+        conversation=conversation,
+        message_type=MessageType.INTERACTIVE,
+        text=text,
+        metadata=message_metadata,
+        correlation_id=correlation_id,
+    )
+    result = send(message)
+    record_outbound_message(
+        conversation=conversation,
+        message=message,
+        message_event=result.message_event,
+    )
+    return result
+
+
 def send_conversation_location(
     *,
     conversation: Conversation,

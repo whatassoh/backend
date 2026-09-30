@@ -82,6 +82,48 @@ def test_variant_is_only_selected_when_real_variant_is_explicit():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("hint", ["1L", "1 L", "1 litre"])
+def test_variant_hint_resolves_a_real_variant_without_changing_ordered_quantity(hint):
+    product = make_product("Huile Mayor", unit=ProductUnit.BOTTLE)
+    create_product_variant(product=product, name="500 ml")
+    expected = create_product_variant(product=product, name="1 L")
+    create_product_variant(product=product, name="5 L")
+
+    resolution = CatalogGroundingService().ground_item(
+        ExtractedItem(
+            requested_name="Huile Mayor",
+            quantity=Decimal("2"),
+            unit=ExtractedUnit.BOTTLE,
+            variant_hint=hint,
+        )
+    )
+
+    assert resolution.status == OrderItemResolutionStatus.MATCHED
+    assert resolution.product_id == product.id
+    assert resolution.variant_id == expected.id
+
+
+@pytest.mark.django_db
+def test_known_product_with_unknown_variant_keeps_product_identity():
+    product = make_product("Huile Mayor", unit=ProductUnit.BOTTLE)
+    create_product_variant(product=product, name="1 L")
+
+    resolution = CatalogGroundingService().ground_item(
+        ExtractedItem(
+            requested_name="Huile Mayor",
+            quantity=Decimal("2"),
+            unit=ExtractedUnit.BOTTLE,
+            variant_hint="20L",
+        )
+    )
+
+    assert resolution.status == OrderItemResolutionStatus.UNMATCHED
+    assert resolution.product_id == product.id
+    assert resolution.variant_id is None
+    assert resolution.reason == "VARIANT_NOT_FOUND"
+
+
+@pytest.mark.django_db
 def test_display_name_is_only_used_for_available_real_offer():
     product = make_product("Huile de palme")
     store = create_store(name="Store Display", location=Point(9.7, 4.0), city="Douala")

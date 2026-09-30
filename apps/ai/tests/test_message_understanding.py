@@ -25,6 +25,8 @@ def examples():
     fixture_path = Path(__file__).parent / "fixtures" / "message_understanding_v1.json"
     examples = json.loads(fixture_path.read_text())
     for example in examples:
+        for item in example["result"].get("items", []):
+            item.setdefault("variant_hint", None)
         example["result"].update(
             secondary_intents=[],
             interaction_mode="ANSWER",
@@ -120,14 +122,16 @@ def test_multiple_items_preserve_requested_names_and_normalized_units(provider):
                 {
                     "requested_name": "Mayor",
                     "quantity": 2,
-                    "unit": "BOTTLE",
-                    "notes": None,
+                        "unit": "BOTTLE",
+                        "variant_hint": None,
+                        "notes": None,
                 },
                 {
                     "requested_name": "riz parfumé",
                     "quantity": 5,
-                    "unit": "KG",
-                    "notes": None,
+                        "unit": "KG",
+                        "variant_hint": None,
+                        "notes": None,
                 },
             ],
             "location_text": None,
@@ -153,6 +157,33 @@ def test_multiple_items_preserve_requested_names_and_normalized_units(provider):
         ("Mayor", 2, "BOTTLE"),
         ("riz parfumé", 5, "KG"),
     ]
+
+
+def test_item_preserves_variant_hint_separately_from_ordered_quantity(provider):
+    provider.register_response(
+        task_name="message_understanding",
+        result={
+            "intent": "CREATE_OR_UPDATE_ORDER", "secondary_intents": [],
+            "interaction_mode": "ACT", "action_requested": True,
+            "journey_goal": "BUY_PRODUCTS", "standalone_question": None,
+            "task_target": "ORDER", "confidence": 0.95,
+            "items": [{
+                "requested_name": "Huile Mayor", "quantity": 2,
+                "unit": "BOTTLE", "variant_hint": "1 L", "notes": None,
+            }],
+            "location_text": None, "confirmation": None, "missing_fields": [],
+            "ambiguities": [], "language": "fr", "order_action": "ADD_ITEM",
+            "target_reference": None, "replacement": None,
+        },
+    )
+
+    item = MessageUnderstandingService(AIService(provider)).understand(
+        MessageUnderstandingInput(current_message="Je veux 2 huiles Mayor de 1L")
+    ).items[0]
+
+    assert (item.requested_name, item.quantity, item.unit, item.variant_hint) == (
+        "Huile Mayor", 2, "BOTTLE", "1 L"
+    )
 
 
 @pytest.mark.parametrize(

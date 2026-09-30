@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from uuid import UUID
+
+from django.utils import timezone
 
 from apps.messaging.infrastructure.models import ChannelIdentity
 from apps.stores.application.offers import StoreOfferService
@@ -14,6 +17,25 @@ class StoreOfferActionResult(StrEnum):
     REJECTED = "REJECTED"
     NOT_AUTHORIZED = "NOT_AUTHORIZED"
     NOT_AVAILABLE = "NOT_AVAILABLE"
+
+
+STORE_OFFER_ACTIONS = ("store_offer.accept", "store_offer.reject")
+
+
+def encode_store_offer_action(action_id: str, offer_id) -> str:
+    if action_id not in STORE_OFFER_ACTIONS:
+        raise ValueError("Unsupported StoreOffer action.")
+    return f"{action_id}:{UUID(str(offer_id))}"
+
+
+def decode_store_offer_action(callback_id: str) -> tuple[str, UUID] | None:
+    action_id, separator, raw_offer_id = (callback_id or "").partition(":")
+    if not separator or action_id not in STORE_OFFER_ACTIONS:
+        return None
+    try:
+        return action_id, UUID(raw_offer_id)
+    except (ValueError, AttributeError):
+        return None
 
 
 class StoreRecipientResolver:
@@ -60,14 +82,22 @@ class StoreOfferPresentation:
 
 
 def present_offer(offer: StoreOffer) -> StoreOfferPresentation:
-    items = offer.order.items.order_by("created_at", "id")
+    items = offer.order.items.select_related("product", "product_variant").order_by("created_at", "id")
     snapshot = offer.selection_snapshot or {}
     return StoreOfferPresentation(
         offer_id=str(offer.id), order_reference=offer.order.reference,
-        items=tuple(f"{item.quantity} {item.unit} {item.requested_name}" for item in items),
+        items=tuple(_present_item(item) for item in items),
         distance_meters=snapshot.get("distance_meters"), expires_at=offer.expires_at.isoformat(),
         available_actions=("store_offer.accept", "store_offer.reject") if offer.status == StoreOfferStatus.PENDING else (),
     )
+
+
+def _present_item(item) -> str:
+    quantity = format(item.quantity, "f").rstrip("0").rstrip(".")
+    product_name = item.product.name if item.product_id else item.requested_name
+    variant_name = item.product_variant.name if item.product_variant_id else None
+    identity = f"{product_name} — {variant_name}" if variant_name else product_name
+    return f"{quantity} × {identity}"
 
 
 class StoreOfferActionService:
@@ -86,6 +116,8 @@ class StoreOfferActionService:
         offer = StoreOffer.objects.select_related("store", "order").filter(pk=offer_id).first()
         if offer is None or not self.authorization_policy.can_view_offer(actor, offer):
             return StoreOfferActionResult.NOT_AUTHORIZED
+        if offer.status != StoreOfferStatus.PENDING or offer.expires_at <= timezone.now():
+            return StoreOfferActionResult.NOT_AVAILABLE
         try:
             if action_id == "store_offer.accept":
                 accepted = self.offer_service.accept_offer(offer)

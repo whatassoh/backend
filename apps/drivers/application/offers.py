@@ -2,6 +2,7 @@
 
 import logging
 from datetime import timedelta
+from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -26,6 +27,24 @@ from apps.orders.infrastructure.models import Order
 from common.events import publish
 
 logger = logging.getLogger(__name__)
+
+DRIVER_OFFER_ACTIONS = ("driver_offer.accept", "driver_offer.reject")
+
+
+def encode_driver_offer_action(action_id: str, offer_id) -> str:
+    if action_id not in DRIVER_OFFER_ACTIONS:
+        raise ValueError("Unsupported DriverOffer action.")
+    return f"{action_id}:{UUID(str(offer_id))}"
+
+
+def decode_driver_offer_action(callback_id: str) -> tuple[str, UUID] | None:
+    action_id, separator, raw_offer_id = (callback_id or "").partition(":")
+    if not separator or action_id not in DRIVER_OFFER_ACTIONS:
+        return None
+    try:
+        return action_id, UUID(raw_offer_id)
+    except (ValueError, AttributeError):
+        return None
 
 
 class DriverOfferService:
@@ -73,6 +92,10 @@ class DriverOfferService:
             if actor is None or actor.id != driver.user_id:
                 raise PermissionError("Only the offered driver may accept.")
             if locked.status == DriverOfferStatus.ACCEPTED:
+                if not DriverAssignment.objects.filter(
+                    offer=locked, is_active=True
+                ).exists():
+                    raise ValueError("Offer is no longer actionable.")
                 return locked
             if locked.status != DriverOfferStatus.PENDING:
                 raise ValueError("Offer is no longer actionable.")
@@ -112,23 +135,52 @@ class DriverOfferService:
             return locked
 
     def reject_offer(self, offer, *, actor, reason=None, now=None):
-        return self._close(offer, DriverOfferStatus.REJECTED, "rejected_at", actor=actor, reason=reason, now=now)
+        closed, _ = self._close(
+            offer,
+            DriverOfferStatus.REJECTED,
+            "rejected_at",
+            actor=actor,
+            reason=reason,
+            now=now,
+        )
+        return closed
+
+    def reject_offer_once(self, offer, *, actor, reason=None, now=None):
+        """Return whether this call performed the transition.
+
+        Dispatch uses the flag to ensure a replay cannot enqueue fallback work
+        for the next candidate a second time.
+        """
+        return self._close(
+            offer,
+            DriverOfferStatus.REJECTED,
+            "rejected_at",
+            actor=actor,
+            reason=reason,
+            now=now,
+        )
 
     def expire_offer(self, offer, *, now=None):
         now = now or timezone.now()
         if now < offer.expires_at:
             raise ValueError("Offer has not expired.")
-        return self._close(offer, DriverOfferStatus.EXPIRED, "expired_at", now=now)
+        closed, _ = self._close(
+            offer, DriverOfferStatus.EXPIRED, "expired_at", now=now
+        )
+        return closed
 
     def cancel_offer(self, offer, *, now=None):
-        return self._close(offer, DriverOfferStatus.CANCELLED, "cancelled_at", now=now)
+        closed, _ = self._close(
+            offer, DriverOfferStatus.CANCELLED, "cancelled_at", now=now
+        )
+        return closed
 
     def _close(self, offer, target, field, *, actor=None, reason=None, now=None):
         now = now or timezone.now()
         with transaction.atomic():
             locked = DriverOffer.objects.select_for_update().get(pk=offer.pk)
             if locked.status == target:
-                return locked
+                return locked, False
             if locked.status != DriverOfferStatus.PENDING:
                 raise ValueError("Offer is no longer actionable.")
             if actor is not None and actor.id != locked.driver.user_id:
@@ -140,7 +192,7 @@ class DriverOfferService:
             event_type = {DriverOfferStatus.REJECTED: AuditEventType.DRIVER_OFFER_REJECTED, DriverOfferStatus.EXPIRED: AuditEventType.DRIVER_OFFER_EXPIRED, DriverOfferStatus.CANCELLED: AuditEventType.DRIVER_OFFER_CANCELLED}[target]
             record_audit_event(actor=actor, actor_type=AuditActorType.USER if actor else AuditActorType.SYSTEM, entity_type=AuditEntityType.DRIVER_OFFER, entity_id=locked.id, event_type=event_type, previous_state=DriverOfferStatus.PENDING, new_state=target, metadata={"order_id": str(locked.order_id), "driver_id": str(locked.driver_id), "rank": locked.rank, "strategy_version": locked.strategy_version})
             logger.info("driver_offer_transition", extra={"offer_id": str(locked.id), "status": target})
-            return locked
+            return locked, True
 
     @staticmethod
     def _cancel_locked(offer, now):

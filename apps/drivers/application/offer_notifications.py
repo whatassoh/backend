@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from apps.conversations.application.services import get_or_create_active_conversation
 from apps.drivers.domain.enums import DriverOfferNotificationStatus, DriverOfferStatus
+from apps.drivers.application.offers import encode_driver_offer_action
 from apps.drivers.infrastructure.models import DriverOfferNotification
 from apps.messaging.infrastructure.models import ChannelIdentity
 from common.async_tasks import enqueue_after_commit
@@ -31,8 +32,6 @@ class DriverOfferNotificationService:
         identity = self.resolver.resolve(offer.driver)
         if identity is None: return None
         conversation, _ = get_or_create_active_conversation(channel_identity=identity)
-        conversation.context = {**(conversation.context or {}), "driver_offer_id": str(offer.id)}
-        conversation.save(update_fields=["context", "updated_at"])
         snapshot = self._snapshot(offer)
         key = f"driver-offer:{offer.id}:identity:{identity.id}"
         notification, _ = DriverOfferNotification.objects.get_or_create(idempotency_key=key, defaults={"offer": offer, "recipient": offer.driver.user, "channel_identity": identity, "conversation": conversation, "channel": identity.channel, "presentation_snapshot": snapshot})
@@ -50,4 +49,14 @@ class DriverOfferNotificationService:
     @staticmethod
     def _snapshot(offer):
         store = offer.order.store_offers.filter(status="ACCEPTED").select_related("store").first()
-        return {"offer_id": str(offer.id), "order_reference": offer.order.reference, "pickup_store_name": store.store.name if store else "", "distance_meters": (offer.candidate_snapshot or {}).get("distance_meters"), "expires_at": offer.expires_at.isoformat(), "actions": ["driver_offer.accept", "driver_offer.reject"]}
+        return {
+            "offer_id": str(offer.id),
+            "order_reference": offer.order.reference,
+            "pickup_store_name": store.store.name if store else "",
+            "distance_meters": (offer.candidate_snapshot or {}).get("distance_meters"),
+            "expires_at": offer.expires_at.isoformat(),
+            "actions": [
+                {"action": action, "id": encode_driver_offer_action(action, offer.id)}
+                for action in ("driver_offer.accept", "driver_offer.reject")
+            ],
+        }

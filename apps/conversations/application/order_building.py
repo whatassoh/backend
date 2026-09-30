@@ -1,15 +1,15 @@
 """Deterministic order-item targeting and mutations for conversational flows."""
 
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
 from django.db import transaction
 
-from apps.catalog.domain.rules import normalize_catalog_text
-
 from apps.catalog.domain.enums import ProductStatus, ProductVariantStatus
 from apps.catalog.domain.grounding import CatalogResolution
+from apps.catalog.domain.rules import normalize_catalog_text
 from apps.catalog.infrastructure.models import Product, ProductVariant
 from apps.orders.application.services import (
     add_order_item,
@@ -137,8 +137,37 @@ class OrderBuildingService:
     def add(
         self, order, extracted_item, resolution, *, actor=None, correlation_id=None
     ):
-        """One utterance creates one line; duplicates are intentionally retained."""
+        """Add an item, folding an identical catalog line into the existing line.
+
+        A basket is easier to review and edit when a repeated ``Mayor 1 L`` is
+        one line with an accumulated quantity.  The lookup is performed while
+        rows are locked, so two concurrent inbound deliveries cannot create
+        duplicate equivalent lines.
+        """
         product, variant, status = self._catalog_values(resolution)
+        if status == OrderItemResolutionStatus.MATCHED:
+            existing = (
+                OrderItem.objects.select_for_update()
+                .filter(
+                    order=order,
+                    product=product,
+                    product_variant=variant,
+                    unit=extracted_item.unit,
+                    notes=extracted_item.notes,
+                    resolution_status=OrderItemResolutionStatus.MATCHED,
+                )
+                .order_by("created_at", "id")
+                .first()
+            )
+            if existing is not None:
+                return update_order_item(
+                    existing,
+                    quantity=(
+                        Decimal(existing.quantity) + Decimal(extracted_item.quantity)
+                    ),
+                    actor=actor,
+                    correlation_id=correlation_id,
+                )
         return add_order_item(
             order=order,
             requested_name=extracted_item.requested_name,

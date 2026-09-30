@@ -3,7 +3,7 @@ from celery import shared_task
 from django.conf import settings
 from django.db import InterfaceError, OperationalError
 
-from apps.messaging.application.orchestration import send_conversation_text
+from apps.messaging.application.orchestration import send_conversation_interactive, send_conversation_text
 from apps.stores.application.offer_notifications import (
     StoreOfferNotificationRenderer,
     StoreOfferNotificationService,
@@ -91,14 +91,19 @@ def _dispatch(notification, instruction, correlation_id):
         if instruction.kind == "template":
             return send_whatsapp_template_to_conversation(
                 conversation=notification.conversation, template_key=instruction.template_key,
-                body_parameters={"1": notification.presentation_snapshot.get("order_reference", "")}, metadata=metadata,
+                body_parameters={"recipient_name": notification.recipient.first_name or "partenaire"},
+                metadata=metadata,
             )
-        buttons = [WhatsAppReplyButton(action_id=item["id"], label="Accepter" if item["id"].endswith("accept") else "Refuser") for item in instruction.actions]
+        buttons = [WhatsAppReplyButton(action_id=item["id"], label="Accepter" if item["action"].endswith("accept") else "Refuser") for item in instruction.actions]
         return send_whatsapp_interactive_reply_buttons(
             conversation=notification.conversation, body=instruction.text, buttons=buttons, metadata=metadata,
         )
-    return send_conversation_text(
-        conversation=notification.conversation, text=instruction.text, metadata=metadata,
+    actions = [
+        {"id": item["id"], "label": "Accepter" if item["action"].endswith("accept") else "Refuser"}
+        for item in instruction.actions
+    ]
+    return send_conversation_interactive(
+        conversation=notification.conversation, text=instruction.text, actions=actions, metadata=metadata,
         correlation_id=correlation_id,
     )
 

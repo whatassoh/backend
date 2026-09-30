@@ -3,14 +3,16 @@
 from django.db import transaction
 from django.utils import timezone
 
-from apps.drivers.application.matching import DriverMatchingService, DriverMatchingStatus
+from apps.drivers.application.matching import (
+    DriverMatchingService,
+    DriverMatchingStatus,
+)
 from apps.drivers.application.offers import DriverOfferService
 from apps.drivers.application.selectors import get_driver_by_id
 from apps.drivers.domain.enums import DriverMatchingAttemptStatus, DriverOfferStatus
 from apps.drivers.infrastructure.models import DriverMatchingAttempt, DriverOffer
-from apps.orders.domain.enums import OrderStatus
-from apps.orders.domain.enums import OrderFailureCode
 from apps.orders.application.services import fail_order, start_driver_matching
+from apps.orders.domain.enums import OrderFailureCode, OrderStatus
 from apps.orders.infrastructure.models import Order
 
 
@@ -26,13 +28,21 @@ class DriverMatchingOrchestrator:
             attempt, created = DriverMatchingAttempt.objects.select_for_update().get_or_create(
                 order=order, defaults={"strategy_version": self.matching_service.strategy_version}
             )
-            if not created:
+            resumable = (
+                not created
+                and attempt.status == DriverMatchingAttemptStatus.RUNNING
+                and order.status == OrderStatus.MATCHING_DRIVERS
+                and not attempt.candidate_snapshot
+                and not DriverOffer.objects.filter(order=order).exists()
+            )
+            if not created and not resumable:
                 return attempt
-            if order.status != OrderStatus.READY_FOR_PICKUP:
+            if created and order.status != OrderStatus.READY_FOR_PICKUP:
                 attempt.status = DriverMatchingAttemptStatus.CANCELLED
                 attempt.completed_at = timezone.now(); attempt.save(update_fields=["status", "completed_at", "updated_at"])
                 return attempt
-            start_driver_matching(order, correlation_id=correlation_id)
+            if created:
+                start_driver_matching(order, correlation_id=correlation_id)
         result = self.matching_service.find_candidates(order)
         with transaction.atomic():
             attempt = DriverMatchingAttempt.objects.select_for_update().get(pk=attempt.pk)
@@ -49,7 +59,9 @@ class DriverMatchingOrchestrator:
             attempt.save(update_fields=["candidate_snapshot", "updated_at"])
         offer = self.advance_matching(attempt.id, correlation_id=correlation_id)
         if offer is not None:
-            from apps.drivers.application.offer_notifications import DriverOfferNotificationService
+            from apps.drivers.application.offer_notifications import (
+                DriverOfferNotificationService,
+            )
             if DriverOfferNotificationService().create_for_offer(offer, correlation_id=correlation_id) is None:
                 self.offer_service.cancel_offer(offer)
                 self.advance_matching(attempt.id, correlation_id=correlation_id)
@@ -83,20 +95,35 @@ class DriverMatchingOrchestrator:
             return None
 
     def handle_reject(self, offer, *, actor, correlation_id=None):
-        offer = self.offer_service.reject_offer(offer, actor=actor)
+        offer, transitioned = self.offer_service.reject_offer_once(
+            offer, actor=actor
+        )
+        if not transitioned:
+            return DriverOffer.objects.filter(
+                order=offer.order, status=DriverOfferStatus.PENDING
+            ).first()
         attempt = DriverMatchingAttempt.objects.get(order=offer.order)
         next_offer = self.advance_matching(attempt.id, correlation_id=correlation_id)
         if next_offer is not None:
-            from apps.drivers.application.offer_notifications import DriverOfferNotificationService
+            from apps.drivers.application.offer_notifications import (
+                DriverOfferNotificationService,
+            )
             if DriverOfferNotificationService().create_for_offer(next_offer, correlation_id=correlation_id) is None:
                 self.offer_service.cancel_offer(next_offer)
                 self.advance_matching(attempt.id, correlation_id=correlation_id)
         return next_offer
 
     def handle_accept(self, offer, *, actor, correlation_id=None):
-        accepted = self.offer_service.accept_offer(offer, actor=actor, correlation_id=correlation_id)
         with transaction.atomic():
-            attempt = DriverMatchingAttempt.objects.select_for_update().get(order=accepted.order)
+            accepted = self.offer_service.accept_offer(
+                offer, actor=actor, correlation_id=correlation_id
+            )
+            # Assignment and matching completion commit as one outcome. A
+            # malformed historical row without an attempt is rejected by the
+            # offer lifecycle before this lookup when it is no longer pending.
+            attempt = DriverMatchingAttempt.objects.select_for_update().get(
+                order_id=accepted.order_id
+            )
             if attempt.status == DriverMatchingAttemptStatus.RUNNING:
                 attempt.status = DriverMatchingAttemptStatus.SUCCEEDED
                 attempt.completed_at = timezone.now()

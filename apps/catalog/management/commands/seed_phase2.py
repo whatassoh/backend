@@ -64,8 +64,8 @@ class Command(BaseCommand):
 
     def _seed_users(self) -> dict[str, object]:
         specs = [
-            ("owner_a", "+237699000001", "Alice", "Owner"),
-            ("owner_b", "+237699000002", "Bruno", "Owner"),
+            ("owner_a", "+237674242450", "Alice", "Mbarga"),
+            ("owner_b", "+237696767542", "Bruno", "Nana"),
             ("manager_a", "+237699000003", "Carine", "Manager"),
             ("agent_a", "+237699000004", "David", "Agent"),
             ("driver_a", "+237699000005", "Estelle", "Driver"),
@@ -219,18 +219,19 @@ class Command(BaseCommand):
     def _seed_stores(self, users: dict[str, object]) -> dict[str, Store]:
         # Demo coordinates around Douala; they are illustrative, not real stores.
         specs = [
-            ("bonamoussadi", "Boutique Démo Bonamoussadi", 9.7357, 4.0907),
-            ("akwa", "Boutique Démo Akwa", 9.7043, 4.0511),
-            ("bonapriso", "Boutique Démo Bonapriso", 9.7076, 4.0268),
-            ("deido", "Boutique Démo Deido", 9.7126, 4.0702),
+            ("bonamoussadi", "Marché Bonamoussadi", "674242450", 9.7357, 4.0907),
+            ("akwa", "Épicerie Akwa", "696767542", 9.7043, 4.0511),
+            ("bonapriso", "Boutique Démo Bonapriso", None, 9.7076, 4.0268),
+            ("deido", "Boutique Démo Deido", None, 9.7126, 4.0702),
         ]
         stores = {}
 
-        for key, name, longitude, latitude in specs:
+        for key, name, phone, longitude, latitude in specs:
             store = Store.objects.filter(name=name).first()
             if store is None:
                 store = create_store(
                     name=name,
+                    phone=phone,
                     location=make_store_point(longitude, latitude),
                     city="Douala",
                     neighborhood=key.capitalize(),

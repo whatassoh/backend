@@ -162,12 +162,26 @@ def suspend_active_task(
     )
 
 
-def resume_last_task(context: ConversationContext) -> ResumeDecision:
+def resume_last_task(
+    context: ConversationContext,
+    *,
+    target: ConversationTaskKind | None = None,
+) -> ResumeDecision:
+    """Resume a named task, or the latest task when no target was requested."""
     if not context.suspended_tasks:
         return ResumeDecision(context=context, task=None)
-    task = context.suspended_tasks[-1]
+    task = next(
+        (
+            candidate
+            for candidate in reversed(context.suspended_tasks)
+            if target is None or candidate.kind == target
+        ),
+        None,
+    )
+    if task is None:
+        return ResumeDecision(context=context, task=None)
     current_kind = active_task_kind(context)
-    remaining = context.suspended_tasks[:-1]
+    remaining = tuple(candidate for candidate in context.suspended_tasks if candidate != task)
     if current_kind is not None and current_kind != task.kind:
         current = SuspendedConversationTask(
             kind=current_kind,
