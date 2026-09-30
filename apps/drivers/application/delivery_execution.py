@@ -13,18 +13,28 @@ from django.utils import timezone
 
 from apps.audit.domain.enums import AuditActorType
 from apps.drivers.domain.dtos import (
+    DeliveryConfirmationResult,
     DriverMissionDto,
     DriverMissionLocationDto,
     PickupConfirmationResult,
     StartDeliveryResult,
-    DeliveryConfirmationResult,
 )
 from apps.drivers.domain.enums import DriverStatus
 from apps.drivers.infrastructure.models import DriverAssignment, DriverProfile
-from apps.orders.application.services import fail_order, mark_delivered, mark_in_delivery, mark_picked_up
-from apps.orders.domain.events import DeliveryFailed, DeliveryIssueReported, DeliveryStarted, OrderDelivered, OrderPickedUp
-from apps.orders.domain.enums import OrderStatus
-from apps.orders.domain.enums import OrderFailureCode
+from apps.orders.application.services import (
+    fail_order,
+    mark_delivered,
+    mark_in_delivery,
+    mark_picked_up,
+)
+from apps.orders.domain.enums import OrderFailureCode, OrderStatus
+from apps.orders.domain.events import (
+    DeliveryFailed,
+    DeliveryIssueReported,
+    DeliveryStarted,
+    OrderDelivered,
+    OrderPickedUp,
+)
 from apps.stores.domain.enums import StoreOfferStatus
 from common.events import publish
 
@@ -44,6 +54,31 @@ ALLOWED_ACTIONS_BY_ORDER_STATUS = {
         "delivery.report_issue",
     ),
 }
+
+DELIVERY_ASSIGNMENT_ACTIONS = frozenset(
+    {
+        "delivery.confirm_pickup",
+        "delivery.start_delivery",
+        "delivery.confirm_delivered",
+    }
+)
+
+
+def encode_delivery_action(action_id: str, assignment_id: UUID | str) -> str:
+    """Bind a conversational delivery action to one durable assignment."""
+    if action_id not in DELIVERY_ASSIGNMENT_ACTIONS:
+        raise ValueError("Unsupported delivery action.")
+    return f"{action_id}:{UUID(str(assignment_id))}"
+
+
+def decode_delivery_action(callback_id: str) -> tuple[str, UUID] | None:
+    action_id, separator, raw_assignment_id = (callback_id or "").partition(":")
+    if not separator or action_id not in DELIVERY_ASSIGNMENT_ACTIONS:
+        return None
+    try:
+        return action_id, UUID(raw_assignment_id)
+    except (ValueError, AttributeError):
+        return None
 
 
 class DeliveryMissionNotFound(LookupError):

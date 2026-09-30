@@ -868,14 +868,24 @@ class ConversationalOrchestrator:
                 )
                 from apps.drivers.application.delivery_execution import (
                     DeliveryExecutionService,
+                    encode_delivery_action,
                 )
 
                 mission = DeliveryExecutionService().get_active_mission(
                     conversation.user
                 )
+                pickup = mission.pickup.display_name
+                if mission.pickup.address_label:
+                    pickup += f" — {mission.pickup.address_label}"
+                destination = (
+                    mission.destination.address_label
+                    or "position de livraison enregistrée"
+                )
                 return self._outcome(
                     ConversationalOutcomeStatus.PROCESSED,
-                    f"Livraison acceptée. Retrait : {mission.pickup.display_name}.",
+                    f"Course {mission.order_reference} acceptée."
+                    f"\nRetrait : {pickup}."
+                    f"\nDestination : {destination}.",
                     context,
                     metadata={
                         "driver_offer": "ACCEPTED",
@@ -883,7 +893,9 @@ class ConversationalOrchestrator:
                     },
                     actions=(
                         ResponseAction(
-                            action_id="delivery.confirm_pickup",
+                            action_id=encode_delivery_action(
+                                "delivery.confirm_pickup", mission.assignment_id
+                            ),
                             label="Commande récupérée",
                         ),
                     ),
@@ -1045,6 +1057,22 @@ class ConversationalOrchestrator:
         )
 
     def _delivery_action(self, conversation, context, action_id, correlation_id):
+        from apps.drivers.application.delivery_execution import (
+            DELIVERY_ASSIGNMENT_ACTIONS,
+            decode_delivery_action,
+            encode_delivery_action,
+        )
+
+        decoded = decode_delivery_action(action_id)
+        assignment_id = None
+        if decoded is not None:
+            action_id, assignment_id = decoded
+        elif action_id.startswith("delivery.") and ":" in action_id:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette action de livraison n'est plus disponible.",
+                context,
+            )
         issue_actions = {
             "delivery.issue.customer_unreachable": "CUSTOMER_UNREACHABLE",
             "delivery.issue.address_problem": "ADDRESS_PROBLEM",
@@ -1142,11 +1170,7 @@ class ConversationalOrchestrator:
                 else "Échec de livraison confirmé.",
                 context,
             )
-        if action_id not in {
-            "delivery.confirm_pickup",
-            "delivery.start_delivery",
-            "delivery.confirm_delivered",
-        }:
+        if action_id not in DELIVERY_ASSIGNMENT_ACTIONS:
             return None
         from apps.drivers.application.delivery_execution import (
             DeliveryExecutionService,
@@ -1158,15 +1182,21 @@ class ConversationalOrchestrator:
             service = DeliveryExecutionService()
             result = (
                 service.confirm_pickup(
-                    conversation.channel_identity, correlation_id=correlation_id
+                    conversation.channel_identity,
+                    assignment_id=assignment_id,
+                    correlation_id=correlation_id,
                 )
                 if action_id == "delivery.confirm_pickup"
                 else service.start_delivery(
-                    conversation.channel_identity, correlation_id=correlation_id
+                    conversation.channel_identity,
+                    assignment_id=assignment_id,
+                    correlation_id=correlation_id,
                 )
                 if action_id == "delivery.start_delivery"
                 else service.confirm_delivered(
-                    conversation.channel_identity, correlation_id=correlation_id
+                    conversation.channel_identity,
+                    assignment_id=assignment_id,
+                    correlation_id=correlation_id,
                 )
             )
         except (DeliveryMissionAuthorizationError, DeliveryMissionNotFound, ValueError):
@@ -1190,7 +1220,10 @@ class ConversationalOrchestrator:
                 },
                 actions=(
                     ResponseAction(
-                        action_id="delivery.confirm_delivered", label="Commande livrée"
+                        action_id=encode_delivery_action(
+                            "delivery.confirm_delivered", result.mission.assignment_id
+                        ),
+                        label="Commande livrée",
                     ),
                     ResponseAction(
                         action_id="delivery.report_issue", label="Signaler un problème"
@@ -1231,7 +1264,10 @@ class ConversationalOrchestrator:
             },
             actions=(
                 ResponseAction(
-                    action_id="delivery.start_delivery", label="Démarrer la livraison"
+                    action_id=encode_delivery_action(
+                        "delivery.start_delivery", result.mission.assignment_id
+                    ),
+                    label="Démarrer la livraison",
                 ),
             ),
         )
