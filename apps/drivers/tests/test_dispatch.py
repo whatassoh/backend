@@ -79,7 +79,10 @@ def test_offer_is_persisted_with_notification_before_any_provider_delivery(monke
 @pytest.mark.django_db
 def test_reject_advances_once_to_next_candidate(monkeypatch):
     first, second, order = make_driver("+237691000002"), make_driver("+237691000003"), make_order()
-    monkeypatch.setattr("apps.drivers.tasks.deliver_driver_offer_notification.delay", lambda *args: None)
+    monkeypatch.setattr(
+        "apps.drivers.tasks.deliver_driver_offer_notification.delay",
+        lambda *_args: None,
+    )
     app = DriverMatchingOrchestrator(matching_service=Matching([candidate(first, 1), candidate(second, 2)]))
     app.start_matching(order.id)
     offer_a = DriverOffer.objects.get(order=order, driver=first)
@@ -88,8 +91,10 @@ def test_reject_advances_once_to_next_candidate(monkeypatch):
     offer_b = DriverOffer.objects.get(order=order, driver=second)
     assert offer_a.status == DriverOfferStatus.REJECTED
     assert offer_b.status == DriverOfferStatus.PENDING
+    assert DriverOfferNotification.objects.filter(offer=offer_b).count() == 1
     assert app.handle_reject(offer_a, actor=first.user).id == offer_b.id
     assert DriverOffer.objects.filter(order=order).count() == 2
+    assert DriverOfferNotification.objects.filter(offer=offer_b).count() == 1
 
 
 @pytest.mark.django_db
@@ -105,6 +110,60 @@ def test_accept_assigns_exactly_once_and_driver_becomes_busy(monkeypatch):
     assert order.status == OrderStatus.DRIVER_ASSIGNED
     assert DriverAssignment.objects.filter(order=order, driver=driver, is_active=True).count() == 1
     assert app.handle_accept(offer, actor=driver.user).id == offer.id
+
+
+@pytest.mark.django_db
+def test_accept_rejects_foreign_expired_cancelled_and_now_busy_driver(monkeypatch):
+    order = make_order()
+    offered = make_driver("+237691000104")
+    foreign = make_driver("+237691000105")
+    monkeypatch.setattr(
+        "apps.drivers.tasks.deliver_driver_offer_notification.delay", lambda *_args: None
+    )
+    app = DriverMatchingOrchestrator(
+        matching_service=Matching([candidate(offered, 1)])
+    )
+    app.start_matching(order.id)
+    offer = DriverOffer.objects.get(order=order)
+
+    with pytest.raises(PermissionError):
+        app.handle_accept(offer, actor=foreign.user)
+    assert not DriverAssignment.objects.filter(order=order).exists()
+
+    offer.expires_at = timezone.now() - timedelta(seconds=1)
+    offer.save(update_fields=["expires_at", "updated_at"])
+    with pytest.raises(ValueError, match="OFFER_EXPIRED"):
+        app.handle_accept(offer, actor=offered.user)
+    assert not DriverAssignment.objects.filter(order=order).exists()
+
+    offer.expires_at = timezone.now() + timedelta(minutes=5)
+    offer.save(update_fields=["expires_at", "updated_at"])
+    other_order = make_order()
+    other_order.status = OrderStatus.MATCHING_DRIVERS
+    other_order.save(update_fields=["status", "updated_at"])
+    other_offer = DriverOffer.objects.create(
+        order=other_order,
+        driver=offered,
+        status=DriverOfferStatus.ACCEPTED,
+        rank=1,
+        strategy_version="TEST",
+        expires_at=timezone.now() + timedelta(minutes=5),
+    )
+    DriverAssignment.objects.create(
+        order=other_order, driver=offered, offer=other_offer
+    )
+    with pytest.raises(ValueError, match="no longer matchable"):
+        app.handle_accept(offer, actor=offered.user)
+    assert not DriverAssignment.objects.filter(order=order).exists()
+
+    DriverAssignment.objects.filter(order=other_order).update(is_active=False)
+    order.status = OrderStatus.CANCELLED
+    order.save(update_fields=["status", "updated_at"])
+    with pytest.raises(ValueError, match="no longer assignable"):
+        app.handle_accept(offer, actor=offered.user)
+    order.refresh_from_db()
+    assert order.status == OrderStatus.CANCELLED
+    assert not DriverAssignment.objects.filter(order=order).exists()
 
 
 @pytest.mark.django_db
@@ -127,3 +186,34 @@ def test_driver_expiry_uses_deadline_and_duplicate_is_noop(monkeypatch):
     assert _expire_driver_offer(offer.id)["status"] == "NOOP"
     offer.refresh_from_db()
     assert offer.status == DriverOfferStatus.EXPIRED
+
+
+@pytest.mark.django_db
+def test_timeout_advances_once_then_exhaustion_fails_order(monkeypatch):
+    first = make_driver("+237691000206")
+    second = make_driver("+237691000207")
+    order = make_order()
+    monkeypatch.setattr(
+        "apps.drivers.tasks.deliver_driver_offer_notification.delay", lambda *_args: None
+    )
+    app = DriverMatchingOrchestrator(
+        matching_service=Matching([candidate(first, 1), candidate(second, 2)])
+    )
+    app.start_matching(order.id)
+    first_offer = DriverOffer.objects.get(order=order, driver=first)
+    first_offer.expires_at = timezone.now()
+    first_offer.save(update_fields=["expires_at", "updated_at"])
+
+    assert _expire_driver_offer(first_offer.id)["status"] == "EXPIRED"
+    second_offer = DriverOffer.objects.get(order=order, driver=second)
+    assert second_offer.status == DriverOfferStatus.PENDING
+    assert _expire_driver_offer(first_offer.id)["status"] == "NOOP"
+    assert DriverOffer.objects.filter(order=order, driver=second).count() == 1
+
+    second_offer.expires_at = timezone.now()
+    second_offer.save(update_fields=["expires_at", "updated_at"])
+    assert _expire_driver_offer(second_offer.id)["status"] == "EXPIRED"
+    order.refresh_from_db()
+    assert order.driver_matching_attempt.status == DriverMatchingAttemptStatus.EXHAUSTED
+    assert order.status == OrderStatus.FAILED
+    assert order.failure_code == "NO_DRIVER_AVAILABLE"
