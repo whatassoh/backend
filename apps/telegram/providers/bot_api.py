@@ -96,6 +96,13 @@ class TelegramProvider(MessagingProvider):
             )
         )
 
+    def send_chat_action(self, chat_id: str, *, action: str = "typing") -> dict[str, Any]:
+        """Send a Telegram chat action without persisting a business message."""
+        return self._call(
+            "sendChatAction",
+            {"chat_id": chat_id, "action": action},
+        )
+
     def set_webhook(self) -> dict[str, Any]:
         if not self.config.webhook_url:
             raise TelegramConfigurationError(

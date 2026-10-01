@@ -353,6 +353,60 @@ def test_duplicate_webhook_is_idempotent():
     assert ConversationMessage.objects.count() == 1
 
 
+@override_settings(
+    WHATSAPP_ENABLED=True,
+    WHATSAPP_ACCESS_TOKEN="secret-token",
+    WHATSAPP_PHONE_NUMBER_ID="phone-number-id",
+    WHATSAPP_VERIFY_TOKEN=VERIFY_TOKEN,
+    WHATSAPP_APP_SECRET=APP_SECRET,
+    META_GRAPH_API_VERSION="v26.0",
+)
+def test_whatsapp_provider_send_typing_indicator_calls_meta(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse({"messages": [{"id": "wamid.typing"}]})
+
+    monkeypatch.setattr("apps.whatsapp.providers.cloud_api.urlopen", fake_urlopen)
+
+    result = WhatsAppProvider().send_typing_indicator("237699887766")
+
+    assert result["messages"][0]["id"] == "wamid.typing"
+    assert captured["url"] == (
+        "https://graph.facebook.com/v26.0/phone-number-id/messages"
+    )
+    assert captured["payload"]["type"] == "typing"
+    assert captured["payload"]["typing"]["type"] == "text"
+    assert captured["timeout"] == 10
+
+
+@pytest.mark.django_db
+@override_settings(
+    WHATSAPP_ENABLED=True,
+    WHATSAPP_ACCESS_TOKEN="secret-token",
+    WHATSAPP_PHONE_NUMBER_ID="phone-number-id",
+    WHATSAPP_VERIFY_TOKEN=VERIFY_TOKEN,
+    WHATSAPP_APP_SECRET=APP_SECRET,
+    META_GRAPH_API_VERSION="v26.0",
+)
+def test_whatsapp_processing_indicator_failure_does_not_block_response(monkeypatch):
+    def raise_on_indicator(*args, **kwargs):
+        raise RuntimeError("whatsapp indicator failed")
+
+    monkeypatch.setattr(
+        "apps.whatsapp.providers.cloud_api.WhatsAppProvider.send_typing_indicator",
+        raise_on_indicator,
+    )
+
+    result = process_whatsapp_webhook(text_webhook())
+
+    assert result == {"processed": 1, "duplicates": 0, "statuses_updated": 0}
+    assert ConversationMessage.objects.count() == 1
+
+
 class FakeResponse:
     def __init__(self, data: dict):
         self.data = json.dumps(data).encode("utf-8")

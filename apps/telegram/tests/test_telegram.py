@@ -230,6 +230,52 @@ def test_message_id_strategy_avoids_cross_chat_collisions():
     assert second.external_message_id == build_telegram_message_external_id("2", "42")
 
 
+@override_settings(
+    TELEGRAM_ENABLED=True,
+    TELEGRAM_BOT_TOKEN="token",
+    TELEGRAM_WEBHOOK_SECRET=WEBHOOK_SECRET,
+    TELEGRAM_API_BASE_URL="https://api.telegram.org",
+)
+def test_telegram_provider_send_chat_action_calls_bot_api(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse({"ok": True, "result": True})
+
+    monkeypatch.setattr("apps.telegram.providers.bot_api.urlopen", fake_urlopen)
+
+    response = TelegramProvider().send_chat_action("987654", action="typing")
+
+    assert response["ok"] is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/sendChatAction"
+    assert captured["payload"] == {"chat_id": "987654", "action": "typing"}
+    assert captured["timeout"] == 10
+
+
+@pytest.mark.django_db
+@override_settings(
+    TELEGRAM_ENABLED=True,
+    TELEGRAM_BOT_TOKEN="token",
+    TELEGRAM_WEBHOOK_SECRET=WEBHOOK_SECRET,
+)
+def test_telegram_processing_indicator_failure_does_not_block_response(monkeypatch):
+    def raise_on_indicator(*args, **kwargs):
+        raise RuntimeError("telegram indicator failed")
+
+    monkeypatch.setattr(
+        "apps.telegram.providers.bot_api.TelegramProvider.send_chat_action",
+        raise_on_indicator,
+    )
+
+    result = process_telegram_webhook(text_update())
+
+    assert result == {"processed": 1, "duplicates": 0, "ignored": 0}
+    assert ConversationMessage.objects.count() == 1
+
+
 @pytest.mark.django_db
 def test_webhook_integration_with_existing_telegram_identity():
     user = create_user()
