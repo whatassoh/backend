@@ -66,6 +66,9 @@ def test_prompt_routes_platform_catalog_and_social_questions_explicitly():
     assert "ANSWER_AND_ACT" in SYSTEM_INSTRUCTIONS
     assert "RECEIVE_DELIVERY" in SYSTEM_INSTRUCTIONS
     assert "never DELIVER" in SYSTEM_INSTRUCTIONS
+    assert "leave items empty" in SYSTEM_INSTRUCTIONS
+    assert "category/concept" in SYSTEM_INSTRUCTIONS
+    assert "positive quantity" in SYSTEM_INSTRUCTIONS
 
 
 def test_compound_turn_contract_preserves_information_and_action(provider):

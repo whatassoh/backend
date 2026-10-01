@@ -52,6 +52,7 @@ class CatalogRetriever:
         candidates += self._exact_variants(normalized)
         if not candidates and connection.vendor == "postgresql":
             candidates = self._fuzzy_products(normalized)
+            candidates += self._fuzzy_aliases(normalized)
         return _deduplicate_and_limit(candidates, self.policy.candidate_limit)
 
     def _products(self):
@@ -126,6 +127,23 @@ class CatalogRetriever:
         products = (
             self._products()
             .annotate(similarity=TrigramSimilarity("normalized_name", normalized))
+            .filter(similarity__gte=self.policy.fuzzy_min_score)
+            .order_by("-similarity", "name")[: self.policy.candidate_limit]
+        )
+        return [
+            _product_candidate(
+                product, CatalogMatchStrategy.FUZZY_NAME, float(product.similarity)
+            )
+            for product in products
+        ]
+
+    def _fuzzy_aliases(self, normalized: str) -> list[CatalogCandidate]:
+        products = (
+            self._products()
+            .filter(aliases__isnull=False)
+            .annotate(
+                similarity=TrigramSimilarity("aliases__normalized_alias", normalized)
+            )
             .filter(similarity__gte=self.policy.fuzzy_min_score)
             .order_by("-similarity", "name")[: self.policy.candidate_limit]
         )

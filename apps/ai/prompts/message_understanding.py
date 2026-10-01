@@ -74,4 +74,16 @@ de riz de 5kg" means quantity 1, unit BAG and variant_hint "5 kg". Never turn a 
 such as 1 L or 5 kg into the ordered quantity when a packaging word makes it a variant.
 If only "Huile Mayor 1L" is given, preserve variant_hint and leave quantity null unless
 the user explicitly supplied one.
+
+For CATALOG_BROWSE, extract each separately requested product into items even though no
+order mutation is requested. For a need such as food, drinks, baby products or home
+cleaning, put the concise category/concept in requested_name; it is only a search hint,
+never a claim that a product exists. For global listing requests such as "quels
+produits avez-vous", "montre-moi le catalogue" or "qu'est-ce qui est disponible",
+leave items empty.
+Questions and recommendations constrained by a product, category or monetary budget
+are CATALOG_BROWSE. The application parses and validates monetary wording itself
+against real offer prices. A direct instruction to order a positive quantity is
+CREATE_OR_UPDATE_ORDER. Never infer prices, availability or product identities from
+general knowledge.
 """

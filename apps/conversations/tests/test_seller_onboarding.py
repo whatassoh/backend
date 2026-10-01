@@ -89,10 +89,18 @@ def test_sell_onboarding_creates_store_and_owner_only_after_confirm():
         == StoreMembershipRole.OWNER
     )
     assert convo.user.roles.filter(role=UserRoleType.STORE_OWNER).exists()
-    assert [action.action_id for action in completed.response.actions] == [
-        "seller.catalog.chat",
-        "seller.catalog.dashboard",
+    assert completed.response.metadata["seller_workspace"] is True
+    assert [action.label for action in completed.response.actions] == [
+        "Gérer mon catalogue",
+        "Voir ma boutique",
     ]
+    catalog_handoff = app.process_message(
+        convo,
+        message("6", action_id=completed.response.actions[0].action_id),
+    )
+    assert catalog_handoff.response.metadata["catalog_handoff"] is True
+    convo.refresh_from_db()
+    assert ConversationContext.from_payload(convo.context).seller_onboarding is None
 
 
 @pytest.mark.django_db
@@ -149,7 +157,7 @@ def test_edit_cancel_resume_and_double_confirm_are_persistent_and_idempotent():
 
 
 @pytest.mark.django_db
-def test_completed_onboarding_rejects_old_review_actions_and_catalog_alternative():
+def test_completed_onboarding_makes_old_confirm_idempotent():
     convo = conversation()
     app = ConversationalOrchestrator(understanding_service=NoLLM())
     app.process_message(convo, message("1", action_id="journey.select.sell"))
@@ -165,30 +173,12 @@ def test_completed_onboarding_rejects_old_review_actions_and_catalog_alternative
     app.process_message(convo, message("5", action_id="seller_onboarding.confirm"))
     assert Store.objects.count() == 1
 
-    for message_id, action_id in (
-        ("6", "seller_onboarding.edit"),
-        ("7", "seller_onboarding.cancel"),
-    ):
-        stale = app.process_message(convo, message(message_id, action_id=action_id))
-        assert stale.metadata["stale_action"] is True
+    old_confirm = app.process_message(
+        convo, message("6", action_id="seller_onboarding.confirm")
+    )
+    assert old_confirm.metadata["seller_workspace"] is True
     convo.refresh_from_db()
-    assert (
-        ConversationContext.from_payload(convo.context).seller_onboarding.stage
-        == SellerOnboardingStage.COMPLETED
-    )
-
-    committed = app.process_message(
-        convo, message("8", action_id="seller.catalog.chat")
-    )
-    assert committed.metadata["catalog_setup_choice"] == "chat"
-    stale = app.process_message(
-        convo, message("9", action_id="seller.catalog.dashboard")
-    )
-    assert stale.metadata["stale_action"] is True
-    convo.refresh_from_db()
-    assert (
-        ConversationContext.from_payload(convo.context).catalog_setup_choice == "chat"
-    )
+    assert ConversationContext.from_payload(convo.context).seller_onboarding is None
     assert Store.objects.count() == 1
 
 
@@ -255,6 +245,8 @@ def test_existing_store_does_not_start_or_create_another_store():
     app = ConversationalOrchestrator(understanding_service=NoLLM())
     outcome = app.process_message(convo, message("1", action_id="journey.select.sell"))
     assert outcome.metadata["journey_status"] == "SELLER_JOURNEY_READY"
+    assert "Existante" in outcome.response.text
+    assert outcome.response.metadata["seller_workspace"] is True
     assert Store.objects.count() == 1
 
 

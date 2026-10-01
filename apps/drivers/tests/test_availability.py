@@ -73,3 +73,27 @@ def test_offline_does_not_touch_the_future_active_delivery_boundary():
     service.set_offline(profile, profile.user)
     profile.refresh_from_db()
     assert profile.availability_status == DriverAvailability.OFFLINE
+
+
+@pytest.mark.django_db
+def test_availability_keeps_rebuildable_geo_index_in_sync():
+    class GeoIndexSpy:
+        def __init__(self):
+            self.indexed = []
+            self.removed = []
+
+        def index(self, profile):
+            self.indexed.append(profile.id)
+
+        def remove(self, profile):
+            self.removed.append(profile.id)
+
+    profile = driver("+237680000003")
+    geo_index = GeoIndexSpy()
+    service = DriverAvailabilityService(geo_index=geo_index)
+
+    service.set_available(profile, profile.user)
+    service.set_offline(profile, profile.user)
+
+    assert geo_index.indexed == [profile.id]
+    assert geo_index.removed == [profile.id]

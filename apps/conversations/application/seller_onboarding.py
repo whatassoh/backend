@@ -58,8 +58,6 @@ class SellerOnboardingService:
     confirm_action = "seller_onboarding.confirm"
     edit_action = "seller_onboarding.edit"
     cancel_action = "seller_onboarding.cancel"
-    catalog_chat_action = "seller.catalog.chat"
-    catalog_dashboard_action = "seller.catalog.dashboard"
 
     def __init__(self, *, context_service=None):
         from apps.conversations.application.context import ConversationContextService
@@ -67,11 +65,16 @@ class SellerOnboardingService:
         self.context_service = context_service or ConversationContextService()
 
     def start(self, conversation) -> SellerOnboardingOutcome:
-        if self._existing_membership(conversation.user):
+        membership = self._existing_membership(conversation.user)
+        if membership:
             return SellerOnboardingOutcome(
                 status=SellerOnboardingStatus.EXISTING_STORE,
-                text="Vous avez déjà une boutique. Votre espace vendeur est prêt.",
-                metadata={"seller_onboarding": True, "seller_workspace": True},
+                text="Votre espace vendeur est prêt.",
+                metadata={
+                    "seller_onboarding": True,
+                    "open_seller_workspace": True,
+                    "store_id": str(membership.store_id),
+                },
             )
         context = self.context_service.get_context(conversation)
         draft = context.seller_onboarding
@@ -95,6 +98,10 @@ class SellerOnboardingService:
     ) -> SellerOnboardingOutcome | None:
         draft = context.seller_onboarding
         if context.active_journey != ActiveJourney.SELL or not draft:
+            return None
+        # COMPLETED is legacy history, never a foreground task. The workspace
+        # service clears it when it next resolves the authorized store.
+        if draft.stage == SellerOnboardingStage.COMPLETED:
             return None
         action_id = message.metadata.get("action_id")
         # Journey selection is global navigation, never an onboarding command.
@@ -222,15 +229,8 @@ class SellerOnboardingService:
         context = ConversationContext.from_payload(locked.context)
         draft = context.seller_onboarding
         review_actions = {self.confirm_action, self.edit_action, self.cancel_action}
-        catalog_actions = {self.catalog_chat_action, self.catalog_dashboard_action}
         if action_id in review_actions and (
             draft is None or draft.stage != SellerOnboardingStage.REVIEW
-        ):
-            return self._stale_action()
-        if action_id in catalog_actions and (
-            draft is None
-            or draft.stage != SellerOnboardingStage.COMPLETED
-            or context.catalog_setup_choice is not None
         ):
             return self._stale_action()
         if action_id == self.confirm_action:
@@ -241,35 +241,7 @@ class SellerOnboardingService:
             return self._prompt_for(draft)
         if action_id == self.cancel_action:
             return self.cancel(locked, context)
-        if action_id in {self.catalog_chat_action, self.catalog_dashboard_action}:
-            choice = "chat" if action_id == self.catalog_chat_action else "dashboard"
-            if not self._consume_catalog_choice(conversation, choice):
-                return self._stale_action()
-            return SellerOnboardingOutcome(
-                status=SellerOnboardingStatus.COMPLETED,
-                text="Votre choix de configuration du catalogue est enregistré.",
-                metadata={"seller_onboarding": True, "catalog_setup_choice": choice},
-            )
         return self._prompt_for(context.seller_onboarding)
-
-    @transaction.atomic
-    def _consume_catalog_choice(self, conversation, choice: str) -> bool:
-        from apps.conversations.infrastructure.models import Conversation
-
-        locked = Conversation.objects.select_for_update().get(pk=conversation.pk)
-        context = ConversationContext.from_payload(locked.context)
-        draft = context.seller_onboarding
-        if (
-            context.active_journey != ActiveJourney.SELL
-            or draft is None
-            or draft.stage != SellerOnboardingStage.COMPLETED
-            or context.catalog_setup_choice is not None
-        ):
-            return False
-        locked.context = replace(context, catalog_setup_choice=choice).to_payload()
-        locked.save(update_fields=["context", "updated_at"])
-        self._audit("seller_catalog_setup_choice_committed", locked, choice=choice)
-        return True
 
     @staticmethod
     def _stale_action() -> SellerOnboardingOutcome:
@@ -297,7 +269,15 @@ class SellerOnboardingService:
                 text="Cet onboarding n'est pas disponible.",
             )
         if draft.stage == SellerOnboardingStage.COMPLETED:
-            return self._catalog_choice(draft.store_id)
+            return SellerOnboardingOutcome(
+                status=SellerOnboardingStatus.COMPLETED,
+                text="Votre espace vendeur est prêt.",
+                metadata={
+                    "seller_onboarding": True,
+                    "open_seller_workspace": True,
+                    "store_id": draft.store_id,
+                },
+            )
         if draft.stage != SellerOnboardingStage.REVIEW or not self._is_complete(draft):
             return self._prompt_for(draft)
         membership = self._existing_membership(user, lock=True)
@@ -313,13 +293,30 @@ class SellerOnboardingService:
             UserRole.objects.get_or_create(user=user, role=UserRoleType.STORE_OWNER)
             store_id = str(store.id)
             self._audit("store_created", locked, store_id=store_id)
-        completed = replace(
-            draft, stage=SellerOnboardingStage.COMPLETED, store_id=store_id
-        )
-        locked.context = replace(context, seller_onboarding=completed).to_payload()
+        metadata = {
+            **context.metadata,
+            "seller_workspace_active": True,
+            "seller_catalog_active": False,
+            "seller_store_id": store_id,
+        }
+        locked.context = replace(
+            context,
+            flow=ConversationFlow.IDLE,
+            seller_onboarding=None,
+            pending_seller_catalog_mutation=None,
+            metadata=metadata,
+        ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._audit("seller_onboarding_completed", locked, store_id=store_id)
-        return self._catalog_choice(store_id)
+        return SellerOnboardingOutcome(
+            status=SellerOnboardingStatus.COMPLETED,
+            text="Votre espace vendeur est prêt.",
+            metadata={
+                "seller_onboarding": True,
+                "open_seller_workspace": True,
+                "store_id": store_id,
+            },
+        )
 
     def review(self, draft: SellerOnboardingDraft) -> SellerOnboardingOutcome:
         return SellerOnboardingOutcome(
@@ -333,22 +330,6 @@ class SellerOnboardingService:
                 SellerOnboardingAction(action_id=self.cancel_action, label="Annuler"),
             ),
             metadata={"seller_onboarding": True},
-        )
-
-    def _catalog_choice(self, store_id: str | None) -> SellerOnboardingOutcome:
-        return SellerOnboardingOutcome(
-            status=SellerOnboardingStatus.COMPLETED,
-            text="Boutique créée. Comment souhaitez-vous configurer votre catalogue ?",
-            actions=(
-                SellerOnboardingAction(
-                    action_id=self.catalog_chat_action, label="Dans le chat"
-                ),
-                SellerOnboardingAction(
-                    action_id=self.catalog_dashboard_action,
-                    label="Via mon espace vendeur",
-                ),
-            ),
-            metadata={"seller_onboarding": True, "store_id": store_id},
         )
 
     def _prompt_for(self, draft: SellerOnboardingDraft) -> SellerOnboardingOutcome:
@@ -372,7 +353,15 @@ class SellerOnboardingService:
         if draft.stage == SellerOnboardingStage.REVIEW:
             return self.review(draft)
         if draft.stage == SellerOnboardingStage.COMPLETED:
-            return self._catalog_choice(draft.store_id)
+            return SellerOnboardingOutcome(
+                status=SellerOnboardingStatus.COMPLETED,
+                text="Votre espace vendeur est prêt.",
+                metadata={
+                    "seller_onboarding": True,
+                    "open_seller_workspace": True,
+                    "store_id": draft.store_id,
+                },
+            )
         status, text, request_location = prompts[draft.stage]
         return SellerOnboardingOutcome(
             status=status,

@@ -37,6 +37,9 @@ class MatchabilityResult:
 class DriverAvailabilityService:
     """The persisted manual intent is availability_status; matchability is derived."""
 
+    def __init__(self, *, geo_index=None):
+        self.geo_index = geo_index
+
     def set_available(self, driver: DriverProfile, actor) -> DriverProfile:
         return self._set(driver, actor, DriverAvailability.AVAILABLE)
 
@@ -49,18 +52,31 @@ class DriverAvailabilityService:
         locked = DriverProfile.objects.select_for_update().select_related("user").get(pk=driver.pk)
         if actor is None or locked.user_id != getattr(actor, "id", None):
             raise PermissionDenied("Only the driver can change this availability.")
-        if locked.availability_status == target:
-            return locked
-        # Model validation preserves the existing active-driver requirement.
-        locked.availability_status = target
-        locked.save(update_fields=["availability_status", "updated_at"])
-        if target == DriverAvailability.OFFLINE:
-            try:
-                from apps.drivers.application.location import DriverGeoIndex
-                DriverGeoIndex().remove(locked)
-            except Exception:
-                logger.warning("driver_geo_index_remove_failed", extra={"driver_id": str(locked.id)})
-        logger.info("driver_became_available" if target == DriverAvailability.AVAILABLE else "driver_went_offline", extra={"driver_id": str(locked.id)})
+        changed = locked.availability_status != target
+        if changed:
+            # Model validation preserves the existing active-driver requirement.
+            locked.availability_status = target
+            locked.save(update_fields=["availability_status", "updated_at"])
+        try:
+            from apps.drivers.application.location import DriverGeoIndex
+
+            geo_index = self.geo_index or DriverGeoIndex()
+            if target == DriverAvailability.AVAILABLE:
+                geo_index.index(locked)
+            else:
+                geo_index.remove(locked)
+        except Exception:
+            logger.warning(
+                "driver_geo_index_sync_failed",
+                extra={"driver_id": str(locked.id), "availability": target},
+            )
+        if changed:
+            event = (
+                "driver_became_available"
+                if target == DriverAvailability.AVAILABLE
+                else "driver_went_offline"
+            )
+            logger.info(event, extra={"driver_id": str(locked.id)})
         return locked
 
     def get_matchability(self, driver: DriverProfile, *, now=None) -> MatchabilityResult:

@@ -58,8 +58,9 @@ class DriverOnboardingService:
         self.context_service = context_service or ConversationContextService()
 
     def start(self, conversation):
-        if DriverProfile.objects.filter(user=conversation.user).exists():
-            return self._ready(existing=True)
+        profile = DriverProfile.objects.filter(user=conversation.user).first()
+        if profile is not None:
+            return self._ready(existing=True, profile_id=profile.id)
         context = self.context_service.get_context(conversation)
         draft = context.driver_onboarding
         if draft and draft.stage != DriverOnboardingStage.COMPLETED:
@@ -191,19 +192,22 @@ class DriverOnboardingService:
                 "driver_profile_created", locked, driver_profile_id=str(profile.id)
             )
         assign_role(user, UserRoleType.DRIVER)
-        completed = DriverOnboardingDraft(
-            stage=DriverOnboardingStage.COMPLETED,
-            vehicle_type=profile.vehicle_type,
-            driver_profile_id=str(profile.id),
-        )
+        metadata = {
+            **context.metadata,
+            "driver_workspace_active": True,
+            "driver_profile_id": str(profile.id),
+        }
         locked.context = replace(
-            context, flow=ConversationFlow.IDLE, driver_onboarding=completed
+            context,
+            flow=ConversationFlow.IDLE,
+            driver_onboarding=None,
+            metadata=metadata,
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._audit(
             "driver_onboarding_completed", locked, driver_profile_id=str(profile.id)
         )
-        return self._ready(existing=False)
+        return self._ready(existing=False, profile_id=profile.id)
 
     def review(self, draft):
         return DriverOnboardingOutcome(
@@ -219,7 +223,7 @@ class DriverOnboardingService:
             metadata={"driver_onboarding": True},
         )
 
-    def _ready(self, *, existing):
+    def _ready(self, *, existing, profile_id=None):
         return DriverOnboardingOutcome(
             status=DriverOnboardingStatus.EXISTING_PROFILE
             if existing
@@ -227,6 +231,8 @@ class DriverOnboardingService:
             text="Votre profil livreur est prêt. Vous pourrez vous rendre disponible et partager votre position.",
             metadata={
                 "driver_profile_ready": True,
+                "open_driver_workspace": True,
+                "driver_profile_id": str(profile_id) if profile_id else None,
                 "journey_status": "DRIVER_PROFILE_READY",
             },
         )
@@ -235,7 +241,9 @@ class DriverOnboardingService:
         if draft.stage == DriverOnboardingStage.REVIEW:
             return self.review(draft)
         if draft.stage == DriverOnboardingStage.COMPLETED:
-            return self._ready(existing=False)
+            return self._ready(
+                existing=False, profile_id=draft.driver_profile_id
+            )
         return DriverOnboardingOutcome(
             status=DriverOnboardingStatus.AWAITING_VEHICLE_TYPE,
             text="Quel type de véhicule utilisez-vous ? (moto, vélo, voiture, camionnette ou autre)",

@@ -20,7 +20,6 @@ from apps.ai.domain.understanding import (
     TaskTarget,
 )
 from apps.catalog.application.grounding import CatalogGroundingService
-from apps.catalog.application.selectors import get_marketplace_available_products
 from apps.catalog.domain.enums import ProductStatus, ProductVariantStatus
 from apps.catalog.infrastructure.models import Product, ProductVariant
 from apps.conversations.application.active_orders import ActiveCustomerOrderService
@@ -38,6 +37,10 @@ from apps.conversations.application.context_window import (
     ConversationContextWindowBuilder,
 )
 from apps.conversations.application.driver_onboarding import DriverOnboardingService
+from apps.conversations.application.driver_workspace import (
+    DriverWorkspaceRequest,
+    DriverWorkspaceService,
+)
 from apps.conversations.application.interruptions import (
     UniversalCommand,
     active_task_kind,
@@ -61,11 +64,18 @@ from apps.conversations.application.order_building import (
     ItemTargetStatus,
     OrderBuildingService,
 )
+from apps.conversations.application.product_discovery import (
+    ProductDiscoveryConversationService,
+)
 from apps.conversations.application.recovery import (
     ConversationRecoveryService,
     RecoveryStatus,
 )
 from apps.conversations.application.seller_onboarding import SellerOnboardingService
+from apps.conversations.application.seller_workspace import (
+    SellerWorkspaceRequest,
+    SellerWorkspaceService,
+)
 from apps.conversations.domain.context import (
     ActiveJourney,
     ClarificationKind,
@@ -149,7 +159,10 @@ class ConversationalOrchestrator:
         recovery_service=None,
         journey_routing_service=None,
         seller_onboarding_service=None,
+        seller_workspace_service=None,
         driver_onboarding_service=None,
+        driver_workspace_service=None,
+        product_discovery_service=None,
         seller_catalog_conversation_service=None,
         store_preparation_service=None,
         store_offer_action_service=None,
@@ -177,9 +190,19 @@ class ConversationalOrchestrator:
             seller_onboarding_service
             or SellerOnboardingService(context_service=self.context_service)
         )
+        self.seller_workspace_service = seller_workspace_service or SellerWorkspaceService(
+            context_service=self.context_service
+        )
         self.driver_onboarding_service = (
             driver_onboarding_service
             or DriverOnboardingService(context_service=self.context_service)
+        )
+        self.driver_workspace_service = driver_workspace_service or DriverWorkspaceService(
+            context_service=self.context_service
+        )
+        self.product_discovery_service = (
+            product_discovery_service
+            or ProductDiscoveryConversationService(context_service=self.context_service)
         )
         self.seller_catalog_conversation_service = seller_catalog_conversation_service
         self.store_preparation_service = (
@@ -286,6 +309,70 @@ class ConversationalOrchestrator:
             )
             if resumed_driver_offer is not None:
                 return resumed_driver_offer
+        action_id = message.metadata.get("action_id")
+        workspace_callback = self.seller_workspace_service.handles_action(action_id)
+        legacy_without_store = (
+            action_id in self.seller_workspace_service.legacy_actions
+            and self.seller_workspace_service.resolve_membership(
+                user=conversation.user
+            )
+            is None
+        )
+        if workspace_callback and not legacy_without_store:
+            # A live membership is resolved for every callback. Legacy onboarding
+            # callbacks therefore become idempotent workspace navigation.
+            workspace = self.seller_workspace_service.handle_action(
+                conversation=conversation, action_id=action_id
+            )
+            return self._from_seller_workspace(workspace, context)
+        workspace_request = self.seller_workspace_service.classify(
+            user=conversation.user, context=context, text=message.text
+        )
+        if workspace_request == SellerWorkspaceRequest.OPEN:
+            return self._select_journey(conversation, context, ActiveJourney.SELL)
+        if workspace_request == SellerWorkspaceRequest.CATALOG:
+            membership = self.seller_workspace_service.resolve_membership(
+                user=conversation.user
+            )
+            workspace = self.seller_workspace_service.activate_catalog(
+                conversation=conversation,
+                store_id=membership.store_id if membership else None,
+            )
+            # A direct command such as "voir mon catalogue" is handed to the
+            # existing catalog flow in the same turn; no catalog logic is copied.
+            if self.seller_catalog_conversation_service and not workspace.metadata.get(
+                "authorization_denied"
+            ):
+                context = self.context_service.get_context(conversation)
+                catalog = self.seller_catalog_conversation_service.process(
+                    conversation, context, message, correlation_id=correlation_id
+                )
+                if catalog is not None:
+                    return self._from_seller_catalog(catalog, context)
+            return self._from_seller_workspace(workspace, context)
+        driver_workspace_callback = self.driver_workspace_service.handles_action(
+            action_id
+        )
+        legacy_driver_without_profile = (
+            action_id in self.driver_workspace_service.legacy_actions
+            and self.driver_workspace_service.resolve_driver(conversation.user) is None
+        )
+        if driver_workspace_callback and not legacy_driver_without_profile:
+            workspace = self.driver_workspace_service.present(
+                conversation=conversation
+            )
+            return self._from_driver_workspace(workspace, context)
+        if self.product_discovery_service.handles_action(action_id):
+            discovery = self.product_discovery_service.continue_from_callback(
+                conversation=conversation,
+                context=context,
+            )
+            return self._from_product_discovery(discovery, context)
+        driver_workspace_request = self.driver_workspace_service.classify(
+            user=conversation.user, context=context, text=message.text
+        )
+        if driver_workspace_request == DriverWorkspaceRequest.OPEN:
+            return self._select_journey(conversation, context, ActiveJourney.DELIVER)
         universal = self._try_universal_interrupt(
             conversation,
             context,
@@ -310,11 +397,22 @@ class ConversationalOrchestrator:
             conversation, context, message
         )
         if onboarding is not None:
+            if onboarding.metadata.get("open_seller_workspace"):
+                workspace = self.seller_workspace_service.present(
+                    conversation=conversation,
+                    store_id=onboarding.metadata.get("store_id"),
+                )
+                return self._from_seller_workspace(workspace, context)
             return self._from_seller_onboarding(onboarding, context)
         driver_onboarding = self.driver_onboarding_service.handle(
             conversation, context, message
         )
         if driver_onboarding is not None:
+            if driver_onboarding.metadata.get("open_driver_workspace"):
+                workspace = self.driver_workspace_service.present(
+                    conversation=conversation
+                )
+                return self._from_driver_workspace(workspace, context)
             return self._from_driver_onboarding(driver_onboarding, context)
         if self.seller_catalog_conversation_service:
             catalog = self.seller_catalog_conversation_service.process(
@@ -402,6 +500,10 @@ class ConversationalOrchestrator:
                 context,
             )
         understanding = self._normalize_understanding(understanding)
+        if understanding.intent == MessageIntent.CREATE_OR_UPDATE_ORDER:
+            understanding = self.product_discovery_service.enrich_order_understanding(
+                understanding, message.text or "", context
+            )
         compound = self._handle_compound_turn(
             conversation,
             context,
@@ -482,9 +584,13 @@ class ConversationalOrchestrator:
                 conversation, context, agent_decision=agent_decision
             )
         if understanding.intent == MessageIntent.CATALOG_BROWSE:
-            return self._catalog_availability_outcome(
-                context, agent_decision=agent_decision
+            discovery = self.product_discovery_service.discover(
+                conversation=conversation,
+                context=context,
+                understanding=understanding,
+                text=message.text or "",
             )
+            return self._from_product_discovery(discovery, context)
         if understanding.intent == MessageIntent.HELP:
             return self._handle_knowledge_or_unknown(
                 conversation,
@@ -670,6 +776,16 @@ class ConversationalOrchestrator:
                 journey,
                 decision,
             )
+        if (
+            journey == ActiveJourney.DELIVER
+            and decision.status == JourneyRoutingStatus.DRIVER_JOURNEY_READY
+        ):
+            workspace = self.driver_workspace_service.present(
+                conversation=conversation
+            )
+            return self._with_journey_metadata(
+                self._from_driver_workspace(workspace, context), journey, decision
+            )
         if journey == ActiveJourney.BUY:
             return self._outcome(
                 ConversationalOutcomeStatus.PROCESSED,
@@ -680,42 +796,21 @@ class ConversationalOrchestrator:
                     "journey_status": decision.status.value,
                 },
             )
-        text = (
-            (
-                "Votre parcours vendeur est prêt."
-                if decision.status == JourneyRoutingStatus.SELLER_JOURNEY_READY
-                else "Pour vendre, l'onboarding vendeur est requis."
-            )
-            if journey == ActiveJourney.SELL
-            else (
-                "Votre parcours livreur est prêt."
-                if decision.status == JourneyRoutingStatus.DRIVER_JOURNEY_READY
-                else "Pour livrer, l'onboarding livreur est requis."
-            )
-        )
         if (
             journey == ActiveJourney.SELL
             and decision.status == JourneyRoutingStatus.SELLER_JOURNEY_READY
         ):
-            return self._with_journey_metadata(
-                ConversationalOutcome(
-                    status=ConversationalOutcomeStatus.PROCESSED,
-                    response=ResponsePlan(
-                        text=text,
-                        actions=(
-                            ResponseAction(
-                                action_id="seller.dashboard.open",
-                                label="Ouvrir mon espace vendeur",
-                            ),
-                        ),
-                        metadata={"seller_workspace": True},
-                    ),
-                    active_order_id=context.active_order_id,
-                    metadata={"seller_workspace": True},
-                ),
-                journey,
-                decision,
+            workspace = self.seller_workspace_service.present(
+                conversation=conversation
             )
+            return self._with_journey_metadata(
+                self._from_seller_workspace(workspace, context), journey, decision
+            )
+        text = (
+            "Votre parcours livreur est prêt."
+            if decision.status == JourneyRoutingStatus.DRIVER_JOURNEY_READY
+            else "Pour livrer, l'onboarding livreur est requis."
+        )
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
             text,
@@ -760,6 +855,25 @@ class ConversationalOrchestrator:
             metadata=dict(onboarding.metadata),
         )
 
+    def _from_seller_workspace(self, workspace, context):
+        return ConversationalOutcome(
+            status=(
+                ConversationalOutcomeStatus.REJECTED
+                if workspace.metadata.get("authorization_denied")
+                else ConversationalOutcomeStatus.PROCESSED
+            ),
+            response=ResponsePlan(
+                text=workspace.text,
+                actions=tuple(
+                    ResponseAction(action_id=action.action_id, label=action.label)
+                    for action in workspace.actions
+                ),
+                metadata=dict(workspace.metadata),
+            ),
+            active_order_id=context.active_order_id,
+            metadata=dict(workspace.metadata),
+        )
+
     def _from_driver_onboarding(self, onboarding, context):
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
@@ -775,53 +889,58 @@ class ConversationalOrchestrator:
             metadata=dict(onboarding.metadata),
         )
 
+    def _from_driver_workspace(self, workspace, context):
+        return ConversationalOutcome(
+            status=(
+                ConversationalOutcomeStatus.REJECTED
+                if workspace.metadata.get("driver_profile_missing")
+                else ConversationalOutcomeStatus.PROCESSED
+            ),
+            response=ResponsePlan(
+                text=workspace.text,
+                actions=tuple(
+                    ResponseAction(action_id=action.action_id, label=action.label)
+                    for action in workspace.actions
+                ),
+                request_location=workspace.request_location,
+                metadata=dict(workspace.metadata),
+            ),
+            active_order_id=context.active_order_id,
+            metadata=dict(workspace.metadata),
+        )
+
+    def _from_product_discovery(self, discovery, context):
+        metadata = dict(discovery.metadata or {})
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=ResponsePlan(
+                text=discovery.text,
+                actions=tuple(
+                    ResponseAction(action_id=action.action_id, label=action.label)
+                    for action in discovery.actions
+                ),
+                metadata=metadata,
+            ),
+            active_order_id=context.active_order_id,
+            metadata=metadata,
+        )
+
     def _driver_availability_action(self, conversation, context, action_id):
         if action_id not in {
             "driver.availability.available",
             "driver.availability.offline",
         }:
             return None
-        if context.active_journey != ActiveJourney.DELIVER:
-            return self._outcome(
-                ConversationalOutcomeStatus.REJECTED,
-                "Cette action est réservée au parcours livreur.",
-                context,
-            )
-        from apps.drivers.application.availability import DriverAvailabilityService
-        from apps.drivers.application.selectors import get_driver_by_user
-
-        driver = get_driver_by_user(conversation.user)
-        if driver is None:
-            return self._outcome(
-                ConversationalOutcomeStatus.REJECTED,
-                "Créez d'abord votre profil livreur.",
-                context,
-            )
-        service = DriverAvailabilityService()
-        driver = (
-            service.set_available(driver, conversation.user)
+        workspace = (
+            self.driver_workspace_service.set_available(conversation=conversation)
             if action_id.endswith("available")
-            else service.set_offline(driver, conversation.user)
+            else self.driver_workspace_service.set_offline(conversation=conversation)
         )
-        matchability = service.get_matchability(driver)
-        text = (
-            "Vous êtes disponible."
-            if action_id.endswith("available")
-            else "Vous êtes hors ligne pour les nouvelles livraisons."
+        workspace = replace(
+            workspace,
+            metadata={**workspace.metadata, "driver_availability": True},
         )
-        if matchability.status.value == "LOCATION_REQUIRED":
-            text += " Partagez votre position pour recevoir des livraisons."
-        elif matchability.status.value == "LOCATION_REFRESH_REQUIRED":
-            text += " Actualisez votre position pour recevoir des livraisons."
-        return self._outcome(
-            ConversationalOutcomeStatus.PROCESSED,
-            text,
-            context,
-            metadata={
-                "driver_availability": True,
-                "matchability": matchability.status.value,
-            },
-        )
+        return self._from_driver_workspace(workspace, context)
 
     def _driver_offer_action(self, conversation, context, action_id, correlation_id):
         from apps.drivers.application.offers import decode_driver_offer_action
@@ -903,12 +1022,14 @@ class ConversationalOrchestrator:
             DriverMatchingOrchestrator().handle_reject(
                 offer, actor=conversation.user, correlation_id=correlation_id
             )
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                "Proposition refusée.",
-                context,
-                metadata={"driver_offer": "REJECTED"},
+            workspace = self.driver_workspace_service.present(
+                conversation=conversation, prefix="Proposition refusée."
             )
+            workspace = replace(
+                workspace,
+                metadata={**workspace.metadata, "driver_offer": "REJECTED"},
+            )
+            return self._from_driver_workspace(workspace, context)
         except (ValueError, PermissionError):
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
@@ -1236,16 +1357,19 @@ class ConversationalOrchestrator:
                 if result.duplicate
                 else "Livraison terminée."
             )
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                text,
-                context,
+            workspace = self.driver_workspace_service.present(
+                conversation=conversation, prefix=text
+            )
+            workspace = replace(
+                workspace,
                 metadata={
+                    **workspace.metadata,
                     "delivery_completion": "DUPLICATE"
                     if result.duplicate
                     else "CONFIRMED"
                 },
             )
+            return self._from_driver_workspace(workspace, context)
         destination = (
             result.mission.destination.address_label or "Destination enregistrée"
         )
@@ -1275,11 +1399,27 @@ class ConversationalOrchestrator:
     def _natural_driver_availability(self, conversation, context, text):
         if context.active_journey != ActiveJourney.DELIVER or not text:
             return None
-        normalized = " ".join(text.lower().split())
+        normalized = " ".join(text.casefold().strip(" .!?").split())
         action = None
-        if normalized in {"je suis disponible", "disponible", "je suis en ligne"}:
+        if normalized in {
+            "je suis disponible",
+            "disponible",
+            "je suis en ligne",
+            "je veux commencer à livrer",
+            "je veux commencer a livrer",
+            "je suis prêt",
+            "je suis pret",
+        }:
             action = "driver.availability.available"
-        elif normalized in {"je suis hors ligne", "hors ligne", "indisponible"}:
+        elif normalized in {
+            "je suis hors ligne",
+            "hors ligne",
+            "indisponible",
+            "je ne suis plus disponible",
+            "je veux arrêter les livraisons",
+            "je veux arreter les livraisons",
+            "je fais une pause",
+        }:
             action = "driver.availability.offline"
         return (
             self._driver_availability_action(conversation, context, action)
@@ -1833,7 +1973,6 @@ class ConversationalOrchestrator:
     def _handle_driver_location(self, conversation, context, message):
         from django.utils import timezone
 
-        from apps.drivers.application.availability import DriverAvailabilityService
         from apps.drivers.application.location import (
             DriverLocationService,
             DriverLocationUpdate,
@@ -1860,22 +1999,19 @@ class ConversationalOrchestrator:
             ),
             actor=conversation.user,
         )
-        driver.refresh_from_db()
-        matchability = DriverAvailabilityService().get_matchability(driver)
-        text = (
-            "Position enregistrée."
+        prefix = (
+            "Votre position a été mise à jour."
             if result.status.value == "UPDATED"
             else "Cette position était déjà enregistrée ou plus ancienne."
         )
-        return self._outcome(
-            ConversationalOutcomeStatus.PROCESSED,
-            text,
-            context,
-            metadata={
-                "driver_location": True,
-                "matchability": matchability.status.value,
-            },
+        workspace = self.driver_workspace_service.present(
+            conversation=conversation, prefix=prefix
         )
+        workspace = replace(
+            workspace,
+            metadata={**workspace.metadata, "driver_location": True},
+        )
+        return self._from_driver_workspace(workspace, context)
 
     def _handle_action(
         self, conversation, context, action_id, correlation_id, metadata
@@ -2885,53 +3021,6 @@ class ConversationalOrchestrator:
             },
         )
 
-    def _catalog_availability_outcome(self, context, *, agent_decision=None):
-        result = (
-            agent_decision.tool_results.get("list_marketplace_products")
-            if agent_decision is not None
-            else None
-        )
-        if result is not None:
-            total = int(result.data.get("count", 0))
-            names = [
-                str(item.get("name", ""))
-                for item in result.data.get("products", ())[:8]
-                if item.get("name")
-            ]
-        else:
-            products = get_marketplace_available_products().order_by("name")
-            total = products.count()
-            names = list(products.values_list("name", flat=True)[:8])
-        if not names:
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                "Je viens de vérifier le catalogue : aucun produit n'est déclaré "
-                "disponible par une boutique active pour le moment.",
-                context,
-                metadata={
-                    "capability": "catalog_browse",
-                    "authoritative": True,
-                    "product_count": 0,
-                    "agent_read": result is not None,
-                },
-            )
-        preview = ", ".join(names)
-        remainder = total - len(names)
-        suffix = f", ainsi que {remainder} autre(s) produit(s)" if remainder else ""
-        return self._outcome(
-            ConversationalOutcomeStatus.PROCESSED,
-            f"Oui. Je viens de vérifier le catalogue : {total} produit(s) sont "
-            f"actuellement disponibles, notamment {preview}{suffix}. "
-            "Dites-moi ce que vous recherchez et je vérifierai les correspondances.",
-            context,
-            metadata={
-                "capability": "catalog_browse",
-                "authoritative": True,
-                "product_count": total,
-                "agent_read": result is not None,
-            },
-        )
-
     @staticmethod
     def _has_pending_task(context):
         return has_resumable_work(context)
@@ -2988,6 +3077,10 @@ class ConversationalOrchestrator:
         if understanding is None:
             return None
         understanding = self._normalize_understanding(understanding)
+        if understanding.intent == MessageIntent.CREATE_OR_UPDATE_ORDER:
+            understanding = self.product_discovery_service.enrich_order_understanding(
+                understanding, message.text or "", context
+            )
         compound = self._handle_compound_turn(
             conversation,
             context,
@@ -3067,9 +3160,13 @@ class ConversationalOrchestrator:
                 conversation, context, agent_decision=agent_decision
             )
         if understanding.intent == MessageIntent.CATALOG_BROWSE:
-            return self._catalog_availability_outcome(
-                context, agent_decision=agent_decision
+            discovery = self.product_discovery_service.discover(
+                conversation=conversation,
+                context=context,
+                understanding=understanding,
+                text=message.text or "",
             )
+            return self._from_product_discovery(discovery, context)
         if understanding.intent == MessageIntent.MEMORY_SHOW:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:

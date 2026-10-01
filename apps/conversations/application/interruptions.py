@@ -111,7 +111,12 @@ def active_task_kind(context: ConversationContext) -> ConversationTaskKind | Non
             and context.seller_onboarding.stage != SellerOnboardingStage.COMPLETED
         ):
             return ConversationTaskKind.SELLER_ONBOARDING
-        return ConversationTaskKind.SELLER_CATALOG
+        if (
+            context.metadata.get("seller_catalog_active") is True
+            or context.pending_seller_catalog_mutation is not None
+        ):
+            return ConversationTaskKind.SELLER_CATALOG
+        return ConversationTaskKind.JOURNEY
     if context.active_journey == ActiveJourney.DELIVER:
         if (
             context.driver_onboarding is not None

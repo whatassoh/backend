@@ -23,7 +23,11 @@ def select_response_policy(outcome, context):
         use_case = ResponseUseCase.CLARIFICATION
     elif any(action.endswith("confirm") for action in action_ids):
         use_case = ResponseUseCase.ORDER_REVIEW
-    elif capability in STATUS_CAPABILITIES or metadata.get("order_status"):
+    elif (
+        capability in STATUS_CAPABILITIES
+        or metadata.get("order_status")
+        or metadata.get("driver_workspace")
+    ):
         use_case = ResponseUseCase.ORDER_STATUS
     elif capability in NAVIGATION_CAPABILITIES or any(
         action.startswith("conversation.") for action in action_ids
@@ -31,7 +35,11 @@ def select_response_policy(outcome, context):
         use_case = ResponseUseCase.NAVIGATION
     elif metadata.get("seller_onboarding") or metadata.get("driver_onboarding"):
         use_case = ResponseUseCase.ONBOARDING
-    elif metadata.get("seller_catalog") or metadata.get("seller_workspace"):
+    elif (
+        metadata.get("seller_catalog")
+        or metadata.get("seller_workspace")
+        or capability == "product_discovery"
+    ):
         use_case = ResponseUseCase.CATALOG
     elif outcome.actions_performed:
         use_case = ResponseUseCase.ACTION_RESULT
