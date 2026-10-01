@@ -100,6 +100,18 @@ class WhatsAppProvider(MessagingProvider):
             )
         )
 
+    def send_typing_indicator(self, recipient_external_id: str) -> dict[str, Any]:
+        """Send a WhatsApp typing indicator without storing a conversation message."""
+        return self._post_message(
+            {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": recipient_external_id,
+                "type": "typing",
+                "typing": {"type": "text"},
+            }
+        )
+
     def send_template(self, message: WhatsAppTemplateMessage) -> ProviderSendResult:
         response_data = self._post_message(build_template_payload(message))
         definition = get_template_definition(

@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from apps.conversations.application.flow import process_inbound_conversation
 from apps.conversations.application.services import ingest_inbound_message
+from apps.messaging.application.activities import show_processing_indicator
 from apps.messaging.application.reliable_pipeline import (
     channel_pipeline_enabled,
     enqueue_inbound_turn,
@@ -43,6 +44,7 @@ def process_telegram_webhook(payload: dict[str, Any]) -> dict[str, int]:
                 duplicates += 1
                 continue
             inbound = ingest_inbound_message(message, message_event)
+            show_processing_indicator(message)
             if channel_pipeline_enabled(message.channel):
                 _, created_item = enqueue_inbound_turn(
                     inbound=inbound, message=message, message_event=message_event
