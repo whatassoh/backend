@@ -64,6 +64,7 @@ from apps.conversations.application.order_building import (
     ItemTargetStatus,
     OrderBuildingService,
 )
+from apps.conversations.application.order_review_presentation import OrderReviewPresenter
 from apps.conversations.application.product_discovery import (
     ProductDiscoveryConversationService,
 )
@@ -185,6 +186,7 @@ class ConversationalOrchestrator:
         self.active_order_service = active_order_service or ActiveCustomerOrderService()
         self.order_building_service = order_building_service or OrderBuildingService()
         self.review_service = review_service or OrderReviewService()
+        self.review_presenter = OrderReviewPresenter()
         self.recovery_service = recovery_service or ConversationRecoveryService(
             active_order_service=self.active_order_service,
             review_service=self.review_service,
@@ -380,6 +382,8 @@ class ConversationalOrchestrator:
                 if catalog is not None:
                     return self._from_seller_catalog(catalog, context)
             return self._from_seller_workspace(workspace, context)
+        if self._is_location_edit_reply(context, message.text):
+            return self._start_location_change(conversation, context)
         universal = self._try_universal_interrupt(
             conversation,
             context,
@@ -535,6 +539,8 @@ class ConversationalOrchestrator:
         )
         if availability is not None:
             return availability
+        if self._is_location_edit_reply(context, message.text):
+            return self._start_location_change(conversation, context)
         understanding = self.understanding_service.understand_normalized(
             message,
             limited_context=conversation_context,
@@ -564,6 +570,12 @@ class ConversationalOrchestrator:
         agent_decision = self._run_active_agent(
             conversation, message, understanding, correlation_id
         )
+        if understanding.order_action == OrderAction.CHANGE_LOCATION:
+            return self._start_location_change(conversation, context)
+        if understanding.intent == MessageIntent.ORDER_DETAILS:
+            return self._order_details_outcome(conversation, context)
+        if understanding.order_action == OrderAction.REVIEW:
+            return self._review_active_order(conversation, context)
         variant_text_choice = self._complete_variant_text_selection(
             conversation, context, understanding, correlation_id
         )
@@ -629,6 +641,8 @@ class ConversationalOrchestrator:
             return self._order_history_outcome(
                 conversation, context, agent_decision=agent_decision
             )
+        if understanding.intent == MessageIntent.ORDER_DETAILS:
+            return self._order_details_outcome(conversation, context)
         if understanding.intent == MessageIntent.CATALOG_BROWSE:
             discovery = self.product_discovery_service.discover(
                 conversation=conversation,
@@ -675,6 +689,8 @@ class ConversationalOrchestrator:
                     context,
                 )
             return self._confirm_active_order(conversation, context, correlation_id)
+        if understanding.order_action == OrderAction.REVIEW:
+            return self._review_active_order(conversation, context)
         if understanding.order_action == OrderAction.RESUME:
             return self._resume_workflow(
                 conversation,
@@ -698,6 +714,26 @@ class ConversationalOrchestrator:
             )
         return self._handle_order_items(
             conversation, context, understanding, correlation_id
+        )
+
+    @staticmethod
+    def _is_location_edit_reply(context, text):
+        pending = context.pending_clarification
+        if (
+            not text
+            or pending is None
+            or pending.metadata.get("operation") != OrderAction.MODIFY.value
+        ):
+            return False
+        normalized = re.sub(r"[^a-zà-ÿ\s]", " ", text.casefold())
+        return any(
+            phrase in " ".join(normalized.split())
+            for phrase in (
+                "localisation",
+                "adresse",
+                "position",
+                "lieu de livraison",
+            )
         )
 
     def _resume_whatsapp_store_offer(self, conversation, context, message):
@@ -2294,6 +2330,21 @@ class ConversationalOrchestrator:
         if action_id == "order.cancel":
             return self._cancel_active_order(conversation, context, correlation_id)
         if action_id == "order.modify":
+            order = self._active_order(conversation, context)
+            if order is not None:
+                pending = PendingClarification(
+                    kind=ClarificationKind.OTHER,
+                    field="order_item",
+                    metadata={
+                        "operation": OrderAction.MODIFY.value,
+                        "order_id": str(order.id),
+                    },
+                )
+                self.context_service.set_pending_clarification(
+                    conversation,
+                    pending,
+                    flow=ConversationFlow.AWAITING_CLARIFICATION,
+                )
             return self._outcome(
                 ConversationalOutcomeStatus.PROCESSED,
                 "Que souhaitez-vous modifier dans votre commande ?",
@@ -2938,39 +2989,51 @@ class ConversationalOrchestrator:
 
     def _recap(self, order):
         review = self.review_service.build_review(order)
-        lines = [f"- {item.display_label}" for item in review.items]
-        delivery = "Position partagée"
-        if review.delivery_address_label:
-            delivery += f" — {review.delivery_address_label}"
-        if review.delivery_instructions:
-            delivery += f"\nIndications : {review.delivery_instructions}"
-        if not review.readiness.ready:
-            blockers = ", ".join(review.readiness.blocking_issues)
-            return ResponsePlan(
-                text="Commande à compléter :\n"
-                + "\n".join(lines)
-                + f"\nÀ corriger : {blockers}",
-                actions=(
-                    ResponseAction(action_id="order.modify", label="Modifier"),
-                    ResponseAction(action_id="order.cancel", label="Annuler"),
-                ),
-                metadata={"review_fingerprint": review.fingerprint},
-            )
+        presentation = self.review_presenter.present(review)
         return ResponsePlan(
-            text=(
-                "Récapitulatif :\n"
-                + "\n".join(lines)
-                + f"\nLivraison : {delivery}\nConfirmez-vous ?"
-            ),
-            actions=(
-                ResponseAction(action_id="order.confirm", label="Confirmer"),
-                ResponseAction(action_id="order.modify", label="Modifier"),
-                ResponseAction(
-                    action_id="order.change_location", label="Modifier l'adresse"
-                ),
-                ResponseAction(action_id="order.cancel", label="Annuler"),
+            text=presentation.text,
+            actions=tuple(
+                ResponseAction(action_id=action_id, label=label)
+                for action_id, label in presentation.actions
             ),
             metadata={"review_fingerprint": review.fingerprint},
+        )
+
+    def _review_active_order(self, conversation, context):
+        order = self._active_order(conversation, context)
+        if order is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Aucune commande active à récapituler.",
+                context,
+            )
+        pending = context.pending_clarification
+        optional_empty_add = bool(
+            pending
+            and pending.metadata.get("operation") == OrderAction.ADD_ITEM.value
+            and not (pending.metadata.get("item") or {}).get("requested_name")
+        )
+        if optional_empty_add:
+            self.context_service.clear_pending_clarification(
+                conversation, flow=ConversationFlow.ORDER_BUILDING
+            )
+            context = replace(context, pending_clarification=None)
+        review = self.review_service.build_review(
+            order, has_pending_clarification=context.pending_clarification is not None
+        )
+        flow = (
+            ConversationFlow.AWAITING_CONFIRMATION
+            if review.readiness.ready
+            else ConversationFlow.ORDER_BUILDING
+        )
+        updated = replace(context, flow=flow)
+        self.context_service.update_context(conversation, updated)
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=self._recap(order),
+            active_order_id=str(order.id),
+            requires_followup=True,
+            metadata={"order_review": True, "review_ready": review.readiness.ready},
         )
 
     def _from_clarification(self, clarification, context, actions=()):
@@ -3163,6 +3226,7 @@ class ConversationalOrchestrator:
                 MessageIntent.CATALOG_BROWSE,
                 MessageIntent.ORDER_HISTORY,
                 MessageIntent.ORDER_STATUS,
+                MessageIntent.ORDER_DETAILS,
             }
         ):
             return None
@@ -3243,6 +3307,46 @@ class ConversationalOrchestrator:
                 "authoritative": True,
                 "agent_read": False,
                 "order_status": order.status,
+                "order_id": str(order.id),
+            },
+        )
+
+    def _order_details_outcome(self, conversation, context):
+        """Present current customer-owned order content from database truth."""
+
+        actor = getattr(conversation, "user", None)
+        order = self._active_order(conversation, context) if actor is not None else None
+        if order is None and actor is not None:
+            terminal = {
+                OrderStatus.DELIVERED,
+                OrderStatus.CANCELLED,
+                OrderStatus.FAILED,
+            }
+            orders = get_customer_orders(actor).order_by("-created_at")
+            order = orders.exclude(status__in=terminal).first() or orders.first()
+        if order is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous n'avez aucune commande à afficher.",
+                context,
+                metadata={"capability": "order_details", "authoritative": True},
+            )
+        review = self.review_service.build_review(order)
+        lines = [f"- {item.display_label}" for item in review.items]
+        location = (
+            (review.delivery_address_label or "position enregistrée")
+            if review.has_delivery_location
+            else "à compléter"
+        )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"Commande {review.reference} — {order.get_status_display()}\n\n"
+            + ("\n".join(lines) if lines else "- Aucun article")
+            + f"\n\nLieu de livraison : {location}",
+            context,
+            metadata={
+                "capability": "order_details",
+                "authoritative": True,
                 "order_id": str(order.id),
             },
         )
@@ -3362,6 +3466,7 @@ class ConversationalOrchestrator:
                 MessageIntent.HELP,
                 MessageIntent.ORDER_HISTORY,
                 MessageIntent.ORDER_STATUS,
+                MessageIntent.ORDER_DETAILS,
                 MessageIntent.CANCEL,
                 MessageIntent.ORDER_RESUME,
                 MessageIntent.PAUSE,
@@ -3373,6 +3478,7 @@ class ConversationalOrchestrator:
                 MessageIntent.MEMORY_FORGET,
                 MessageIntent.CATALOG_BROWSE,
             }
+            or understanding.order_action == OrderAction.REVIEW
         )
         if not is_universal:
             return None
@@ -3400,6 +3506,11 @@ class ConversationalOrchestrator:
             if status_outcome is None:
                 status_outcome = self._order_status_outcome(conversation, context)
             return self._with_arbitration(status_outcome, "support_interruption")
+        if understanding.intent == MessageIntent.ORDER_DETAILS:
+            return self._with_arbitration(
+                self._order_details_outcome(conversation, context),
+                "support_interruption",
+            )
         if capability.status != CapabilityStatus.SUPPORTED:
             return self._capability_outcome(
                 context, capability, conversation=conversation
@@ -3408,6 +3519,8 @@ class ConversationalOrchestrator:
             return self._order_history_outcome(
                 conversation, context, agent_decision=agent_decision
             )
+        if understanding.order_action == OrderAction.REVIEW:
+            return self._review_active_order(conversation, context)
         if understanding.intent == MessageIntent.CATALOG_BROWSE:
             discovery = self.product_discovery_service.discover(
                 conversation=conversation,
@@ -4091,15 +4204,6 @@ class ConversationalOrchestrator:
             target.item,
             replacement,
             resolution,
-            actor=conversation.user,
-            correlation_id=correlation_id,
-        )
-        # Replacement identity and customer-requested slots are separate in the
-        # existing order service: persist the collected quantity/unit explicitly.
-        self.order_building_service.update(
-            target.item,
-            quantity=replacement.quantity,
-            unit=replacement.unit,
             actor=conversation.user,
             correlation_id=correlation_id,
         )

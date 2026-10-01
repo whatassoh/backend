@@ -203,12 +203,48 @@ class OrderBuildingService:
         self, item, extracted_item, resolution, *, actor=None, correlation_id=None
     ):
         product, variant, status = self._catalog_values(resolution)
-        return replace_order_item(
+        quantity = extracted_item.quantity or item.quantity
+        unit = extracted_item.unit or item.unit
+        if status == OrderItemResolutionStatus.MATCHED:
+            existing = (
+                OrderItem.objects.select_for_update()
+                .filter(
+                    order=item.order,
+                    product=product,
+                    product_variant=variant,
+                    unit=unit,
+                    notes=extracted_item.notes,
+                    resolution_status=OrderItemResolutionStatus.MATCHED,
+                )
+                .exclude(pk=item.pk)
+                .order_by("created_at", "id")
+                .first()
+            )
+            if existing is not None:
+                merged = update_order_item(
+                    existing,
+                    quantity=Decimal(existing.quantity) + Decimal(quantity),
+                    actor=actor,
+                    correlation_id=correlation_id,
+                )
+                remove_order_item(
+                    item, actor=actor, correlation_id=correlation_id
+                )
+                return merged
+        replaced = replace_order_item(
             item,
             requested_name=extracted_item.requested_name,
             product=product,
             product_variant=variant,
             resolution_status=status,
+            actor=actor,
+            correlation_id=correlation_id,
+        )
+        return update_order_item(
+            replaced,
+            quantity=quantity,
+            unit=unit,
+            notes=extracted_item.notes,
             actor=actor,
             correlation_id=correlation_id,
         )

@@ -44,6 +44,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
         "order_action",
         "target_reference",
         "replacement",
+        "catalog_category_hint",
     ],
     "properties": {
         "intent": {
@@ -143,6 +144,7 @@ MESSAGE_UNDERSTANDING_SCHEMA: dict[str, Any] = {
                     "notes": {"type": ["string", "null"]},
             },
         },
+        "catalog_category_hint": {"type": ["string", "null"], "maxLength": 120},
     },
 }
 

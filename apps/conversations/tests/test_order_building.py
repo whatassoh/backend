@@ -97,6 +97,43 @@ def test_update_remove_and_replace_use_existing_order_services():
 
 
 @pytest.mark.django_db
+def test_replace_merges_identical_line_and_uses_replacement_slots():
+    user = User.objects.create_user(whatsapp_phone="+237699887767")
+    order = create_order_draft(customer=user)
+    rice = product("Riz")
+    existing = add_order_item(
+        order=order,
+        requested_name="riz",
+        quantity=3,
+        unit="KG",
+        product=rice,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
+    oil = add_order_item(
+        order=order,
+        requested_name="huile",
+        quantity=2,
+        unit="BOTTLE",
+        resolution_status=OrderItemResolutionStatus.UNMATCHED,
+    )
+
+    merged = OrderBuildingService().replace(
+        oil,
+        ExtractedItem(
+            requested_name="riz", quantity=Decimal("1"), unit=ExtractedUnit.KG
+        ),
+        resolution("riz", rice),
+    )
+
+    summary = OrderBuildingService().summary(order)
+    assert merged.id == existing.id
+    assert len(summary) == 1
+    assert summary[0]["quantity"] == "4.000"
+    assert summary[0]["unit"] == "KG"
+    assert summary[0]["resolution_status"] == OrderItemResolutionStatus.MATCHED
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("spoken", ["arachides", "ARACHIDE", " arachide ", "arachidé"])
 def test_target_normalizes_plural_case_spacing_and_accents(spoken):
     user = User.objects.create_user(whatsapp_phone=f"+237611{User.objects.count():06d}")
