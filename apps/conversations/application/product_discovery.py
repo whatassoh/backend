@@ -1,6 +1,7 @@
 """Channel-neutral conversation façade for authoritative product discovery."""
 
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -87,6 +88,7 @@ class ProductDiscoveryConversationService:
             return self._single_result(conversation, context, result, continuation=True)
 
         budget_min, budget_max = self._budgets(understanding, text)
+        category_hint = self._category_hint(understanding, text)
         items = understanding.items
         if len(items) > 1:
             results = [
@@ -96,6 +98,7 @@ class ProductDiscoveryConversationService:
                         understanding,
                         budget_min=budget_min,
                         budget_max=budget_max,
+                        category_hint=category_hint,
                         limit=5,
                     )
                 )
@@ -109,6 +112,7 @@ class ProductDiscoveryConversationService:
             understanding,
             budget_min=budget_min,
             budget_max=budget_max,
+            category_hint=category_hint,
             limit=self.initial_page_size,
         )
         result = self.discovery_service.search(query)
@@ -289,12 +293,16 @@ class ProductDiscoveryConversationService:
         return value if isinstance(value, dict) else None
 
     @staticmethod
-    def _query_for_item(item, understanding, *, budget_min, budget_max, limit):
+    def _query_for_item(
+        item, understanding, *, budget_min, budget_max, category_hint=None, limit
+    ):
         product_hint = item.requested_name if item is not None else None
+        if category_hint:
+            product_hint = None
         return ProductSearchQuery(
-            text=product_hint or "",
+            text=product_hint or category_hint or "",
             product_hint=product_hint,
-            category_hint=None,
+            category_hint=category_hint,
             variant_hint=item.variant_hint if item is not None else None,
             budget_min=budget_min,
             budget_max=budget_max,
@@ -302,6 +310,39 @@ class ProductDiscoveryConversationService:
                 "XAF" if budget_min is not None or budget_max is not None else None
             ),
             limit=limit,
+        )
+
+    @staticmethod
+    def _category_hint(understanding, text):
+        if understanding.catalog_category_hint:
+            return understanding.catalog_category_hint
+        item_hint = (
+            understanding.items[0].requested_name
+            if len(understanding.items) == 1
+            else None
+        )
+        if normalize_product_name(item_hint or "") in {
+            "alimentation",
+            "boissons",
+            "bebe",
+            "nettoyage",
+            "hygiene",
+            "detergents",
+        }:
+            return item_hint
+        normalized = unicodedata.normalize("NFKD", text or "")
+        normalized = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        ).casefold()
+        concepts = (
+            (("manger", "aliment", "nourriture"), "Alimentation"),
+            (("boire", "boisson"), "Boissons"),
+            (("bebe",), "Bébé"),
+            (("nettoy", "detergent", "menage"), "Hygiène"),
+        )
+        return next(
+            (category for words, category in concepts if any(word in normalized for word in words)),
+            None,
         )
 
     @staticmethod

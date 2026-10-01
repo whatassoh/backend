@@ -37,6 +37,7 @@ def route_node(state: AgentGraphState):
         MessageIntent.PROVIDE_LOCATION,
         MessageIntent.ORDER_HISTORY,
         MessageIntent.ORDER_STATUS,
+        MessageIntent.ORDER_DETAILS,
         MessageIntent.CATALOG_BROWSE,
     }:
         route = AgentRoute.BUY

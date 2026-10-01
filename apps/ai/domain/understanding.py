@@ -19,6 +19,7 @@ class MessageIntent(StrEnum):
     DELIVER = "DELIVER"
     ORDER_HISTORY = "ORDER_HISTORY"
     ORDER_STATUS = "ORDER_STATUS"
+    ORDER_DETAILS = "ORDER_DETAILS"
     OUT_OF_SCOPE = "OUT_OF_SCOPE"
     ORDER_RESUME = "ORDER_RESUME"
     PAUSE = "PAUSE"
@@ -70,6 +71,7 @@ class OrderAction(StrEnum):
     MODIFY = "MODIFY"
     CHANGE_LOCATION = "CHANGE_LOCATION"
     RESUME = "RESUME"
+    REVIEW = "REVIEW"
 
 
 class ExtractedUnit(StrEnum):
@@ -121,6 +123,7 @@ class UserMessageUnderstanding:
     order_action: OrderAction | None = None
     target_reference: ItemTargetReference | None = None
     replacement: ExtractedItem | None = None
+    catalog_category_hint: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -162,6 +165,7 @@ def parse_understanding(data: dict[str, Any]) -> UserMessageUnderstanding:
             order_action=action,
             target_reference=target,
             replacement=replacement,
+            catalog_category_hint=_optional_text(data.get("catalog_category_hint")),
         )
     except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
         raise AIInvalidResponseError("Invalid message-understanding response.") from exc

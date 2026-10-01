@@ -13,6 +13,7 @@ from apps.ai.domain.understanding import (
     MessageIntent,
     MessageUnderstandingInput,
     TaskTarget,
+    OrderAction,
 )
 from apps.ai.prompts.message_understanding import SYSTEM_INSTRUCTIONS
 from apps.ai.providers.mock import MockAIProvider
@@ -43,7 +44,15 @@ def examples():
 
 @pytest.fixture
 def provider():
-    return MockAIProvider()
+    provider = MockAIProvider()
+    register = provider.register_response
+
+    def register_with_current_contract(*args, **kwargs):
+        kwargs["result"].setdefault("catalog_category_hint", None)
+        return register(*args, **kwargs)
+
+    provider.register_response = register_with_current_contract
+    return provider
 
 
 def test_baseline_message_understanding_examples(provider, examples):
@@ -69,6 +78,78 @@ def test_prompt_routes_platform_catalog_and_social_questions_explicitly():
     assert "leave items empty" in SYSTEM_INSTRUCTIONS
     assert "category/concept" in SYSTEM_INSTRUCTIONS
     assert "positive quantity" in SYSTEM_INSTRUCTIONS
+    assert "active task is context, never an intent lock" in SYSTEM_INSTRUCTIONS
+    assert "Use REVIEW" in SYSTEM_INSTRUCTIONS
+    assert "ORDER_DETAILS" in SYSTEM_INSTRUCTIONS
+    assert "catalog_category_hint" in SYSTEM_INSTRUCTIONS
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["C'est tout", "C'est tout, je veux confirmer ma commande", "J'ai fini", "Passe à la suite"],
+)
+def test_real_finish_phrases_have_a_review_contract(provider, phrase):
+    provider.register_response(
+        task_name="message_understanding",
+        result={
+            "intent": "CONFIRM",
+            "secondary_intents": [],
+            "interaction_mode": "ACT",
+            "action_requested": True,
+            "journey_goal": "BUY_PRODUCTS",
+            "standalone_question": None,
+            "task_target": "ORDER",
+            "confidence": .99,
+            "items": [],
+            "location_text": None,
+            "confirmation": None,
+            "missing_fields": [],
+            "ambiguities": [],
+            "language": "fr",
+            "order_action": "REVIEW",
+            "target_reference": None,
+            "replacement": None,
+            "catalog_category_hint": None,
+        },
+    )
+    result = MessageUnderstandingService(AIService(provider)).understand(
+        MessageUnderstandingInput(current_message=phrase)
+    )
+    assert result.order_action == OrderAction.REVIEW
+
+
+def test_real_order_details_and_category_hint_contracts(provider):
+    common = {
+        "secondary_intents": [], "interaction_mode": "ANSWER",
+        "action_requested": False, "journey_goal": "NONE",
+        "standalone_question": None, "task_target": "ORDER", "confidence": .99,
+        "location_text": None, "confirmation": None, "missing_fields": [],
+        "ambiguities": [], "language": "fr", "order_action": None,
+        "target_reference": None, "replacement": None,
+    }
+    provider.register_response(
+        task_name="message_understanding",
+        result={**common, "intent": "ORDER_DETAILS", "items": [], "catalog_category_hint": None},
+    )
+    details = MessageUnderstandingService(AIService(provider)).understand(
+        MessageUnderstandingInput(current_message="Montre les éléments de ma commande actuelle")
+    )
+    assert details.intent == MessageIntent.ORDER_DETAILS
+
+    provider.register_response(
+        task_name="message_understanding",
+        result={
+            **common,
+            "intent": "CATALOG_BROWSE",
+            "task_target": "NONE",
+            "items": [{"requested_name": "un truc à manger", "quantity": None, "unit": None, "variant_hint": None, "notes": None}],
+            "catalog_category_hint": "Alimentation",
+        },
+    )
+    need = MessageUnderstandingService(AIService(provider)).understand(
+        MessageUnderstandingInput(current_message="Je veux un truc à manger")
+    )
+    assert need.catalog_category_hint == "Alimentation"
 
 
 def test_compound_turn_contract_preserves_information_and_action(provider):
