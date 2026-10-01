@@ -96,7 +96,7 @@ def test_social_out_of_scope_unknown_and_low_confidence_are_non_mutating():
         assert context.processed == [f"cap-{index}"]
 
 
-def test_order_status_is_honestly_not_implemented():
+def test_order_status_has_authoritative_empty_state():
     context = ContextStub()
     app = ConversationalOrchestrator(
         understanding_service=UnderstandingStub(
@@ -107,8 +107,8 @@ def test_order_status_is_honestly_not_implemented():
         context_service=context,
     )
     outcome = app.process_message(SimpleNamespace(), message("Où en est ma commande ?"))
-    assert "pas encore disponible" in outcome.response.text
-    assert outcome.metadata["capability_status"] == "NOT_IMPLEMENTED"
+    assert "aucune commande" in outcome.response.text
+    assert outcome.metadata["authoritative"] is True
 
 
 def test_bare_confirmation_is_non_mutating_outside_review_context():

@@ -264,7 +264,7 @@ def test_no_phone_does_not_return_unrelated_products(marketplace):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("request", "concept", "expected"),
+    ("wording", "concept", "expected"),
     [
         ("Je veux quelque chose à manger", "Alimentation", "Riz parfumé"),
         ("Je cherche un truc à boire", "Boissons", "Jus d'ananas"),
@@ -273,7 +273,7 @@ def test_no_phone_does_not_return_unrelated_products(marketplace):
     ],
 )
 def test_category_and_need_search_use_real_categories(
-    marketplace, request, concept, expected
+    marketplace, wording, concept, expected
 ):
     add_offer(marketplace, "Riz parfumé", category="Alimentation")
     add_offer(marketplace, "Jus d'ananas", category="Boissons")
@@ -284,7 +284,7 @@ def test_category_and_need_search_use_real_categories(
         understanding_service=UnderstandingQueue(
             understood_catalog(ExtractedItem(requested_name=concept))
         )
-    ).process_message(convo, inbound(request))
+    ).process_message(convo, inbound(wording))
 
     assert expected in outcome.response.text
 
