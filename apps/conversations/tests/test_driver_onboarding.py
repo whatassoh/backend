@@ -72,7 +72,10 @@ def test_driver_onboarding_is_channel_neutral_and_only_confirms_after_review(cha
     assert profile.status == DriverStatus.ACTIVE
     assert profile.availability_status == DriverAvailability.OFFLINE
     assert convo.user.roles.filter(role=UserRoleType.DRIVER).exists()
-    assert completed.metadata["journey_status"] == "DRIVER_PROFILE_READY"
+    assert completed.metadata["driver_workspace"] is True
+    assert completed.metadata["driver_workspace_state"] == "UNAVAILABLE"
+    convo.refresh_from_db()
+    assert ConversationContext.from_payload(convo.context).driver_onboarding is None
 
 
 @pytest.mark.django_db

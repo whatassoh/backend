@@ -41,6 +41,7 @@ DECISION_DURATION = Histogram(
 _ROUTE_METADATA_KEYS = (
     "capability",
     "driver_offer",
+    "driver_workspace",
     "journey_selection",
     "operation",
     "seller_workspace",

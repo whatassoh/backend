@@ -19,6 +19,7 @@ from apps.conversations.domain.context import (
     ConversationContext,
     PendingSellerCatalogMutation,
     SellerCatalogAction,
+    SellerOnboardingStage,
 )
 from apps.orders.domain.enums import OrderItemResolutionStatus
 from apps.stores.domain.enums import StoreMembershipStatus
@@ -72,7 +73,14 @@ class SellerCatalogConversationService:
     def handles(self, context):
         return (
             context.active_journey == ActiveJourney.SELL
-            and context.seller_onboarding is None
+            and (
+                context.seller_onboarding is None
+                or context.seller_onboarding.stage == SellerOnboardingStage.COMPLETED
+            )
+            and (
+                context.metadata.get("seller_catalog_active") is True
+                or context.pending_seller_catalog_mutation is not None
+            )
         )
 
     def process(
@@ -88,7 +96,7 @@ class SellerCatalogConversationService:
         action_id = message.metadata.get("action_id")
         if action_id:
             return self._action(conversation, context, action_id, correlation_id)
-        if (
+        if message.text and (
             "espace vendeur" in message.text.lower()
             or "dashboard" in message.text.lower()
         ):
@@ -105,7 +113,7 @@ class SellerCatalogConversationService:
             extra={"intent": command.intent, "correlation_id": correlation_id},
         )
         if command.intent == SellerCatalogIntent.LIST:
-            return self._list(conversation)
+            return self._list(conversation, context)
         if (
             command.intent == SellerCatalogIntent.UNKNOWN
             or command.confidence < self.confidence_threshold
@@ -117,7 +125,7 @@ class SellerCatalogConversationService:
             return CatalogConversationOutcome(
                 text="Quel produit souhaitez-vous modifier ?"
             )
-        store = self._store_for(conversation.user)
+        store = self._store_for(conversation.user, context)
         if store is None:
             return CatalogConversationOutcome(
                 text="Aucune boutique autorisée n'est disponible."
@@ -362,8 +370,8 @@ class SellerCatalogConversationService:
             correlation_id=correlation_id,
         )
 
-    def _list(self, conversation):
-        store = self._store_for(conversation.user)
+    def _list(self, conversation, context):
+        store = self._store_for(conversation.user, context)
         if store is None:
             return CatalogConversationOutcome(
                 text="Aucune boutique autorisée n'est disponible."
@@ -387,15 +395,18 @@ class SellerCatalogConversationService:
         )
 
     @staticmethod
-    def _store_for(user):
+    def _store_for(user, context):
         membership = (
             StoreMembership.objects.filter(
                 user=user, status=StoreMembershipStatus.ACTIVE
             )
             .select_related("store")
             .order_by("created_at")
-            .first()
         )
+        selected_store_id = context.metadata.get("seller_store_id")
+        if selected_store_id:
+            membership = membership.filter(store_id=selected_store_id)
+        membership = membership.first()
         return membership.store if membership else None
 
     @staticmethod

@@ -49,9 +49,14 @@ def outcome(
             outcome(metadata={"capability": "order_history"}),
             ResponseUseCase.ORDER_STATUS,
         ),
+        (outcome(metadata={"driver_workspace": True}), ResponseUseCase.ORDER_STATUS),
         (outcome(metadata={"capability": "pause"}), ResponseUseCase.NAVIGATION),
         (outcome(metadata={"seller_onboarding": True}), ResponseUseCase.ONBOARDING),
         (outcome(metadata={"seller_catalog": True}), ResponseUseCase.CATALOG),
+        (
+            outcome(metadata={"capability": "product_discovery"}),
+            ResponseUseCase.CATALOG,
+        ),
         (
             outcome(actions_performed=("order_item_added",)),
             ResponseUseCase.ACTION_RESULT,
