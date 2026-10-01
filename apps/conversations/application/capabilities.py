@@ -38,7 +38,7 @@ def classify_capability(intent: MessageIntent) -> CapabilityDecision:
         )
     if intent == MessageIntent.ORDER_STATUS:
         return CapabilityDecision(
-            status=CapabilityStatus.NOT_IMPLEMENTED, name="order_status"
+            status=CapabilityStatus.SUPPORTED, name="order_status"
         )
     return CapabilityDecision(
         status=CapabilityStatus.SUPPORTED, name=intent.value.lower()

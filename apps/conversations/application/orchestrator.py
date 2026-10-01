@@ -92,13 +92,19 @@ from apps.messaging.domain.enums import MessageType
 from apps.orders.application.review import OrderReviewService
 from apps.orders.application.selectors import get_customer_orders
 from apps.orders.application.services import (
+    cancel_order,
     confirm_order,
     mark_awaiting_location,
     set_delivery_address_label,
     set_delivery_instructions,
     set_delivery_location,
 )
-from apps.orders.domain.enums import OrderItemResolutionStatus
+from apps.orders.domain.enums import (
+    OrderCancellationCode,
+    OrderItemResolutionStatus,
+    OrderStatus,
+)
+from apps.orders.domain.exceptions import InvalidOrderTransition
 from apps.stores.application.preparation import (
     StorePreparationResult,
     StorePreparationService,
@@ -325,31 +331,6 @@ class ConversationalOrchestrator:
                 conversation=conversation, action_id=action_id
             )
             return self._from_seller_workspace(workspace, context)
-        workspace_request = self.seller_workspace_service.classify(
-            user=conversation.user, context=context, text=message.text
-        )
-        if workspace_request == SellerWorkspaceRequest.OPEN:
-            return self._select_journey(conversation, context, ActiveJourney.SELL)
-        if workspace_request == SellerWorkspaceRequest.CATALOG:
-            membership = self.seller_workspace_service.resolve_membership(
-                user=conversation.user
-            )
-            workspace = self.seller_workspace_service.activate_catalog(
-                conversation=conversation,
-                store_id=membership.store_id if membership else None,
-            )
-            # A direct command such as "voir mon catalogue" is handed to the
-            # existing catalog flow in the same turn; no catalog logic is copied.
-            if self.seller_catalog_conversation_service and not workspace.metadata.get(
-                "authorization_denied"
-            ):
-                context = self.context_service.get_context(conversation)
-                catalog = self.seller_catalog_conversation_service.process(
-                    conversation, context, message, correlation_id=correlation_id
-                )
-                if catalog is not None:
-                    return self._from_seller_catalog(catalog, context)
-            return self._from_seller_workspace(workspace, context)
         driver_workspace_callback = self.driver_workspace_service.handles_action(
             action_id
         )
@@ -368,11 +349,37 @@ class ConversationalOrchestrator:
                 context=context,
             )
             return self._from_product_discovery(discovery, context)
-        driver_workspace_request = self.driver_workspace_service.classify(
-            user=conversation.user, context=context, text=message.text
+        # Same-journey deterministic commands are continuations, not switches, and
+        # can safely stay model-free. Cross-journey requests are arbitrated below.
+        actor = getattr(conversation, "user", None)
+        workspace_request = (
+            self.seller_workspace_service.classify(
+                user=actor, context=context, text=message.text
+            )
+            if actor is not None
+            else None
         )
-        if driver_workspace_request == DriverWorkspaceRequest.OPEN:
-            return self._select_journey(conversation, context, ActiveJourney.DELIVER)
+        if (
+            workspace_request == SellerWorkspaceRequest.CATALOG
+            and context.active_journey == ActiveJourney.SELL
+        ):
+            membership = self.seller_workspace_service.resolve_membership(
+                user=conversation.user
+            )
+            workspace = self.seller_workspace_service.activate_catalog(
+                conversation=conversation,
+                store_id=membership.store_id if membership else None,
+            )
+            if self.seller_catalog_conversation_service and not workspace.metadata.get(
+                "authorization_denied"
+            ):
+                context = self.context_service.get_context(conversation)
+                catalog = self.seller_catalog_conversation_service.process(
+                    conversation, context, message, correlation_id=correlation_id
+                )
+                if catalog is not None:
+                    return self._from_seller_catalog(catalog, context)
+            return self._from_seller_workspace(workspace, context)
         universal = self._try_universal_interrupt(
             conversation,
             context,
@@ -382,6 +389,41 @@ class ConversationalOrchestrator:
         )
         if universal is not None:
             return universal
+        # Natural workspace shortcuts are evaluated after interruption arbitration.
+        # Otherwise an active order/onboarding could be silently replaced without
+        # being placed on the resumable task stack.
+        if workspace_request == SellerWorkspaceRequest.OPEN:
+            return self._select_journey(conversation, context, ActiveJourney.SELL)
+        if workspace_request == SellerWorkspaceRequest.CATALOG:
+            if context.active_journey not in {None, ActiveJourney.SELL}:
+                context, _ = suspend_active_task(context, reason="topic_change")
+                self.context_service.update_context(conversation, context)
+            membership = self.seller_workspace_service.resolve_membership(
+                user=conversation.user
+            )
+            workspace = self.seller_workspace_service.activate_catalog(
+                conversation=conversation,
+                store_id=membership.store_id if membership else None,
+            )
+            if self.seller_catalog_conversation_service and not workspace.metadata.get(
+                "authorization_denied"
+            ):
+                context = self.context_service.get_context(conversation)
+                catalog = self.seller_catalog_conversation_service.process(
+                    conversation, context, message, correlation_id=correlation_id
+                )
+                if catalog is not None:
+                    return self._from_seller_catalog(catalog, context)
+            return self._from_seller_workspace(workspace, context)
+        driver_workspace_request = (
+            self.driver_workspace_service.classify(
+                user=actor, context=context, text=message.text
+            )
+            if actor is not None
+            else None
+        )
+        if driver_workspace_request == DriverWorkspaceRequest.OPEN:
+            return self._select_journey(conversation, context, ActiveJourney.DELIVER)
         action_id = message.metadata.get("action_id")
         if action_id == "conversation.resume":
             return self._resume_workflow(conversation, context, correlation_id)
@@ -480,6 +522,11 @@ class ConversationalOrchestrator:
             )
             if availability is not None:
                 return availability
+            cancellation = self._order_cancel_action(
+                conversation, context, action_id, correlation_id
+            )
+            if cancellation is not None:
+                return cancellation
             return self._handle_action(
                 conversation, context, action_id, correlation_id, message.metadata
             )
@@ -554,8 +601,7 @@ class ConversationalOrchestrator:
             status_outcome = self._agent_order_status_outcome(
                 context, agent_decision
             )
-            if status_outcome is not None:
-                return status_outcome
+            return status_outcome or self._order_status_outcome(conversation, context)
         if capability.status != CapabilityStatus.SUPPORTED:
             return self._capability_outcome(
                 context, capability, conversation=conversation
@@ -605,6 +651,13 @@ class ConversationalOrchestrator:
             understanding.intent == MessageIntent.CANCEL
             or understanding.order_action == OrderAction.CANCEL
         ):
+            if understanding.task_target == TaskTarget.ORDER or (
+                understanding.order_action == OrderAction.CANCEL
+                and understanding.task_target != TaskTarget.CURRENT_TASK
+            ):
+                return self._cancel_order_request(
+                    conversation, context, correlation_id=correlation_id
+                )
             if not self._task_target_matches_context(understanding, context):
                 return self._task_target_clarification(context, understanding)
             return self._cancel_current_task(
@@ -2432,6 +2485,138 @@ class ConversationalOrchestrator:
             active_order_id=str(order.id),
         )
 
+    def _cancel_order_request(self, conversation, context, *, correlation_id):
+        """Resolve draft/persisted ambiguity before invoking the order service."""
+
+        building = self.active_order_service.get_active_order(
+            conversation, correlation_id=correlation_id
+        ).order
+        persisted = list(
+            get_customer_orders(conversation.user)
+            .exclude(status__in={OrderStatus.DRAFT, OrderStatus.AWAITING_LOCATION})
+            .exclude(
+                status__in={
+                    OrderStatus.DELIVERED,
+                    OrderStatus.CANCELLED,
+                    OrderStatus.FAILED,
+                }
+            )
+            .order_by("-created_at")[:2]
+        )
+        if building is not None and persisted:
+            order = persisted[0]
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Souhaitez-vous annuler le brouillon en cours ou la commande "
+                f"{order.reference} ?",
+                context,
+                metadata={
+                    "capability": "cancel_order",
+                    "clarification_required": True,
+                    "arbitration_reason": "order_cancel_ambiguity",
+                },
+                actions=(
+                    ResponseAction(
+                        action_id="order.cancel.draft", label="Annuler le brouillon"
+                    ),
+                    ResponseAction(
+                        action_id=f"order.cancel.persisted:{order.id}",
+                        label=f"Annuler {order.reference}",
+                    ),
+                ),
+            )
+        if building is not None:
+            return self._cancel_active_order(conversation, context, correlation_id)
+        if not persisted:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Aucune commande active à annuler.",
+                context,
+                metadata={"capability": "cancel_order"},
+            )
+        if len(persisted) > 1:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Plusieurs commandes sont actives. Laquelle souhaitez-vous annuler ?",
+                context,
+                metadata={
+                    "capability": "cancel_order",
+                    "clarification_required": True,
+                    "arbitration_reason": "order_cancel_ambiguity",
+                },
+                actions=tuple(
+                    ResponseAction(
+                        action_id=f"order.cancel.persisted:{order.id}",
+                        label=order.reference,
+                    )
+                    for order in persisted
+                ),
+            )
+        return self._cancel_persisted_order(
+            conversation, context, persisted[0], correlation_id
+        )
+
+    def _cancel_persisted_order(
+        self, conversation, context, order, correlation_id
+    ):
+        try:
+            cancelled = cancel_order(
+                order,
+                OrderCancellationCode.CUSTOMER_REQUEST,
+                actor=conversation.user,
+                correlation_id=correlation_id,
+            )
+        except InvalidOrderTransition:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                f"La commande {order.reference} ne peut plus être annulée à son "
+                "étape actuelle.",
+                context,
+                metadata={
+                    "capability": "cancel_order",
+                    "order_id": str(order.id),
+                    "order_status": order.status,
+                },
+            )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"La commande {cancelled.reference} est annulée.",
+            context,
+            metadata={
+                "capability": "cancel_order",
+                "order_id": str(cancelled.id),
+                "order_status": cancelled.status,
+            },
+        )
+
+    def _order_cancel_action(
+        self, conversation, context, action_id, correlation_id
+    ):
+        if action_id == "order.cancel.draft":
+            return self._cancel_active_order(conversation, context, correlation_id)
+        prefix = "order.cancel.persisted:"
+        if not action_id or not action_id.startswith(prefix):
+            return None
+        try:
+            order_id = UUID(action_id.removeprefix(prefix))
+        except ValueError:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette action d'annulation n'est plus disponible.",
+                context,
+            )
+        order = get_customer_orders(conversation.user).filter(pk=order_id).first()
+        if order is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette commande ne vous appartient pas.",
+                context,
+                metadata={"authorization_denied": True},
+            )
+        return self._cancel_persisted_order(
+            conversation, context, order, correlation_id
+        )
+
     @staticmethod
     def _normalize_understanding(understanding):
         """Correct a dangerous delivery ambiguity before journey routing.
@@ -3021,6 +3206,60 @@ class ConversationalOrchestrator:
             },
         )
 
+    def _order_status_outcome(self, conversation, context):
+        """Read a customer's real latest order without requiring the optional agent."""
+
+        from apps.orders.domain.enums import OrderStatus
+
+        actor = getattr(conversation, "user", None)
+        if actor is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous n'avez aucune commande à suivre pour le moment.",
+                context,
+                metadata={"capability": "order_status", "authoritative": True},
+            )
+        terminal = {OrderStatus.DELIVERED, OrderStatus.CANCELLED, OrderStatus.FAILED}
+        orders = get_customer_orders(actor).order_by("-created_at")
+        order = orders.exclude(status__in=terminal).first() or orders.first()
+        if order is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous n'avez aucune commande à suivre pour le moment.",
+                context,
+                metadata={
+                    "capability": "order_status",
+                    "authoritative": True,
+                    "agent_read": False,
+                },
+            )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"La commande {order.reference} est actuellement au statut "
+            f"{order.get_status_display()}.",
+            context,
+            metadata={
+                "capability": "order_status",
+                "authoritative": True,
+                "agent_read": False,
+                "order_status": order.status,
+                "order_id": str(order.id),
+            },
+        )
+
+    @staticmethod
+    def _with_arbitration(outcome, reason):
+        """Expose the routing reason without changing the business response."""
+
+        return replace(
+            outcome,
+            response=replace(
+                outcome.response,
+                metadata={**outcome.response.metadata, "arbitration_reason": reason},
+            ),
+            metadata={**outcome.metadata, "arbitration_reason": reason},
+        )
+
     @staticmethod
     def _has_pending_task(context):
         return has_resumable_work(context)
@@ -3057,16 +3296,26 @@ class ConversationalOrchestrator:
         # Seller and driver onboarding own their deterministic free-text slots.
         # Do not make an LLM call before those handlers get a chance to consume
         # their input; explicit universal commands above remain available.
-        if active_task_kind(context) in {
+        onboarding_task = active_task_kind(context)
+        if onboarding_task in {
             ConversationTaskKind.SELLER_ONBOARDING,
             ConversationTaskKind.DRIVER_ONBOARDING,
-        } and not re.search(
-            r"\b(annul\w*|laissons tomber|ne veux plus|continu\w*|repren\w*|"
-            r"revenir|retour\w*|catalog\w*|produit\w*|est\W*ce|aide|help|"
-            r"bonjour|bonsoir|salut)\b",
-            message.text.casefold(),
-        ):
-            return None
+        }:
+            common_interrupt = (
+                r"\b(annul\w*|laissons tomber|ne veux plus|continu\w*|repren\w*|"
+                r"revenir|retour\w*|catalog\w*|produit\w*|achet\w*|command\w*|"
+                r"colis\w*|statut\w*|merci|est\W*ce|aide|help|bonjour|bonsoir|"
+                r"salut|hello)\b"
+            )
+            cross_role = (
+                r"\b(livr\w*|chauffeur|coursier)\b"
+                if onboarding_task == ConversationTaskKind.SELLER_ONBOARDING
+                else r"\b(boutique\w*|vendeur\w*|catalog\w*)\b"
+            )
+            if not re.search(
+                f"(?:{common_interrupt})|(?:{cross_role})", message.text.casefold()
+            ):
+                return None
         if not self._has_pending_task(context):
             return None
         understanding = self.understanding_service.understand_normalized(
@@ -3094,11 +3343,6 @@ class ConversationalOrchestrator:
         agent_decision = self._run_active_agent(
             conversation, message, understanding, correlation_id
         )
-        replacement = self._complete_unmatched_replacement(
-            conversation, context, understanding, correlation_id
-        )
-        if replacement is not None:
-            return replacement
         if understanding.intent == MessageIntent.MEMORY_SHOW:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:
@@ -3117,6 +3361,7 @@ class ConversationalOrchestrator:
             in {
                 MessageIntent.HELP,
                 MessageIntent.ORDER_HISTORY,
+                MessageIntent.ORDER_STATUS,
                 MessageIntent.CANCEL,
                 MessageIntent.ORDER_RESUME,
                 MessageIntent.PAUSE,
@@ -3145,12 +3390,16 @@ class ConversationalOrchestrator:
         )
         if float(understanding.confidence) < self.confidence_threshold:
             return self._capability_outcome(context, None, conversation=conversation)
+        if understanding.intent == MessageIntent.GREETING:
+            outcome = self._social_greeting(conversation, context)
+            return self._with_arbitration(outcome, "light_interruption")
         if understanding.intent == MessageIntent.ORDER_STATUS:
             status_outcome = self._agent_order_status_outcome(
                 context, agent_decision
             )
-            if status_outcome is not None:
-                return status_outcome
+            if status_outcome is None:
+                status_outcome = self._order_status_outcome(conversation, context)
+            return self._with_arbitration(status_outcome, "support_interruption")
         if capability.status != CapabilityStatus.SUPPORTED:
             return self._capability_outcome(
                 context, capability, conversation=conversation
@@ -3187,6 +3436,10 @@ class ConversationalOrchestrator:
                         "ambiguities": understanding.ambiguities,
                     },
                 )
+            if understanding.task_target == TaskTarget.ORDER:
+                return self._cancel_order_request(
+                    conversation, context, correlation_id=correlation_id
+                )
             if not self._task_target_matches_context(understanding, context):
                 return self._task_target_clarification(context, understanding)
             return self._cancel_current_task(
@@ -3212,7 +3465,7 @@ class ConversationalOrchestrator:
                 conversation, context, understanding, correlation_id
             )
         if understanding.intent == MessageIntent.HELP:
-            return self._handle_knowledge_or_unknown(
+            outcome = self._handle_knowledge_or_unknown(
                 conversation,
                 context,
                 message.text,
@@ -3221,6 +3474,7 @@ class ConversationalOrchestrator:
                 retrieval_query=understanding.standalone_question,
                 conversation_context=conversation_context,
             )
+            return self._with_arbitration(outcome, "help_interruption")
         return None
 
     def _handle_deterministic_interrupt(
@@ -3427,7 +3681,8 @@ class ConversationalOrchestrator:
         }[understanding.intent]
         if context.active_journey != target:
             suspended, _ = suspend_active_task(context, reason="topic_change")
-            self.context_service.update_context(conversation, suspended)
+            updated = self.context_service.update_context(conversation, suspended)
+            conversation.context = updated.context
             context = suspended
         if target == ActiveJourney.BUY and understanding.items:
             self.journey_routing_service.select(conversation, target)
@@ -3440,10 +3695,16 @@ class ConversationalOrchestrator:
                     if key != "task_paused"
                 },
             )
-            return self._handle_order_items(
-                conversation, context, understanding, correlation_id
+            return self._with_arbitration(
+                self._handle_order_items(
+                    conversation, context, understanding, correlation_id
+                ),
+                "journey_switched",
             )
-        return self._select_journey(conversation, context, target)
+        return self._with_arbitration(
+            self._select_journey(conversation, context, target),
+            "journey_switched",
+        )
 
     def _resume_workflow(
         self, conversation, context, correlation_id, *, target=TaskTarget.NONE
