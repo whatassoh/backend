@@ -32,6 +32,7 @@ from apps.messaging.infrastructure.models import (
     ConversationOutboxItem,
     MessageEvent,
 )
+from apps.whatsapp.domain.response_validation import validate_response_for_channel
 from common.async_tasks import enqueue_after_commit
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,10 @@ def process_claimed_inbox(item_id, token):
         and isinstance(response.text, str)
         and response.text.strip()
     ):
+        # Fail in the same transaction as the business turn.  An invalid
+        # channel plan can therefore never advance business state then become
+        # an impossible durable response.
+        validate_response_for_channel(response, item.conversation.channel)
         outbox, _ = ConversationOutboxItem.objects.get_or_create(
             inbox_item=item,
             defaults={
@@ -384,6 +389,18 @@ def deliver_claimed_outbox(item_id, token):
             return "STALE"
         _mark_outbox_delivered(locked, timezone.now())
         _enqueue_next_outbox_after_commit(locked)
+    fallback = _fallback_metadata(item.payload)
+    if fallback:
+        logger.info(
+            "conversation_outbox_fallback_delivered",
+            extra={
+                "outbox_item_id": str(item.id),
+                "conversation_id": str(item.conversation_id),
+                "sequence": item.sequence,
+                "fallback_for_outbox_id": fallback["fallback_for_outbox_id"],
+                "correlation_id": str(item.inbox_item_id),
+            },
+        )
     logger.info(
         "conversation_outbox_delivered",
         extra={
@@ -404,30 +421,53 @@ def record_outbox_failure(item_id, token, exc):
     retryable = (
         decision.retryable and item.attempts < settings.CONVERSATION_OUTBOX_MAX_ATTEMPTS
     )
-    delay = min(
-        settings.CONVERSATION_RETRY_MAX_SECONDS,
-        settings.CONVERSATION_RETRY_BASE_SECONDS * (2 ** max(0, item.attempts - 1)),
-    )
-    item.status = (
-        OutboxStatus.FAILED_RETRYABLE if retryable else OutboxStatus.DEAD_LETTER
-    )
-    item.available_at = timezone.now() + timedelta(seconds=delay)
+    now = timezone.now()
+    fallback = _fallback_metadata(item.payload)
+    fallback_created = should_create_fallback(item, decision)
+    if retryable:
+        delay = conversation_outbox_retry_delay(decision, item.attempts)
+        item.status = OutboxStatus.FAILED_RETRYABLE
+        item.available_at = now + timedelta(seconds=delay)
+    elif fallback_created:
+        item.payload = build_text_fallback(item, decision, exc)
+        item.status = OutboxStatus.PENDING
+        item.available_at = now
+        delay = None
+    else:
+        item.status = OutboxStatus.DEAD_LETTER
+        item.available_at = now
+        delay = None
     item.lease_expires_at = None
     item.fencing_token = None
     item.last_error_category = decision.category[:80]
     item.last_error_message = str(exc)[:500]
     item.save()
-    logger.warning(
-        "conversation_outbox_failed",
-        extra={
-            "outbox_item_id": str(item.id),
-            "conversation_id": str(item.conversation_id),
-            "sequence": item.sequence,
-            "attempt": item.attempts,
-            "status": item.status,
-            "error_category": item.last_error_category,
-        },
-    )
+    extra = _outbox_failure_log_fields(item, exc)
+    logger.warning("conversation_outbox_failed", extra=extra)
+    if retryable:
+        if fallback:
+            logger.warning("conversation_outbox_fallback_failed", extra=extra)
+        logger.info(
+            "conversation_outbox_retry_scheduled",
+            extra={**extra, "retry_delay_seconds": delay},
+        )
+    elif fallback:
+        logger.error("conversation_outbox_fallback_failed", extra=extra)
+        logger.error("conversation_outbox_dead_letter", extra=extra)
+    else:
+        logger.error("conversation_outbox_permanent_failure", extra=extra)
+        logger.error("conversation_outbox_dead_letter", extra=extra)
+    if fallback_created:
+        fallback_metadata = _fallback_metadata(item.payload)
+        logger.warning(
+            "conversation_outbox_fallback_created",
+            extra={
+                **extra,
+                "fallback_for_outbox_id": fallback_metadata["fallback_for_outbox_id"],
+                "fallback_reason": fallback_metadata["fallback_reason"],
+            },
+        )
+        _enqueue_outbox_after_commit(item)
     return item.status
 
 
@@ -562,6 +602,14 @@ def _serialize_response(response):
     return {
         "text": response.text,
         "request_location": bool(response.request_location),
+        "next_step": (
+            {
+                "kind": response.next_step.kind.value,
+                "instruction": response.next_step.instruction,
+            }
+            if response.next_step
+            else None
+        ),
         "metadata": response.metadata,
         "actions": [
             {"action_id": action.action_id, "label": action.label}
@@ -571,12 +619,128 @@ def _serialize_response(response):
 
 
 def _deserialize_response(payload, idempotency_key):
+    from apps.conversations.application.next_steps import NextStep, NextStepKind
+
+    next_step = payload.get("next_step")
     return ResponsePlan(
         text=payload["text"],
         request_location=bool(payload.get("request_location")),
+        next_step=(
+            NextStep(
+                kind=NextStepKind(next_step["kind"]),
+                instruction=next_step["instruction"],
+            )
+            if next_step
+            else None
+        ),
         metadata={
             **(payload.get("metadata") or {}),
             "idempotency_key": idempotency_key,
         },
         actions=tuple(ResponseAction(**item) for item in payload.get("actions", ())),
     )
+
+
+def _meta_error_detail(exc, key):
+    response_data = getattr(exc, "response_data", None) or {}
+    error = response_data.get("error") if isinstance(response_data, dict) else {}
+    return error.get(key) if isinstance(error, dict) else None
+
+
+def should_create_fallback(item, decision):
+    """Only replace a permanently rejected WhatsApp interactive message once."""
+    return bool(
+        item.conversation.channel == "WHATSAPP"
+        and decision.category == "PERMANENT_PAYLOAD"
+        and item.payload.get("actions")
+        and not _fallback_metadata(item.payload)
+        and isinstance(item.payload.get("text"), str)
+        and item.payload["text"].strip()
+    )
+
+
+def build_text_fallback(item, decision, exc):
+    """Create a text-only replacement at the same ordered Outbox position."""
+    original = item.payload
+    action_labels = [
+        action.get("label", "").strip()
+        for action in original.get("actions", ())
+        if isinstance(action, dict) and isinstance(action.get("label"), str)
+    ]
+    next_step = ""
+    if action_labels:
+        choices = ", ".join(f"« {label} »" for label in action_labels)
+        next_step = f"\n\nJe n'ai pas pu afficher les boutons. Répondez {choices}."
+    if original.get("request_location"):
+        next_step += "\n\nVous pouvez aussi partager votre position WhatsApp."
+    return {
+        "text": f"{original['text']}{next_step}",
+        "actions": [],
+        "request_location": False,
+        "next_step": original.get("next_step"),
+        "metadata": {
+            **(original.get("metadata") or {}),
+            "fallback": True,
+            "fallback_for_outbox_id": str(item.id),
+            "fallback_reason": decision.category,
+            "fallback_original_response": {
+                "text": original["text"],
+                "actions": original.get("actions", []),
+                "request_location": bool(original.get("request_location")),
+                "next_step": original.get("next_step"),
+            },
+            "fallback_original_failure": _failure_details(decision, exc),
+        },
+    }
+
+
+def _fallback_metadata(payload):
+    metadata = payload.get("metadata") or {}
+    if not isinstance(metadata, dict) or not metadata.get("fallback"):
+        return None
+    return metadata
+
+
+def _failure_details(decision, exc):
+    return {
+        "category": decision.category,
+        "exception_class": type(exc).__name__,
+        "http_status": getattr(exc, "status_code", None),
+        "meta_error_code": _meta_error_detail(exc, "code"),
+        "meta_error_subcode": _meta_error_detail(exc, "error_subcode"),
+    }
+
+
+def conversation_outbox_retry_delay(decision, attempts):
+    """Return the bounded delay persisted for a retryable outbox delivery."""
+    base_delay = settings.CONVERSATION_RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1))
+    if decision.category == "RATE_LIMIT":
+        base_delay *= 2
+    if decision.retry_after is not None:
+        base_delay = max(base_delay, decision.retry_after)
+    return min(settings.CONVERSATION_RETRY_MAX_SECONDS, base_delay)
+
+
+def _outbox_failure_log_fields(item, exc):
+    actions = item.payload.get("actions") or ()
+    action_count = len(actions) if isinstance(actions, (list, tuple)) else 0
+    return {
+        "outbox_item_id": str(item.id),
+        "conversation_id": str(item.conversation_id),
+        "sequence": item.sequence,
+        "attempt": item.attempts,
+        "status": item.status,
+        "error_category": item.last_error_category,
+        "exception_class": type(exc).__name__,
+        "http_status": getattr(exc, "status_code", None),
+        "meta_error_code": _meta_error_detail(exc, "code"),
+        "meta_error_subcode": _meta_error_detail(exc, "error_subcode"),
+        "meta_error_type": _meta_error_detail(exc, "type"),
+        "meta_error_message": _meta_error_detail(exc, "message"),
+        "operation": "messages.create",
+        "message_type": "interactive" if action_count else "text",
+        "interactive_type": (
+            "button" if 1 <= action_count <= 3 else "list" if action_count else None
+        ),
+        "correlation_id": str(item.inbox_item_id),
+    }

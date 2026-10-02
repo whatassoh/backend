@@ -32,9 +32,11 @@ class UnderstandingStub:
     def __init__(self, understanding=None):
         self.understanding = understanding
         self.called = False
+        self.calls = 0
 
     def understand_normalized(self, *_args, **_kwargs):
         self.called = True
+        self.calls += 1
         return self.understanding
 
 
@@ -815,3 +817,173 @@ def test_unmatched_replacement_keeps_target_and_merges_slots_progressively():
     assert rice.requested_name == "couches taille M"
     assert rice.quantity == Decimal("2") and rice.unit == "PACK"
     assert ConversationContext.from_payload(conversation.context).pending_clarification is None
+
+
+@pytest.mark.django_db
+def test_pending_replacement_is_handled_before_generic_order_intent():
+    """A complete replacement answer must not start a second order flow."""
+    from apps.catalog.application.services import create_category, create_product
+    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.orders.application.services import add_order_item, create_order_draft
+    from apps.orders.domain.enums import OrderItemResolutionStatus
+
+    conversation = make_conversation()
+    order = create_order_draft(customer=conversation.user)
+    rice_product = create_product(
+        name="Riz", category=create_category(name="Épicerie remplacement")
+    )
+    add_order_item(
+        order=order,
+        requested_name="riz",
+        quantity=Decimal("2"),
+        unit="KG",
+        product=rice_product,
+        resolution_status=OrderItemResolutionStatus.MATCHED,
+    )
+    oil = add_order_item(
+        order=order,
+        requested_name="huile",
+        quantity=Decimal("4"),
+        unit="BOTTLE",
+        resolution_status=OrderItemResolutionStatus.UNMATCHED,
+    )
+    conversation.context = ConversationContext(
+        active_journey=ActiveJourney.BUY,
+        active_order_id=str(order.id),
+        flow=ConversationFlow.AWAITING_CLARIFICATION,
+        metadata={"unrelated_context": "preserved"},
+        pending_clarification=PendingClarification(
+            kind=ClarificationKind.OTHER,
+            field="unmatched_item",
+            item_reference="huile",
+            metadata={
+                "operation": "UNMATCHED_ITEM_REPLACE",
+                "order_id": str(order.id),
+                "target_order_item_id": str(oil.id),
+                "replacement": {
+                    "requested_name": None,
+                    "quantity": None,
+                    "unit": None,
+                    "notes": None,
+                },
+            },
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    understanding = UnderstandingStub(
+        UserMessageUnderstanding(
+            intent=MessageIntent.CREATE_OR_UPDATE_ORDER,
+            confidence=Decimal(".99"),
+            items=(
+                ExtractedItem(
+                    requested_name="riz",
+                    quantity=Decimal("1"),
+                    unit=ExtractedUnit.KG,
+                ),
+            ),
+        )
+    )
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=understanding
+    ).process_message(conversation, inbound(text="1 kg de riz", message_id="replace-rice"))
+
+    order.refresh_from_db()
+    conversation.refresh_from_db()
+    items = list(order.items.order_by("created_at", "id"))
+    context = ConversationContext.from_payload(conversation.context)
+    assert understanding.called is True
+    assert understanding.calls == 1
+    assert outcome.actions_performed == ("unmatched_item_replaced",)
+    assert len(items) == 1
+    assert items[0].product_id == rice_product.id
+    assert items[0].quantity == Decimal("3")
+    assert context.pending_clarification is None
+    assert context.active_order_id == str(order.id)
+    assert context.active_journey == ActiveJourney.BUY
+    assert context.metadata["unrelated_context"] == "preserved"
+
+
+@pytest.mark.django_db
+def test_invalid_replacement_reply_requests_clarification_without_mutation():
+    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.orders.application.services import add_order_item, create_order_draft
+    from apps.orders.domain.enums import OrderItemResolutionStatus
+
+    conversation = make_conversation()
+    order = create_order_draft(customer=conversation.user)
+    oil = add_order_item(
+        order=order,
+        requested_name="huile",
+        quantity=Decimal("4"),
+        unit="BOTTLE",
+        resolution_status=OrderItemResolutionStatus.UNMATCHED,
+    )
+    conversation.context = ConversationContext(
+        active_journey=ActiveJourney.BUY,
+        active_order_id=str(order.id),
+        flow=ConversationFlow.AWAITING_CLARIFICATION,
+        pending_clarification=PendingClarification(
+            kind=ClarificationKind.OTHER,
+            field="unmatched_item",
+            item_reference="huile",
+            metadata={
+                "operation": "UNMATCHED_ITEM_REPLACE",
+                "target_order_item_id": str(oil.id),
+                "replacement": {},
+            },
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    app = ConversationalOrchestrator(
+        understanding_service=UnderstandingStub(
+            UserMessageUnderstanding(
+                intent=MessageIntent.CREATE_OR_UPDATE_ORDER,
+                confidence=Decimal(".99"),
+            )
+        )
+    )
+
+    outcome = app.process_message(
+        conversation, inbound(text="oui", message_id="replace-ambiguous")
+    )
+
+    oil.refresh_from_db()
+    conversation.refresh_from_db()
+    pending = ConversationContext.from_payload(conversation.context).pending_clarification
+    assert oil.resolution_status == OrderItemResolutionStatus.UNMATCHED
+    assert pending.metadata["operation"] == "UNMATCHED_ITEM_REPLACE"
+    assert "J'attends le produit" in outcome.response.text
+
+
+@pytest.mark.django_db
+def test_hard_interrupt_still_preempts_pending_replacement():
+    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.orders.application.services import add_order_item, create_order_draft
+
+    conversation = make_conversation()
+    order = create_order_draft(customer=conversation.user)
+    oil = add_order_item(order=order, requested_name="huile", quantity=4, unit="BOTTLE")
+    conversation.context = ConversationContext(
+        active_journey=ActiveJourney.BUY,
+        active_order_id=str(order.id),
+        pending_clarification=PendingClarification(
+            kind=ClarificationKind.OTHER,
+            field="unmatched_item",
+            metadata={
+                "operation": "UNMATCHED_ITEM_REPLACE",
+                "target_order_item_id": str(oil.id),
+            },
+        ),
+    ).to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    understanding = UnderstandingStub()
+
+    outcome = ConversationalOrchestrator(
+        understanding_service=understanding
+    ).process_message(conversation, inbound(text="annuler", message_id="replace-cancel"))
+
+    order.refresh_from_db()
+    assert understanding.called is False
+    assert order.status == "CANCELLED"
+    assert "annulée" in outcome.response.text

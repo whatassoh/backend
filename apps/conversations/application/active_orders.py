@@ -11,7 +11,11 @@ from uuid import UUID
 
 from django.db import transaction
 
-from apps.conversations.domain.context import ConversationContext, ConversationFlow
+from apps.conversations.domain.context import (
+    ActiveJourney,
+    ConversationContext,
+    ConversationFlow,
+)
 from apps.conversations.domain.enums import ConversationStatus
 from apps.conversations.infrastructure.models import Conversation
 from apps.orders.application.services import cancel_order, create_order_draft
@@ -143,6 +147,14 @@ class ActiveCustomerOrderService:
         pointer = self._validate_locked(conversation, correlation_id=correlation_id)
         if pointer.order:
             return pointer
+        context = self._context(conversation)
+        # A building order can be deliberately suspended while a seller or
+        # driver journey is foregrounded.  Database fallback must not silently
+        # reattach it and let its pending state consume the new journey.
+        if context.active_journey not in {None, ActiveJourney.BUY} or any(
+            task.journey == ActiveJourney.BUY for task in context.suspended_tasks
+        ):
+            return pointer
         order = (
             Order.objects.select_for_update()
             .filter(customer_id=conversation.user_id, status__in=self.active_statuses)
@@ -151,7 +163,7 @@ class ActiveCustomerOrderService:
         )
         if order is None:
             return pointer
-        self._attach_locked(conversation, self._context(conversation), order)
+        self._attach_locked(conversation, context, order)
         return ActiveOrderDecision(
             status=ActiveOrderDecisionStatus.ACTIVE,
             order=order,
@@ -228,11 +240,13 @@ class ActiveCustomerOrderService:
                 reason="not_resumable",
             )
         context = self._context(locked)
-        locked.context = ConversationContext(
+        # Attaching an existing domain order is a narrow context mutation.  Do
+        # not rebuild the dataclass: suspended tasks, onboarding drafts and
+        # future context fields must survive this operation.
+        locked.context = replace(
+            context,
             flow=ConversationFlow.ORDER_BUILDING,
             active_order_id=str(order.id),
-            processed_message_ids=context.processed_message_ids,
-            metadata=context.metadata,
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._trace("draft_resumed", locked, order, correlation_id)
@@ -262,11 +276,10 @@ class ActiveCustomerOrderService:
             customer=locked.user, actor=locked.user, correlation_id=correlation_id
         )
         context = self._context(locked)
-        locked.context = ConversationContext(
+        locked.context = replace(
+            context,
             flow=ConversationFlow.ORDER_BUILDING,
             active_order_id=str(order.id),
-            processed_message_ids=context.processed_message_ids,
-            metadata=context.metadata,
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
         self._trace("draft_created", locked, order, correlation_id)

@@ -4,6 +4,7 @@ from apps.messaging.domain.dtos import NormalizedOutboundMessage, ProviderSendRe
 from apps.messaging.domain.enums import MessageType, MessagingChannel
 from apps.messaging.domain.exceptions import MessagingTemporaryError
 from apps.whatsapp.domain.dtos import (
+    WhatsAppInteractiveListMessage,
     WhatsAppInteractiveMessage,
     WhatsAppReplyButton,
     WhatsAppTemplateMessage,
@@ -78,6 +79,57 @@ def send_whatsapp_interactive_reply_buttons(
                     "actions": [
                         {"id": button.action_id, "label": button.label}
                         for button in buttons
+                    ],
+                },
+            },
+        ),
+        message_event=result.message_event,
+    )
+    return result
+
+
+def send_whatsapp_interactive_list(
+    *,
+    conversation: Conversation,
+    body: str,
+    rows: list[WhatsAppReplyButton],
+    header_text: str | None = None,
+    footer_text: str | None = None,
+    metadata: dict | None = None,
+) -> ProviderSendResult:
+    if conversation.channel != MessagingChannel.WHATSAPP:
+        raise MessagingTemporaryError("Conversation is not a WhatsApp conversation.")
+    if (
+        WhatsAppOutboundPolicy().decide(conversation)
+        == WhatsAppOutboundDecision.TEMPLATE_REQUIRED
+    ):
+        raise WhatsAppTemplateRequired("WhatsApp service window is closed.")
+
+    recipient_external_id = (
+        conversation.external_chat_id or conversation.channel_identity.external_user_id
+    )
+    message = WhatsAppInteractiveListMessage(
+        recipient_external_id=recipient_external_id,
+        body=body,
+        rows=rows,
+        header_text=header_text,
+        footer_text=footer_text,
+        metadata=metadata or {},
+    )
+    result = WhatsAppProvider().send_interactive_list(message)
+    record_outbound_message(
+        conversation=conversation,
+        message=NormalizedOutboundMessage(
+            channel=MessagingChannel.WHATSAPP,
+            recipient_external_id=recipient_external_id,
+            message_type=MessageType.INTERACTIVE,
+            text=body,
+            metadata={
+                **(metadata or {}),
+                "whatsapp": {
+                    "interactive_type": "list",
+                    "actions": [
+                        {"id": row.action_id, "label": row.label} for row in rows
                     ],
                 },
             },

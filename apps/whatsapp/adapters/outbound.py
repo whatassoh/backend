@@ -3,6 +3,7 @@ from typing import Any
 from apps.messaging.domain.dtos import MessageLocation, NormalizedOutboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
 from apps.whatsapp.domain.dtos import (
+    WhatsAppInteractiveListMessage,
     WhatsAppInteractiveMessage,
     WhatsAppTemplateMessage,
 )
@@ -72,6 +73,41 @@ def build_interactive_reply_buttons_payload(
                 }
                 for button in message.buttons
             ]
+        },
+    }
+    if message.header_text:
+        interactive["header"] = {"type": "text", "text": message.header_text}
+    if message.footer_text:
+        interactive["footer"] = {"text": message.footer_text}
+
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": message.recipient_external_id,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+
+
+def build_interactive_list_payload(
+    message: WhatsAppInteractiveListMessage,
+) -> dict[str, Any]:
+    if not 1 <= len(message.rows) <= 10:
+        raise ValueError("WhatsApp interactive lists require between 1 and 10 rows.")
+
+    interactive: dict[str, Any] = {
+        "type": "list",
+        "body": {"text": message.body},
+        "action": {
+            "button": message.button_label,
+            "sections": [
+                {
+                    "rows": [
+                        {"id": row.action_id, "title": row.label}
+                        for row in message.rows
+                    ]
+                }
+            ],
         },
     }
     if message.header_text:

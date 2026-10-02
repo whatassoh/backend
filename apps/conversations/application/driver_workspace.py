@@ -7,6 +7,7 @@ from enum import StrEnum
 
 from django.utils import timezone
 
+from apps.conversations.application.next_steps import NextStep, system_wait
 from apps.conversations.domain.context import ActiveJourney, ConversationFlow
 from apps.drivers.application.availability import (
     DriverAvailabilityService,
@@ -39,6 +40,7 @@ class DriverWorkspaceOutcome:
     text: str
     actions: tuple[DriverWorkspaceAction, ...] = ()
     request_location: bool = False
+    next_step: NextStep | None = None
     metadata: dict[str, object] = field(
         default_factory=lambda: {"driver_workspace": True}
     )
@@ -278,7 +280,8 @@ class DriverWorkspaceService:
             return DriverWorkspaceOutcome(
                 text=(
                     "Vous êtes disponible et votre position est à jour. "
-                    "Vous êtes prêt à recevoir des propositions de livraison."
+                    "Vous n'avez rien à faire pour l'instant ; je vous enverrai une "
+                    "proposition de course dès qu'une livraison correspond."
                 ),
                 actions=(
                     DriverWorkspaceAction(
@@ -289,6 +292,7 @@ class DriverWorkspaceService:
                         action_id=self.status_action, label="Voir mon statut"
                     ),
                 ),
+                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
                 metadata={**common, "driver_workspace_state": "MATCHABLE"},
             )
         return DriverWorkspaceOutcome(

@@ -54,6 +54,13 @@ from apps.conversations.application.journey import (
     JourneyRoutingService,
     JourneyRoutingStatus,
 )
+from apps.conversations.application.next_steps import (
+    NextStep,
+    NextStepKind,
+    ensure_conversational_outcome,
+    system_wait,
+    workflow_complete,
+)
 from apps.conversations.application.observability import (
     DecisionTimer,
     observe_ai_failure,
@@ -84,6 +91,7 @@ from apps.conversations.domain.context import (
     ConversationSocialState,
     ConversationTaskKind,
     DriverOnboardingStage,
+    PendingJourneySwitch,
     PendingClarification,
     SellerOnboardingStage,
 )
@@ -132,6 +140,7 @@ class ResponsePlan:
     text: str
     actions: tuple[ResponseAction, ...] = ()
     request_location: bool = False
+    next_step: NextStep | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -235,11 +244,11 @@ class ConversationalOrchestrator:
         context = self.context_service.get_context(conversation)
         flow_before = context.flow
         if message.external_message_id in context.processed_message_ids:
-            outcome = self._outcome(
+            outcome = ensure_conversational_outcome(self._outcome(
                 ConversationalOutcomeStatus.DUPLICATE,
                 "Ce message a déjà été traité.",
                 context,
-            )
+            ), context)
             observe_decision(
                 conversation=conversation,
                 message=message,
@@ -250,6 +259,9 @@ class ConversationalOrchestrator:
             return outcome
         try:
             outcome = self._process(conversation, context, message, correlation_id)
+            outcome = ensure_conversational_outcome(
+                outcome, self.context_service.get_context(conversation)
+            )
         except AIError as exc:
             observe_ai_failure(channel=message.channel, error=exc)
             logger.warning(
@@ -318,6 +330,13 @@ class ConversationalOrchestrator:
             if resumed_driver_offer is not None:
                 return resumed_driver_offer
         action_id = message.metadata.get("action_id")
+        switch_action = self._handle_journey_switch_action(
+            conversation, context, action_id, correlation_id
+        )
+        if switch_action is not None:
+            return switch_action
+        if context.pending_journey_switch is not None:
+            return self._journey_switch_prompt(context)
         workspace_callback = self.seller_workspace_service.handles_action(action_id)
         legacy_without_store = (
             action_id in self.seller_workspace_service.legacy_actions
@@ -327,6 +346,10 @@ class ConversationalOrchestrator:
             is None
         )
         if workspace_callback and not legacy_without_store:
+            if context.active_journey not in {None, ActiveJourney.SELL}:
+                return self._request_journey_switch(
+                    conversation, context, ActiveJourney.SELL
+                )
             # A live membership is resolved for every callback. Legacy onboarding
             # callbacks therefore become idempotent workspace navigation.
             workspace = self.seller_workspace_service.handle_action(
@@ -341,6 +364,10 @@ class ConversationalOrchestrator:
             and self.driver_workspace_service.resolve_driver(conversation.user) is None
         )
         if driver_workspace_callback and not legacy_driver_without_profile:
+            if context.active_journey not in {None, ActiveJourney.DELIVER}:
+                return self._request_journey_switch(
+                    conversation, context, ActiveJourney.DELIVER
+                )
             workspace = self.driver_workspace_service.present(
                 conversation=conversation
             )
@@ -400,8 +427,9 @@ class ConversationalOrchestrator:
             return self._select_journey(conversation, context, ActiveJourney.SELL)
         if workspace_request == SellerWorkspaceRequest.CATALOG:
             if context.active_journey not in {None, ActiveJourney.SELL}:
-                context, _ = suspend_active_task(context, reason="topic_change")
-                self.context_service.update_context(conversation, context)
+                return self._request_journey_switch(
+                    conversation, context, ActiveJourney.SELL
+                )
             membership = self.seller_workspace_service.resolve_membership(
                 user=conversation.user
             )
@@ -567,6 +595,16 @@ class ConversationalOrchestrator:
         )
         if compound is not None:
             return compound
+        if not self._is_hard_pending_interrupt(understanding, context):
+            pending = self._try_handle_pending_step(
+                conversation,
+                context,
+                message,
+                correlation_id,
+                understanding=understanding,
+            )
+            if pending is not None:
+                return pending
         agent_decision = self._run_active_agent(
             conversation, message, understanding, correlation_id
         )
@@ -576,21 +614,6 @@ class ConversationalOrchestrator:
             return self._order_details_outcome(conversation, context)
         if understanding.order_action == OrderAction.REVIEW:
             return self._review_active_order(conversation, context)
-        variant_text_choice = self._complete_variant_text_selection(
-            conversation, context, understanding, correlation_id
-        )
-        if variant_text_choice is not None:
-            return variant_text_choice
-        replacement = self._complete_unmatched_replacement(
-            conversation, context, understanding, correlation_id
-        )
-        if replacement is not None:
-            return replacement
-        pending_item = self._complete_pending_item_slots(
-            conversation, context, understanding, correlation_id
-        )
-        if pending_item is not None:
-            return pending_item
         if understanding.intent == MessageIntent.MEMORY_SHOW:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:
@@ -624,8 +647,11 @@ class ConversationalOrchestrator:
             return self._select_journey(conversation, context, ActiveJourney.DELIVER)
         if understanding.intent == MessageIntent.CREATE_OR_UPDATE_ORDER:
             if context.active_journey != ActiveJourney.BUY:
-                self.journey_routing_service.select(conversation, ActiveJourney.BUY)
-                context = replace(context, active_journey=ActiveJourney.BUY)
+                # Creating an order is an explicit request to enter BUY.  It
+                # cannot silently overwrite a foreground seller/driver task.
+                return self._select_journey(
+                    conversation, context, ActiveJourney.BUY
+                )
         if understanding.intent == MessageIntent.ORDER_RESUME:
             return self._resume_workflow(
                 conversation,
@@ -837,14 +863,264 @@ class ConversationalOrchestrator:
             metadata={"journey_selection": True},
         )
 
+    def _request_journey_switch(
+        self,
+        conversation,
+        context,
+        target,
+        *,
+        resume_task_kind=None,
+    ):
+        """Ask before replacing foreground work; never suspend on mere intent."""
+
+        if context.active_journey is None or context.active_journey == target:
+            return self._select_journey(conversation, context, target)
+        mission = self._active_delivery_mission(conversation)
+        if mission is not None and target != ActiveJourney.DELIVER:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous avez une livraison en cours. Terminez-la ou signalez un "
+                "problème avant de changer de mode.",
+                context,
+                actions=(
+                    ResponseAction(
+                        action_id="driver.workspace.status",
+                        label="Voir ma livraison",
+                    ),
+                    ResponseAction(
+                        action_id="delivery.report_issue",
+                        label="Signaler un problème",
+                    ),
+                ),
+                metadata={"journey_switch_blocked": "ACTIVE_DELIVERY"},
+            )
+        pending = PendingJourneySwitch(
+            source=context.active_journey,
+            target=target,
+            requested_at=timezone.now().isoformat(),
+            resume_task_kind=resume_task_kind,
+        )
+        updated = replace(context, pending_journey_switch=pending)
+        self.context_service.update_context(conversation, updated)
+        return self._journey_switch_prompt(updated)
+
+    def _journey_switch_prompt(self, context):
+        pending = context.pending_journey_switch
+        if pending is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Ce changement de parcours n'est plus disponible.",
+                context,
+            )
+        source_text = {
+            ActiveJourney.BUY: "Vous avez une commande en cours.",
+            ActiveJourney.SELL: "Vous avez une tâche boutique en cours.",
+            ActiveJourney.DELIVER: "Vous êtes dans le parcours livreur.",
+        }[pending.source]
+        target_label = {
+            ActiveJourney.BUY: "achat",
+            ActiveJourney.SELL: "boutique",
+            ActiveJourney.DELIVER: "livreur",
+        }[pending.target]
+        stay_label = {
+            ActiveJourney.BUY: "Continuer commande",
+            ActiveJourney.SELL: "Continuer boutique",
+            ActiveJourney.DELIVER: "Continuer livraison",
+        }[pending.source]
+        actions = [
+            ResponseAction(
+                action_id=f"journey.switch.confirm.{pending.target.value.casefold()}",
+                label=f"Passer en {target_label}",
+            ),
+            ResponseAction(action_id="journey.switch.stay", label=stay_label),
+        ]
+        if pending.source == ActiveJourney.BUY:
+            actions.append(
+                ResponseAction(
+                    action_id="journey.switch.cancel_buy",
+                    label="Annuler commande",
+                )
+            )
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"{source_text}\nVoulez-vous la mettre en attente et passer au mode "
+            f"{target_label} ?",
+            context,
+            actions=tuple(actions),
+            metadata={
+                "journey_switch_confirmation": True,
+                "source_journey": pending.source.value,
+                "target_journey": pending.target.value,
+                "resume_task_kind": (
+                    pending.resume_task_kind.value
+                    if pending.resume_task_kind
+                    else None
+                ),
+            },
+        )
+
+    def _handle_journey_switch_action(
+        self, conversation, context, action_id, correlation_id
+    ):
+        if not action_id or not action_id.startswith("journey.switch."):
+            return None
+        pending = context.pending_journey_switch
+        if pending is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Ce changement de parcours n'est plus disponible.",
+                context,
+            )
+        if action_id == "journey.switch.stay":
+            updated = replace(context, pending_journey_switch=None)
+            self.context_service.update_context(conversation, updated)
+            return self._with_journey_switch_notice(
+                self._present_active_journey(conversation, updated, correlation_id),
+                "Vous continuez le parcours en cours.",
+            )
+        if action_id == "journey.switch.cancel_buy":
+            if pending.source != ActiveJourney.BUY:
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Cette action n'est pas disponible pour ce parcours.",
+                    context,
+                )
+            self.active_order_service.abandon_order(
+                conversation, correlation_id=correlation_id
+            )
+            current = self.context_service.get_context(conversation)
+            cleared = replace(
+                current,
+                active_journey=None,
+                pending_journey_switch=None,
+            )
+            self.context_service.update_context(conversation, cleared)
+            return self._with_journey_switch_notice(
+                self._select_journey(conversation, cleared, pending.target),
+                "Votre commande a été annulée.",
+            )
+        prefix = "journey.switch.confirm."
+        if not action_id.startswith(prefix):
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette action n'est pas disponible.",
+                context,
+            )
+        try:
+            target = ActiveJourney(action_id.removeprefix(prefix).upper())
+        except ValueError:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette action n'est pas disponible.",
+                context,
+            )
+        if target != pending.target:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette action n'est plus disponible.",
+                context,
+            )
+        mission = self._active_delivery_mission(conversation)
+        if mission is not None and target != ActiveJourney.DELIVER:
+            return self._request_journey_switch(conversation, context, target)
+        source = pending.source
+        suspended, task = suspend_active_task(
+            replace(context, pending_journey_switch=None), reason="journey_switch"
+        )
+        if task is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Aucun parcours actif ne peut être mis en attente.",
+                context,
+            )
+        updated = self.context_service.update_context(conversation, suspended)
+        conversation.context = updated.context
+        if pending.resume_task_kind is not None:
+            resumed = resume_last_task(
+                suspended, target=pending.resume_task_kind
+            )
+            if resumed.task is None:
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Le parcours demandé n'est plus disponible.",
+                    suspended,
+                )
+            self.context_service.update_context(conversation, resumed.context)
+            return self._with_journey_switch_notice(
+                self._present_restored_task(
+                    conversation, resumed.context, resumed.task, correlation_id
+                ),
+                f"Le parcours {self._journey_label(source)} a été mis en attente.",
+            )
+        return self._with_journey_switch_notice(
+            self._select_journey(conversation, suspended, target),
+            f"Le parcours {self._journey_label(source)} a été mis en attente.",
+        )
+
+    def _active_delivery_mission(self, conversation):
+        from apps.drivers.application.delivery_execution import (
+            DeliveryExecutionService,
+            DeliveryMissionAuthorizationError,
+            DeliveryMissionNotFound,
+        )
+
+        try:
+            return DeliveryExecutionService().get_active_mission(conversation.user)
+        except (DeliveryMissionAuthorizationError, DeliveryMissionNotFound):
+            return None
+
+    def _present_active_journey(self, conversation, context, correlation_id):
+        kind = active_task_kind(context)
+        if kind in {ConversationTaskKind.ORDER, ConversationTaskKind.DELIVERY_INSTRUCTIONS}:
+            return self._resume_buy_task(conversation, context, correlation_id)
+        if kind == ConversationTaskKind.SELLER_ONBOARDING:
+            return self._from_seller_onboarding(
+                self.seller_onboarding_service.start(conversation), context
+            )
+        if kind == ConversationTaskKind.SELLER_CATALOG:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Vous continuez la gestion de votre catalogue. Que souhaitez-vous modifier ?",
+                context,
+            )
+        if kind == ConversationTaskKind.DRIVER_ONBOARDING:
+            return self._from_driver_onboarding(
+                self.driver_onboarding_service.start(conversation), context
+            )
+        if context.active_journey == ActiveJourney.SELL:
+            return self._from_seller_workspace(
+                self.seller_workspace_service.present(conversation=conversation), context
+            )
+        if context.active_journey == ActiveJourney.DELIVER:
+            return self._from_driver_workspace(
+                self.driver_workspace_service.present(conversation=conversation), context
+            )
+        return self._resume_buy_task(conversation, context, correlation_id)
+
+    def _present_restored_task(self, conversation, context, task, correlation_id):
+        return self._with_journey_switch_notice(
+            self._present_active_journey(conversation, context, correlation_id),
+            f"Le parcours {self._journey_label(task.journey)} est repris.",
+        )
+
+    @staticmethod
+    def _with_journey_switch_notice(outcome, notice):
+        return replace(
+            outcome,
+            response=replace(outcome.response, text=f"{notice}\n\n{outcome.response.text}"),
+        )
+
+    @staticmethod
+    def _journey_label(journey):
+        return {
+            ActiveJourney.BUY: "achat",
+            ActiveJourney.SELL: "boutique",
+            ActiveJourney.DELIVER: "livreur",
+        }.get(journey, "demandé")
+
     def _select_journey(self, conversation, context, journey):
         if context.active_journey not in {None, journey}:
-            context, _ = suspend_active_task(context, reason="topic_change")
-            updated = self.context_service.update_context(conversation, context)
-            # `JourneyRoutingService.select()` immediately reads the passed
-            # instance. Keep it aligned with the locked write so it cannot
-            # overwrite the freshly suspended task with stale JSON.
-            conversation.context = updated.context
+            return self._request_journey_switch(conversation, context, journey)
         decision = self.journey_routing_service.select(conversation, journey)
         metadata = {**context.metadata}
         metadata.pop("task_paused", None)
@@ -992,6 +1268,7 @@ class ConversationalOrchestrator:
                     for action in workspace.actions
                 ),
                 request_location=workspace.request_location,
+                next_step=workspace.next_step,
                 metadata=dict(workspace.metadata),
             ),
             active_order_id=context.active_order_id,
@@ -1250,9 +1527,14 @@ class ConversationalOrchestrator:
             )
             return self._outcome(
                 ConversationalOutcomeStatus.PROCESSED,
-                text,
+                text
+                + "\n\nNous recherchons maintenant un livreur. Vous n'avez rien à faire pour l'instant ; nous vous préviendrons dès qu'un livreur sera trouvé.",
                 context,
-                metadata={"store_preparation": result.value, "order_id": str(order_id)},
+                metadata={
+                    "store_preparation": result.value,
+                    "order_id": str(order_id),
+                },
+                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
             )
         text = (
             "Vous n'êtes pas autorisé à traiter cette commande."
@@ -1299,9 +1581,26 @@ class ConversationalOrchestrator:
                     for key, label in (
                         ("delivery.issue.customer_unreachable", "Client injoignable"),
                         ("delivery.issue.address_problem", "Problème d'adresse"),
-                        ("delivery.issue.vehicle_problem", "Problème de véhicule"),
-                        ("delivery.issue.other", "Autre problème"),
+                        ("delivery.issue.more", "Autre problème"),
                     )
+                ),
+            )
+        if action_id == "delivery.issue.more":
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                "Quel autre problème rencontrez-vous ?",
+                context,
+                actions=(
+                    ResponseAction(
+                        action_id="delivery.issue.vehicle_problem",
+                        label="Problème de véhicule",
+                    ),
+                    ResponseAction(
+                        action_id="delivery.issue.other", label="Autre problème"
+                    ),
+                    ResponseAction(
+                        action_id="delivery.report_issue", label="Retour"
+                    ),
                 ),
             )
         if action_id in issue_actions:
@@ -2139,8 +2438,11 @@ class ConversationalOrchestrator:
                 )
             return self._outcome(
                 ConversationalOutcomeStatus.PROCESSED,
-                "Votre commande a été ajustée et nous recherchons à nouveau une boutique.",
+                "Votre commande a été ajustée et nous recherchons à nouveau une boutique. "
+                "Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'une boutique répond.",
                 context,
+                metadata={"order_waiting": "MATCHING_STORES"},
+                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
             )
         if action_id == "order.status":
             from apps.orders.domain.enums import OrderStatus
@@ -2153,27 +2455,52 @@ class ConversationalOrchestrator:
                 .first()
             )
             messages = {
-                OrderStatus.CONFIRMED: "Votre demande est confirmée. Nous lançons la recherche d'une boutique.",
-                OrderStatus.MATCHING_STORES: "Nous recherchons une boutique pour votre commande.",
-                OrderStatus.AWAITING_PARTIAL_COVERAGE: "Nous attendons votre décision sur les produits disponibles.",
-                OrderStatus.STORE_OFFERED: "Une boutique est en cours de consultation.",
-                OrderStatus.STORE_ACCEPTED: "Une boutique a accepté votre commande. Elle va être préparée.",
-                OrderStatus.PREPARING: "Votre commande est en préparation.",
-                OrderStatus.READY_FOR_PICKUP: "Votre commande est prête. Nous recherchons un livreur.",
-                OrderStatus.MATCHING_DRIVERS: "Nous recherchons un livreur.",
-                OrderStatus.DRIVER_ASSIGNED: "Un livreur a été assigné à votre commande.",
-                OrderStatus.PICKED_UP: "Votre commande a été récupérée par le livreur.",
-                OrderStatus.IN_DELIVERY: "Votre commande est en route.",
+                OrderStatus.CONFIRMED: "Votre demande est confirmée. Nous lançons la recherche d'une boutique. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'une boutique répond.",
+                OrderStatus.MATCHING_STORES: "Nous recherchons une boutique pour votre commande. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'une boutique répond.",
+                OrderStatus.AWAITING_PARTIAL_COVERAGE: "Nous attendons votre décision sur les produits disponibles. Utilisez les choix de la dernière proposition pour continuer ou annuler.",
+                OrderStatus.STORE_OFFERED: "Une boutique est en cours de consultation. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'elle répond.",
+                OrderStatus.STORE_ACCEPTED: "Une boutique a accepté votre commande. Elle va être préparée. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès que la préparation avance.",
+                OrderStatus.PREPARING: "Votre commande est en préparation. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'elle est prête.",
+                OrderStatus.READY_FOR_PICKUP: "Votre commande est prête. Nous recherchons un livreur. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'un livreur est trouvé.",
+                OrderStatus.MATCHING_DRIVERS: "Nous recherchons un livreur. Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'un livreur est trouvé.",
+                OrderStatus.DRIVER_ASSIGNED: "Un livreur a été assigné à votre commande. Vous n'avez rien à faire pour l'instant ; je vous préviendrai quand il aura récupéré la commande.",
+                OrderStatus.PICKED_UP: "Votre commande a été récupérée par le livreur. Vous n'avez rien à faire pour l'instant ; je vous préviendrai à l'arrivée.",
+                OrderStatus.IN_DELIVERY: "Votre commande est en route. Vous n'avez rien à faire pour l'instant ; je vous préviendrai à la livraison.",
                 OrderStatus.DELIVERED: "Votre commande a été livrée.",
                 OrderStatus.CANCELLED: "Votre commande est annulée.",
                 OrderStatus.FAILED: "Votre commande ne peut pas être traitée pour le moment.",
             }
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                messages.get(order.status, "Aucune commande en cours.")
-                if order
-                else "Aucune commande en cours.",
-                context,
+            text = messages.get(order.status, "Aucune commande en cours.") if order else "Aucune commande en cours."
+            next_step = None
+            if order and order.status in {
+                    OrderStatus.CONFIRMED,
+                    OrderStatus.MATCHING_STORES,
+                    OrderStatus.STORE_OFFERED,
+                    OrderStatus.STORE_ACCEPTED,
+                    OrderStatus.PREPARING,
+                    OrderStatus.READY_FOR_PICKUP,
+                    OrderStatus.MATCHING_DRIVERS,
+                    OrderStatus.DRIVER_ASSIGNED,
+                    OrderStatus.PICKED_UP,
+                    OrderStatus.IN_DELIVERY,
+                }:
+                next_step = system_wait("Vous n'avez rien à faire pour l'instant.")
+            elif order and order.status == OrderStatus.AWAITING_PARTIAL_COVERAGE:
+                next_step = NextStep(
+                    kind=NextStepKind.USER_ACTION,
+                    instruction="Utilisez les choix de la dernière proposition pour continuer ou annuler.",
+                )
+            elif order and order.status in {
+                OrderStatus.DELIVERED,
+                OrderStatus.CANCELLED,
+                OrderStatus.FAILED,
+            }:
+                next_step = workflow_complete("Cette commande est terminée.")
+            return ConversationalOutcome(
+                status=ConversationalOutcomeStatus.PROCESSED,
+                response=ResponsePlan(text=text, next_step=next_step),
+                active_order_id=str(order.id) if order else None,
+                metadata={"order_status": order.status} if order else {},
             )
         if action_id == "order.modify":
             # A partial proposal has no active draft context after confirmation;
@@ -2207,11 +2534,7 @@ class ConversationalOrchestrator:
                         "Cette proposition n'est plus disponible.",
                         context,
                     )
-                return self._outcome(
-                    ConversationalOutcomeStatus.PROCESSED,
-                    "Que souhaitez-vous modifier dans votre commande ?",
-                    context,
-                )
+                return self._order_modify_menu(context)
         if action_id == "order.cancel":
             from apps.stores.infrastructure.models import PartialStoreCoverageProposal
 
@@ -2294,8 +2617,14 @@ class ConversationalOrchestrator:
             }:
                 return self._outcome(
                     ConversationalOutcomeStatus.PROCESSED,
-                    "Préparation démarrée.",
+                    "Préparation démarrée. Quand la commande est prête, utilisez « Commande prête ».",
                     context,
+                    actions=(
+                        ResponseAction(
+                            action_id="store_order.mark_ready",
+                            label="Commande prête",
+                        ),
+                    ),
                 )
             if result in {
                 StorePreparationResult.READY,
@@ -2303,8 +2632,9 @@ class ConversationalOrchestrator:
             }:
                 return self._outcome(
                     ConversationalOutcomeStatus.PROCESSED,
-                    "Commande marquée comme prête.",
+                    "Commande marquée comme prête. Nous recherchons maintenant un livreur. Vous n'avez rien à faire pour l'instant ; nous vous préviendrons dès qu'un livreur sera trouvé.",
                     context,
+                    next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
                 )
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
@@ -2330,6 +2660,10 @@ class ConversationalOrchestrator:
         if action_id == "order.cancel":
             return self._cancel_active_order(conversation, context, correlation_id)
         if action_id == "order.modify":
+            return self._order_modify_menu(context)
+        if action_id == "order.modify.back":
+            return self._review_active_order(conversation, context)
+        if action_id == "order.modify.products":
             order = self._active_order(conversation, context)
             if order is not None:
                 pending = PendingClarification(
@@ -2507,12 +2841,13 @@ class ConversationalOrchestrator:
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
             response=ResponsePlan(
-                text="Demande confirmée ✅\nNous recherchons maintenant une boutique capable de fournir votre commande. Je vous tiendrai informé ici.",
+                text="Demande confirmée ✅\nNous recherchons maintenant une boutique capable de fournir votre commande. Vous n'avez rien à faire pour l'instant ; je vous préviendrai ici dès qu'une boutique répond.",
                 actions=(
                     ResponseAction(
                         action_id="order.status", label="Suivre ma commande"
                     ),
                 ),
+                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
             ),
             actions_performed=("order_confirmed",),
             active_order_id=str(order.id),
@@ -2531,7 +2866,10 @@ class ConversationalOrchestrator:
             )
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
-            response=ResponsePlan(text="Votre commande est annulée."),
+            response=ResponsePlan(
+                text="Votre commande est annulée.",
+                next_step=workflow_complete("Cette commande est terminée."),
+            ),
             actions_performed=("order_cancelled",),
             active_order_id=str(order.id),
         )
@@ -2999,6 +3337,18 @@ class ConversationalOrchestrator:
             metadata={"review_fingerprint": review.fingerprint},
         )
 
+    def _order_modify_menu(self, context):
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            "Que souhaitez-vous modifier ?",
+            context,
+            actions=(
+                ResponseAction(action_id="order.modify.products", label="Produits"),
+                ResponseAction(action_id="order.change_location", label="Adresse"),
+                ResponseAction(action_id="order.modify.back", label="Retour"),
+            ),
+        )
+
     def _review_active_order(self, conversation, context):
         order = self._active_order(conversation, context)
         if order is None:
@@ -3059,10 +3409,10 @@ class ConversationalOrchestrator:
             requires_followup=True,
         )
 
-    def _outcome(self, status, text, context, metadata=None, actions=()):
+    def _outcome(self, status, text, context, metadata=None, actions=(), next_step=None):
         return ConversationalOutcome(
             status=status,
-            response=ResponsePlan(text=text, actions=actions),
+            response=ResponsePlan(text=text, actions=actions, next_step=next_step),
             active_order_id=context.active_order_id,
             metadata=metadata or {},
         )
@@ -3368,6 +3718,85 @@ class ConversationalOrchestrator:
     def _has_pending_task(context):
         return has_resumable_work(context)
 
+    @staticmethod
+    def _has_expected_answer_pending(context):
+        """Whether the current turn is expected to complete a saved sub-flow."""
+        return bool(
+            context.pending_clarification
+            or context.pending_seller_catalog_mutation
+            or context.metadata.get("awaiting_delivery_instructions")
+        )
+
+    @staticmethod
+    def _is_hard_pending_interrupt(understanding, context):
+        """Model-classified navigation that is allowed to preempt an answer slot."""
+        if understanding.intent == MessageIntent.SELL:
+            return context.active_journey != ActiveJourney.SELL
+        if understanding.intent == MessageIntent.DELIVER:
+            return context.active_journey != ActiveJourney.DELIVER
+        if understanding.intent == MessageIntent.CREATE_OR_UPDATE_ORDER:
+            return context.active_journey != ActiveJourney.BUY
+        return understanding.intent in {
+            MessageIntent.CANCEL,
+            MessageIntent.PAUSE,
+            MessageIntent.BACK,
+            MessageIntent.ORDER_RESUME,
+            MessageIntent.HELP,
+            MessageIntent.ORDER_HISTORY,
+            MessageIntent.ORDER_STATUS,
+            MessageIntent.ORDER_DETAILS,
+            MessageIntent.MEMORY_SHOW,
+            MessageIntent.MEMORY_FORGET,
+        }
+
+    def _try_handle_pending_step(
+        self,
+        conversation,
+        context,
+        message,
+        correlation_id,
+        *,
+        understanding=None,
+    ):
+        """Give an expected answer its saved workflow before general intent routing.
+
+        Structured callbacks and native locations keep their existing deterministic
+        routes.  For free text, this consumes only pending steps whose input can be
+        interpreted safely from the already-computed understanding.
+        """
+        if (
+            understanding is None
+            and context.metadata.get("awaiting_delivery_instructions")
+            and message.text
+            and not context.metadata.get("task_paused")
+        ):
+            return self._handle_delivery_instructions(
+                conversation, context, message.text, correlation_id
+            )
+        if understanding is None:
+            return None
+        for handler in (
+            self._complete_variant_text_selection,
+            self._complete_unmatched_replacement,
+            self._complete_pending_item_slots,
+        ):
+            outcome = handler(conversation, context, understanding, correlation_id)
+            if outcome is not None:
+                logger.info(
+                    "conversation_pending_step_consumed",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "flow": context.flow,
+                        "pending_operation": (
+                            context.pending_clarification.metadata.get("operation")
+                            if context.pending_clarification
+                            else None
+                        ),
+                    },
+                )
+                return outcome
+        return None
+
     def _try_universal_interrupt(
         self,
         conversation,
@@ -3397,6 +3826,19 @@ class ConversationalOrchestrator:
                 message.text,
                 correlation_id,
             )
+        pending = self._try_handle_pending_step(
+            conversation,
+            context,
+            message,
+            correlation_id,
+        )
+        if pending is not None:
+            return pending
+        # A persisted answer slot owns ordinary text.  Let the normal routing
+        # path obtain one understanding and offer it to that slot before any
+        # generic interruption can switch journeys.
+        if self._has_expected_answer_pending(context):
+            return None
         # Seller and driver onboarding own their deterministic free-text slots.
         # Do not make an LLM call before those handlers get a chance to consume
         # their input; explicit universal commands above remain available.
@@ -3444,6 +3886,16 @@ class ConversationalOrchestrator:
         )
         if compound is not None:
             return compound
+        if not self._is_hard_pending_interrupt(understanding, context):
+            pending = self._try_handle_pending_step(
+                conversation,
+                context,
+                message,
+                correlation_id,
+                understanding=understanding,
+            )
+            if pending is not None:
+                return pending
         agent_decision = self._run_active_agent(
             conversation, message, understanding, correlation_id
         )
@@ -3473,11 +3925,14 @@ class ConversationalOrchestrator:
                 MessageIntent.BACK,
                 MessageIntent.SELL,
                 MessageIntent.DELIVER,
-                MessageIntent.CREATE_OR_UPDATE_ORDER,
                 MessageIntent.MEMORY_SHOW,
                 MessageIntent.MEMORY_FORGET,
                 MessageIntent.CATALOG_BROWSE,
             }
+            or (
+                understanding.intent == MessageIntent.CREATE_OR_UPDATE_ORDER
+                and not self._has_expected_answer_pending(context)
+            )
             or understanding.order_action == OrderAction.REVIEW
         )
         if not is_universal:
@@ -3793,10 +4248,7 @@ class ConversationalOrchestrator:
             MessageIntent.CREATE_OR_UPDATE_ORDER: ActiveJourney.BUY,
         }[understanding.intent]
         if context.active_journey != target:
-            suspended, _ = suspend_active_task(context, reason="topic_change")
-            updated = self.context_service.update_context(conversation, suspended)
-            conversation.context = updated.context
-            context = suspended
+            return self._request_journey_switch(conversation, context, target)
         if target == ActiveJourney.BUY and understanding.items:
             self.journey_routing_service.select(conversation, target)
             context = replace(
@@ -3828,25 +4280,48 @@ class ConversationalOrchestrator:
             TaskTarget.DRIVER_ONBOARDING: ConversationTaskKind.DRIVER_ONBOARDING,
             TaskTarget.SELLER_CATALOG: ConversationTaskKind.SELLER_CATALOG,
         }.get(target)
+        requested_task = next(
+            (
+                task
+                for task in reversed(context.suspended_tasks)
+                if target_kind is None or task.kind == target_kind
+            ),
+            None,
+        )
+        if (
+            requested_task is not None
+            and context.active_journey is not None
+            and requested_task.journey != context.active_journey
+        ):
+            return self._request_journey_switch(
+                conversation,
+                context,
+                requested_task.journey,
+                resume_task_kind=requested_task.kind,
+            )
         resumed = resume_last_task(context, target=target_kind)
         if resumed.task is not None:
             context = resumed.context
             self.context_service.update_context(conversation, context)
             kind = resumed.task.kind
             if kind == ConversationTaskKind.SELLER_ONBOARDING:
-                return self._from_seller_onboarding(
-                    self.seller_onboarding_service.start(conversation), context
+                return self._present_restored_task(
+                    conversation, context, resumed.task, correlation_id
                 )
             if kind == ConversationTaskKind.DRIVER_ONBOARDING:
-                return self._from_driver_onboarding(
-                    self.driver_onboarding_service.start(conversation), context
+                return self._present_restored_task(
+                    conversation, context, resumed.task, correlation_id
                 )
             if kind == ConversationTaskKind.SELLER_CATALOG:
-                return self._outcome(
-                    ConversationalOutcomeStatus.PROCESSED,
-                    "Reprenons la gestion de votre catalogue. Que souhaitez-vous modifier ?",
-                    context,
-                    metadata={"capability": "resume", "task_kind": kind.value},
+                return self._present_restored_task(
+                    conversation, context, resumed.task, correlation_id
+                )
+            if kind in {
+                ConversationTaskKind.ORDER,
+                ConversationTaskKind.DELIVERY_INSTRUCTIONS,
+            }:
+                return self._present_restored_task(
+                    conversation, context, resumed.task, correlation_id
                 )
         current_kind = active_task_kind(context)
         if current_kind == ConversationTaskKind.SELLER_ONBOARDING:
@@ -3867,6 +4342,17 @@ class ConversationalOrchestrator:
                     "task_kind": current_kind.value,
                 },
             )
+        if context.active_journey == ActiveJourney.SELL:
+            return self._from_seller_workspace(
+                self.seller_workspace_service.present(conversation=conversation), context
+            )
+        if context.active_journey == ActiveJourney.DELIVER:
+            return self._from_driver_workspace(
+                self.driver_workspace_service.present(conversation=conversation), context
+            )
+        return self._resume_buy_task(conversation, context, correlation_id)
+
+    def _resume_buy_task(self, conversation, context, correlation_id):
         if context.metadata.get("awaiting_delivery_instructions"):
             return self._outcome(
                 ConversationalOutcomeStatus.PROCESSED,
@@ -3919,9 +4405,12 @@ class ConversationalOrchestrator:
         merged = dict(values or {})
         if candidate is None:
             return merged
-        # The active PendingClarification owns the product identity.  A short
-        # answer such as "2 paquets" must only fill slots, not overwrite it.
-        if candidate.quantity is None and candidate.requested_name:
+        # A bare quantity/unit reply ("2 paquets") must only fill slots, but a
+        # complete answer ("1 kg de riz") is the product requested by a
+        # replacement/add-item sub-flow and must retain its product identity.
+        if candidate.requested_name and self._contains_product_reference(
+            candidate.requested_name
+        ):
             merged["requested_name"] = candidate.requested_name
         if candidate.quantity is not None:
             merged["quantity"] = str(candidate.quantity)
@@ -3936,7 +4425,13 @@ class ConversationalOrchestrator:
     def _ask_for_item_slots(self, context, pending, *, actions=()):
         values = pending.metadata.get("replacement") or pending.metadata.get("item", {})
         if not values.get("requested_name"):
-            text = "Quel produit souhaitez-vous ajouter ?"
+            if pending.metadata.get("operation") == "UNMATCHED_ITEM_REPLACE":
+                text = (
+                    f"J'attends le produit pour remplacer {pending.item_reference}. "
+                    "Par exemple : « 1 kg de riz »."
+                )
+            else:
+                text = "Quel produit souhaitez-vous ajouter ?"
         elif not values.get("quantity"):
             text = f"Quelle quantité de {values['requested_name']} souhaitez-vous ?"
         else:
@@ -4309,6 +4804,38 @@ class ConversationalOrchestrator:
             conversation, flow=ConversationFlow.ORDER_BUILDING
         )
         return self._modified_outcome(conversation, order, "order_item_replaced")
+
+
+    @staticmethod
+    def _contains_product_reference(value):
+        """Distinguish a product answer from a quantity/unit-only slot answer."""
+        unit_words = {
+            "g",
+            "gramme",
+            "grammes",
+            "kg",
+            "kilo",
+            "kilos",
+            "l",
+            "litre",
+            "litres",
+            "ml",
+            "bouteille",
+            "bouteilles",
+            "paquet",
+            "paquets",
+            "pack",
+            "packs",
+            "sac",
+            "sacs",
+            "unite",
+            "unites",
+            "piece",
+            "pieces",
+        }
+        tokens = re.findall(r"[a-zà-ÿ]+", value.casefold())
+        ignored = {*unit_words, "de", "du", "d"}
+        return any(token not in ignored for token in tokens)
 
     def _clarification_choice_action(
         self, conversation, context, action_id, correlation_id

@@ -13,6 +13,7 @@ from apps.conversations.application.context_window import (
 )
 from apps.conversations.application.interruptions import active_task_kind
 from apps.conversations.application.memory import ConversationMemoryService
+from apps.conversations.application.next_steps import ensure_conversational_outcome
 from apps.conversations.application.response_policies import select_response_policy
 from apps.conversations.application.style import style_snapshot
 from apps.conversations.domain.context import ConversationContext
@@ -132,7 +133,13 @@ def compose_outcome_safely(
             "natural_response_composition_audit_failed",
             extra={"conversation_id": str(conversation.id)},
         )
-    return replace(outcome, response=candidate) if enabled and accepted else outcome
+    if enabled and accepted:
+        # The composer can improve prose only.  Re-apply the deterministic
+        # contract so a rewrite cannot hide a required wait/instruction.
+        return ensure_conversational_outcome(
+            replace(outcome, response=candidate), context
+        )
+    return outcome
 
 
 def _memory_preferences(conversation):

@@ -17,14 +17,23 @@ from apps.catalog.application.services import (
 from apps.catalog.domain.enums import ProductAvailability, ProductUnit
 from apps.conversations.application.orchestrator import ConversationalOrchestrator
 from apps.conversations.application.services import get_or_create_active_conversation
-from apps.conversations.domain.context import ActiveJourney, ConversationContext, ConversationFlow
+from apps.conversations.domain.context import (
+    ActiveJourney,
+    ConversationContext,
+    ConversationFlow,
+)
 from apps.identity.infrastructure.models import User
 from apps.messaging.application.services import create_channel_identity
-from apps.messaging.domain.dtos import NormalizedInboundMessage
+from apps.messaging.domain.dtos import MessageLocation, NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
-from apps.orders.application.services import add_order_item, create_order_draft, set_delivery_location
+from apps.orders.application.services import (
+    add_order_item,
+    create_order_draft,
+    set_delivery_location,
+)
 from apps.orders.domain.enums import OrderItemResolutionStatus, OrderStatus
 from apps.stores.application.services import create_store
+from apps.whatsapp.domain.response_validation import validate_response_for_channel
 
 
 class Queue:
@@ -149,6 +158,46 @@ def test_modify_location_text_enters_location_flow():
     conversation.refresh_from_db()
     assert "Partagez" in outcome.response.text
     assert ConversationContext.from_payload(conversation.context).flow == ConversationFlow.AWAITING_LOCATION
+
+
+@pytest.mark.django_db
+def test_position_skip_produces_whatsapp_deliverable_recap():
+    """Regression for position shared -> non, continue -> confirmation recap."""
+    conversation = convo()
+    draft_context(conversation, location=False)
+    app = ConversationalOrchestrator(understanding_service=Queue())
+
+    app.process_message(
+        conversation,
+        inbound(action_id="order.change_location", message_id="change-location"),
+    )
+    location_outcome = app.process_message(
+        conversation,
+        NormalizedInboundMessage(
+            channel=MessagingChannel.WHATSAPP,
+            external_message_id="shared-location",
+            external_user_id="p1e",
+            message_type=MessageType.LOCATION,
+            location=MessageLocation(latitude=4.05, longitude=9.7),
+        ),
+    )
+    assert "Position enregistrée" in location_outcome.response.text
+
+    recap = app.process_message(
+        conversation,
+        inbound(
+            action_id="order.skip_delivery_instructions",
+            message_id="skip-instructions",
+        ),
+    )
+
+    conversation.refresh_from_db()
+    assert (
+        ConversationContext.from_payload(conversation.context).flow
+        == ConversationFlow.AWAITING_CONFIRMATION
+    )
+    assert len(recap.response.actions) <= 3
+    assert validate_response_for_channel(recap.response, MessagingChannel.WHATSAPP)
 
 
 @pytest.mark.django_db
