@@ -155,16 +155,34 @@ def test_explicit_buy_suspends_seller_onboarding_and_resume_restores_it():
         )
     )
 
-    switched = app.process_message(convo, inbound("Je veux acheter du riz"))
+    switch_prompt = app.process_message(convo, inbound("Je veux acheter du riz"))
+    convo.refresh_from_db()
+    prompt_context = ConversationContext.from_payload(convo.context)
+    app.process_message(
+        convo,
+        inbound(
+            action_id="journey.switch.confirm.buy",
+            message_id="confirm-buy-switch",
+        ),
+    )
     convo.refresh_from_db()
     switched_context = ConversationContext.from_payload(convo.context)
-    resumed = app.process_message(
+    resume_prompt = app.process_message(
         convo, inbound("reprendre", message_id="resume-seller")
+    )
+    assert resume_prompt.metadata["journey_switch_confirmation"] is True
+    resumed = app.process_message(
+        convo,
+        inbound(
+            action_id="journey.switch.confirm.sell",
+            message_id="confirm-seller-resume",
+        ),
     )
 
     convo.refresh_from_db()
     resumed_context = ConversationContext.from_payload(convo.context)
-    assert switched.metadata["arbitration_reason"] == "journey_switched"
+    assert switch_prompt.metadata["journey_switch_confirmation"] is True
+    assert prompt_context.active_journey == ActiveJourney.SELL
     assert switched_context.active_journey == ActiveJourney.BUY
     assert switched_context.suspended_tasks
     assert resumed_context.active_journey == ActiveJourney.SELL

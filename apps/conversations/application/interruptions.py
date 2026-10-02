@@ -116,20 +116,34 @@ def active_task_kind(context: ConversationContext) -> ConversationTaskKind | Non
             or context.pending_seller_catalog_mutation is not None
         ):
             return ConversationTaskKind.SELLER_CATALOG
-        return ConversationTaskKind.JOURNEY
+        return None
     if context.active_journey == ActiveJourney.DELIVER:
         if (
             context.driver_onboarding is not None
             and context.driver_onboarding.stage != DriverOnboardingStage.COMPLETED
         ):
             return ConversationTaskKind.DRIVER_ONBOARDING
-        return ConversationTaskKind.JOURNEY
+        return None
+    if context.active_journey is None:
+        if (
+            context.seller_onboarding is not None
+            and context.seller_onboarding.stage != SellerOnboardingStage.COMPLETED
+        ):
+            return ConversationTaskKind.SELLER_ONBOARDING
+        if (
+            context.metadata.get("seller_catalog_active") is True
+            or context.pending_seller_catalog_mutation is not None
+        ):
+            return ConversationTaskKind.SELLER_CATALOG
+        if (
+            context.driver_onboarding is not None
+            and context.driver_onboarding.stage != DriverOnboardingStage.COMPLETED
+        ):
+            return ConversationTaskKind.DRIVER_ONBOARDING
     if context.metadata.get("awaiting_delivery_instructions"):
         return ConversationTaskKind.DELIVERY_INSTRUCTIONS
     if context.active_order_id or context.pending_clarification:
         return ConversationTaskKind.ORDER
-    if context.active_journey is not None:
-        return ConversationTaskKind.JOURNEY
     return None
 
 
@@ -145,23 +159,49 @@ def suspend_active_task(
     kind = active_task_kind(context)
     if kind is None:
         return context, None
+    # Older payloads can have an order/pending step without active_journey.
+    # A snapshot must still carry its semantic journey, otherwise restoring it
+    # while another journey is active cannot go through the switch arbiter.
+    journey = context.active_journey
+    if journey is None and kind in {
+        ConversationTaskKind.ORDER,
+        ConversationTaskKind.DELIVERY_INSTRUCTIONS,
+    }:
+        journey = ActiveJourney.BUY
     task = SuspendedConversationTask(
         kind=kind,
-        journey=context.active_journey,
+        journey=journey,
         flow=context.flow,
         suspended_at=timezone.now().isoformat(),
         reason=reason,
+        active_order_id=context.active_order_id,
+        pending_clarification=context.pending_clarification,
+        seller_onboarding=context.seller_onboarding,
+        catalog_setup_choice=context.catalog_setup_choice,
+        driver_onboarding=context.driver_onboarding,
+        pending_seller_catalog_mutation=context.pending_seller_catalog_mutation,
+        metadata=dict(context.metadata),
+        snapshot_version=1,
     )
-    tasks = tuple(item for item in context.suspended_tasks if item.kind != kind)
+    tasks = tuple(
+        item
+        for item in context.suspended_tasks
+        if item.kind != kind and item.journey != journey
+    )
     tasks = (*tasks, task)[-5:]
-    metadata = {**context.metadata, "task_paused": True}
     return (
         replace(
             context,
             flow=ConversationFlow.IDLE,
             active_journey=None,
+            active_order_id=None,
+            pending_clarification=None,
+            seller_onboarding=None,
+            catalog_setup_choice=None,
+            driver_onboarding=None,
+            pending_seller_catalog_mutation=None,
             suspended_tasks=tasks,
-            metadata=metadata,
+            metadata={"task_paused": True},
         ),
         task,
     )
@@ -194,21 +234,41 @@ def resume_last_task(
             flow=context.flow,
             suspended_at=timezone.now().isoformat(),
             reason="resume_switch",
+            active_order_id=context.active_order_id,
+            pending_clarification=context.pending_clarification,
+            seller_onboarding=context.seller_onboarding,
+            catalog_setup_choice=context.catalog_setup_choice,
+            driver_onboarding=context.driver_onboarding,
+            pending_seller_catalog_mutation=context.pending_seller_catalog_mutation,
+            metadata=dict(context.metadata),
+            snapshot_version=1,
         )
-        remaining = tuple(item for item in remaining if item.kind != current_kind)
+        remaining = tuple(
+            item
+            for item in remaining
+            if item.kind != current_kind
+        )
         remaining = (*remaining, current)[-5:]
-    metadata = {**context.metadata}
+    metadata = dict(task.metadata) if task.snapshot_version else {**context.metadata}
     metadata.pop("task_paused", None)
-    return ResumeDecision(
-        context=replace(
-            context,
-            flow=task.flow,
-            active_journey=task.journey,
-            suspended_tasks=remaining,
-            metadata=metadata,
-        ),
-        task=task,
+    restored = replace(
+        context,
+        flow=task.flow,
+        active_journey=task.journey,
+        suspended_tasks=remaining,
+        metadata=metadata,
     )
+    if task.snapshot_version:
+        restored = replace(
+            restored,
+            active_order_id=task.active_order_id,
+            pending_clarification=task.pending_clarification,
+            seller_onboarding=task.seller_onboarding,
+            catalog_setup_choice=task.catalog_setup_choice,
+            driver_onboarding=task.driver_onboarding,
+            pending_seller_catalog_mutation=task.pending_seller_catalog_mutation,
+        )
+    return ResumeDecision(context=restored, task=task)
 
 
 def discard_suspended_kind(

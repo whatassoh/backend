@@ -1,6 +1,7 @@
 """Select a presentation policy from trusted outcome and context state."""
 
 from apps.ai.domain.response_policy import POLICIES, ResponseUseCase
+from apps.conversations.application.next_steps import NextStepKind
 
 NAVIGATION_CAPABILITIES = {"pause", "resume", "back", "cancel", "paused_task"}
 MEMORY_CAPABILITIES = {"memory_show", "memory_forget"}
@@ -12,11 +13,15 @@ def select_response_policy(outcome, context):
     capability = str(metadata.get("capability") or "")
     action_ids = {action.action_id for action in outcome.response.actions}
     text = outcome.response.text.casefold()
+    next_step = getattr(outcome.response, "next_step", None)
+    next_step_kind = getattr(next_step, "kind", None)
 
     if str(outcome.status) == "RECOVERABLE_FAILURE":
         use_case = ResponseUseCase.ERROR_RECOVERY
     elif outcome.response.request_location:
         use_case = ResponseUseCase.LOCATION_REQUEST
+    elif next_step_kind == NextStepKind.SYSTEM_WAIT:
+        use_case = ResponseUseCase.ORDER_STATUS
     elif capability in MEMORY_CAPABILITIES:
         use_case = ResponseUseCase.MEMORY_CONTROL
     elif metadata.get("clarification_required"):

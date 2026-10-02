@@ -27,8 +27,7 @@ from apps.messaging.domain.dtos import NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
 from apps.orders.domain.enums import OrderStatus
 from apps.orders.infrastructure.models import Order
-from apps.stores.domain.enums import StoreMembershipRole
-from apps.stores.domain.enums import StoreOfferStatus
+from apps.stores.domain.enums import StoreMembershipRole, StoreOfferStatus
 from apps.stores.infrastructure.models import Store, StoreMembership, StoreOffer
 from apps.telegram.adapters.inbound import parse_telegram_update
 from apps.whatsapp.adapters.inbound import parse_whatsapp_webhook
@@ -131,7 +130,8 @@ def test_workspace_catalog_action_hands_control_to_existing_catalog_flow():
     listed = app.process_message(
         conversation, inbound("list", text="Voir mon catalogue")
     )
-    assert listed.response.text == "Votre catalogue est vide."
+    assert listed.response.text.startswith("Votre catalogue est vide.")
+    assert "Décrivez le produit" in listed.response.text
     assert context.metadata["seller_store_id"] == str(store.id)
 
 

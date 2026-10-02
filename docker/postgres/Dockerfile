@@ -15,6 +15,10 @@ RUN printf '%s\n' \
       'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bullseye-security main' \
       > /etc/apt/sources.list \
     && rm -f /etc/apt/sources.list.d/debian.sources \
+    # PGDG no longer serves the archived Bullseye distribution from its live
+    # repository.  Keep the base image's matching PostgreSQL packages, but
+    # resolve them from its official archive so local Docker tests can build.
+    && sed -i 's|http://apt\.postgresql\.org/pub/repos/apt|https://apt-archive.postgresql.org/pub/repos/apt|g' /etc/apt/sources.list.d/pgdg.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
         build-essential \

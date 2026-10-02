@@ -29,3 +29,14 @@ class WhatsAppInteractiveMessage:
     header_text: str | None = None
     footer_text: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class WhatsAppInteractiveListMessage:
+    recipient_external_id: str
+    body: str
+    rows: list[WhatsAppReplyButton]
+    button_label: str = "Choisir"
+    header_text: str | None = None
+    footer_text: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)

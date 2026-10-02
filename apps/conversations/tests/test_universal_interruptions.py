@@ -245,7 +245,8 @@ def test_natural_pause_sentence_is_understood_with_active_task_context():
     }
     assert "pause" in outcome.response.text
     assert context.suspended_tasks[-1].kind == ConversationTaskKind.SELLER_ONBOARDING
-    assert context.seller_onboarding.store_name == "Chez Louis"
+    assert context.seller_onboarding is None
+    assert context.suspended_tasks[-1].seller_onboarding.store_name == "Chez Louis"
 
 
 @pytest.mark.django_db
@@ -646,13 +647,31 @@ def test_structured_topic_switch_suspends_seller_and_resume_restores_it():
     convo.save(update_fields=["context", "updated_at"])
     app = ConversationalOrchestrator(understanding_service=UnderstandingQueue())
 
-    app.process_message(
+    switch = app.process_message(
         convo,
         message(action_id="journey.select.buy", message_id="switch-buy"),
     )
+    assert switch.metadata["journey_switch_confirmation"] is True
+    app.process_message(
+        convo,
+        message(
+            action_id="journey.switch.confirm.buy",
+            message_id="confirm-buy",
+        ),
+    )
     convo.refresh_from_db()
     switched = ConversationContext.from_payload(convo.context)
-    app.process_message(convo, message("reprendre", message_id="resume-seller"))
+    resume = app.process_message(
+        convo, message("reprendre", message_id="resume-seller")
+    )
+    assert resume.metadata["journey_switch_confirmation"] is True
+    app.process_message(
+        convo,
+        message(
+            action_id="journey.switch.confirm.sell",
+            message_id="confirm-seller",
+        ),
+    )
 
     convo.refresh_from_db()
     resumed = ConversationContext.from_payload(convo.context)

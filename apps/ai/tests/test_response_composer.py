@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from apps.ai.application.composer import NaturalResponseComposer
 from apps.ai.application.response_evaluation import evaluate_response
 from apps.ai.domain.response import ResponseBrief
+from apps.conversations.application.next_steps import system_wait
 from apps.conversations.application.orchestrator import ResponseAction, ResponsePlan
 
 
@@ -57,6 +58,20 @@ def test_composer_rejects_a_novel_number_and_returns_baseline():
 
     composed, accepted = NaturalResponseComposer(
         StubAI("Ta commande contient 3 articles.")
+    ).compose(brief(response.text), response)
+
+    assert accepted is False
+    assert composed is response
+
+
+def test_composer_cannot_remove_a_structured_wait_instruction():
+    response = ResponsePlan(
+        text="Recherche en cours. Vous n'avez rien à faire pour l'instant.",
+        next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
+    )
+
+    composed, accepted = NaturalResponseComposer(
+        StubAI("Recherche en cours.")
     ).compose(brief(response.text), response)
 
     assert accepted is False

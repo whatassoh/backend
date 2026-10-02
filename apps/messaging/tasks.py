@@ -57,9 +57,11 @@ def deliver_conversation_outbox(self, outbox_item_id, correlation_id=None):
 
     from apps.messaging.application.reliable_pipeline import (
         claim_outbox,
+        conversation_outbox_retry_delay,
         deliver_claimed_outbox,
         record_outbox_failure,
     )
+    from apps.messaging.infrastructure.models import ConversationOutboxItem
 
     token = claim_outbox(outbox_item_id)
     if token is None:
@@ -69,9 +71,16 @@ def deliver_conversation_outbox(self, outbox_item_id, correlation_id=None):
     except Exception as exc:
         status = record_outbox_failure(outbox_item_id, token, exc)
         if status == "FAILED_RETRYABLE":
+            attempts = (
+                ConversationOutboxItem.objects.only("attempts")
+                .get(pk=outbox_item_id)
+                .attempts
+            )
             raise self.retry(
                 exc=exc,
-                countdown=_conversation_retry_countdown(self.request.retries),
+                countdown=conversation_outbox_retry_delay(
+                    FailureClassifier.classify(exc), attempts
+                ),
                 max_retries=settings.CONVERSATION_OUTBOX_MAX_ATTEMPTS - 1,
             ) from exc
         return {"status": status}

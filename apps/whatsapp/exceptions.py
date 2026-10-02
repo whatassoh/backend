@@ -14,11 +14,13 @@ class WhatsAppAPIError(WhatsAppError):
         status_code: int | None = None,
         response_data: dict | None = None,
         retryable: bool = False,
+        retry_after: int | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_data = response_data or {}
         self.retryable = retryable
+        self.retry_after = retry_after
 
 
 class WhatsAppAuthenticationError(WhatsAppAPIError):

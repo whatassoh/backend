@@ -5,6 +5,10 @@ import logging
 from apps.messaging.domain.enums import MessagingChannel
 from apps.messaging.domain.exceptions import MessagingError
 from apps.telegram.exceptions import TelegramError
+from apps.whatsapp.domain.response_validation import (
+    WhatsAppInteractiveMode,
+    validate_response_for_channel,
+)
 from apps.whatsapp.exceptions import WhatsAppError
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,7 @@ def deliver_outcome_response(*, conversation, outcome, correlation_id=None) -> b
 
 def send_response_plan(*, conversation, response, correlation_id=None):
     """Use provider adapters only after business routing has produced a plan."""
+    whatsapp_mode = validate_response_for_channel(response, conversation.channel)
     if not response.actions:
         from apps.messaging.application.orchestration import send_conversation_text
 
@@ -76,17 +81,29 @@ def send_response_plan(*, conversation, response, correlation_id=None):
     ]
     if conversation.channel == MessagingChannel.WHATSAPP:
         from apps.whatsapp.application.outbound import (
+            send_whatsapp_interactive_list,
             send_whatsapp_interactive_reply_buttons,
         )
         from apps.whatsapp.domain.dtos import WhatsAppReplyButton
 
-        return send_whatsapp_interactive_reply_buttons(
+        sender = (
+            send_whatsapp_interactive_reply_buttons
+            if whatsapp_mode == WhatsAppInteractiveMode.REPLY_BUTTONS
+            else send_whatsapp_interactive_list
+        )
+        whatsapp_actions = [
+            WhatsAppReplyButton(action_id=item["id"], label=item["label"])
+            for item in actions
+        ]
+        interactive_argument = (
+            {"buttons": whatsapp_actions}
+            if whatsapp_mode == WhatsAppInteractiveMode.REPLY_BUTTONS
+            else {"rows": whatsapp_actions}
+        )
+        return sender(
             conversation=conversation,
             body=response.text,
-            buttons=[
-                WhatsAppReplyButton(action_id=item["id"], label=item["label"])
-                for item in actions
-            ],
+            **interactive_argument,
             metadata={"response_actions": actions, **response.metadata},
         )
     from apps.messaging.application.orchestration import send

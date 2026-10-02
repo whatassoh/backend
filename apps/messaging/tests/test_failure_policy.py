@@ -18,16 +18,68 @@ from apps.whatsapp.exceptions import WhatsAppAPIError
 
 def test_provider_failures_are_classified_without_business_outcomes():
     assert FailureClassifier.classify(MessagingTemporaryError("timeout")).retryable
-    rate_limited = FailureClassifier.classify(MessagingRateLimitError("slow", retry_after=12))
-    assert rate_limited.category == "RATE_LIMITED"
+    rate_limited = FailureClassifier.classify(
+        MessagingRateLimitError("slow", retry_after=12)
+    )
+    assert rate_limited.category == "RATE_LIMIT"
     assert rate_limited.retry_after == 12
-    assert not FailureClassifier.classify(MessagingPermanentError("bad request")).retryable
-    assert FailureClassifier.classify(MessagingAuthenticationError("bad token")).category == "AUTHENTICATION"
+    assert not FailureClassifier.classify(
+        MessagingPermanentError("bad request")
+    ).retryable
+    assert (
+        FailureClassifier.classify(MessagingAuthenticationError("bad token")).category
+        == "CONFIGURATION"
+    )
     assert not FailureClassifier.classify(IntegrityError("constraint")).retryable
     assert FailureClassifier.classify(RedisConnectionError("redis down")).retryable
-    assert FailureClassifier.classify(WhatsAppAPIError("outage", retryable=True)).retryable
-    assert FailureClassifier.classify(TelegramRateLimitError("slow", retry_after=9)).retry_after == 9
-    assert FailureClassifier.classify(WhatsAppTemplateConfigurationError("missing")).category == "CONFIGURATION"
+    assert FailureClassifier.classify(
+        WhatsAppAPIError("outage", retryable=True)
+    ).retryable
+    assert (
+        FailureClassifier.classify(
+            TelegramRateLimitError("slow", retry_after=9)
+        ).retry_after
+        == 9
+    )
+    assert (
+        FailureClassifier.classify(
+            WhatsAppTemplateConfigurationError("missing")
+        ).category
+        == "CONFIGURATION"
+    )
+
+
+def test_whatsapp_http_and_meta_errors_have_explicit_categories():
+    assert (
+        FailureClassifier.classify(WhatsAppAPIError("outage", status_code=503)).category
+        == "TRANSIENT_PROVIDER"
+    )
+    assert (
+        FailureClassifier.classify(
+            WhatsAppAPIError(
+                "bad payload",
+                status_code=400,
+                response_data={"error": {"code": 100}},
+            )
+        ).category
+        == "PERMANENT_PAYLOAD"
+    )
+    assert (
+        FailureClassifier.classify(
+            WhatsAppAPIError(
+                "recipient unavailable",
+                status_code=400,
+                response_data={"error": {"code": 131026}},
+            )
+        ).category
+        == "PERMANENT_PROVIDER"
+    )
+    assert (
+        FailureClassifier.classify(
+            WhatsAppAPIError("bad token", status_code=401)
+        ).category
+        == "CONFIGURATION"
+    )
 
 
 def test_backoff_is_bounded_and_honours_retry_after(settings):

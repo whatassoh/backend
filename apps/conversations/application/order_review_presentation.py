@@ -36,7 +36,6 @@ class OrderReviewPresenter:
                 actions=(
                     ("order.confirm", "Confirmer"),
                     ("order.modify", "Modifier"),
-                    ("order.change_location", "Modifier l'adresse"),
                     ("order.cancel", "Annuler"),
                 ),
             )

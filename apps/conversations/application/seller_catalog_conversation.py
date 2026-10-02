@@ -198,7 +198,9 @@ class SellerCatalogConversationService:
                 "seller_catalog_mutation_cancelled",
                 extra={"correlation_id": correlation_id},
             )
-            return CatalogConversationOutcome(text="Modification du catalogue annulée.")
+            return CatalogConversationOutcome(
+                text="Modification du catalogue annulée. Que souhaitez-vous faire maintenant ?"
+            )
         if action_id == self.modify_action:
             self._clear(conversation, context)
             return CatalogConversationOutcome(
@@ -323,7 +325,9 @@ class SellerCatalogConversationService:
             "seller_catalog_mutation_confirmed",
             extra={"action": pending.action, "correlation_id": correlation_id},
         )
-        return CatalogConversationOutcome(text="Catalogue mis à jour.")
+        return CatalogConversationOutcome(
+            text="Catalogue mis à jour. Que souhaitez-vous faire maintenant ?"
+        )
 
     def _apply(self, actor, pending, correlation_id):
         if pending.action == SellerCatalogAction.ADD:
@@ -383,7 +387,9 @@ class SellerCatalogConversationService:
             )
         items = result.items[:10]
         if not items:
-            return CatalogConversationOutcome(text="Votre catalogue est vide.")
+            return CatalogConversationOutcome(
+                text="Votre catalogue est vide. Décrivez le produit que vous souhaitez ajouter."
+            )
         suffix = "\n…" if len(result.items) > len(items) else ""
         return CatalogConversationOutcome(
             text="Votre catalogue :\n"
@@ -392,6 +398,7 @@ class SellerCatalogConversationService:
                 for item in items
             )
             + suffix
+            + "\n\nDécrivez la prochaine modification que vous souhaitez faire.",
         )
 
     @staticmethod
