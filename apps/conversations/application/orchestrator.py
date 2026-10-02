@@ -71,7 +71,9 @@ from apps.conversations.application.order_building import (
     ItemTargetStatus,
     OrderBuildingService,
 )
-from apps.conversations.application.order_review_presentation import OrderReviewPresenter
+from apps.conversations.application.order_review_presentation import (
+    OrderReviewPresenter,
+)
 from apps.conversations.application.product_discovery import (
     ProductDiscoveryConversationService,
 )
@@ -91,8 +93,8 @@ from apps.conversations.domain.context import (
     ConversationSocialState,
     ConversationTaskKind,
     DriverOnboardingStage,
-    PendingJourneySwitch,
     PendingClarification,
+    PendingJourneySwitch,
     SellerOnboardingStage,
 )
 from apps.conversations.infrastructure.models import Conversation
@@ -618,6 +620,13 @@ class ConversationalOrchestrator:
             return self._memory_show_outcome(conversation, context)
         if understanding.intent == MessageIntent.MEMORY_FORGET:
             return self._memory_forget_outcome(conversation, context)
+        # A social turn must not be interpreted as an answer to a saved order
+        # slot merely because that slot is active.  The pre-router deliberately
+        # leaves persisted slots intact; preserve that behaviour here too.
+        if understanding.intent == MessageIntent.GREETING:
+            return self._with_arbitration(
+                self._social_greeting(conversation, context), "light_interruption"
+            )
         capability = classify_capability(understanding.intent)
         logger.info(
             "conversation_capability_classified",
@@ -647,6 +656,12 @@ class ConversationalOrchestrator:
             return self._select_journey(conversation, context, ActiveJourney.DELIVER)
         if understanding.intent == MessageIntent.CREATE_OR_UPDATE_ORDER:
             if context.active_journey != ActiveJourney.BUY:
+                if context.active_journey is None and active_task_kind(context) is None:
+                    self.journey_routing_service.select(conversation, ActiveJourney.BUY)
+                    context = self.context_service.get_context(conversation)
+                    return self._handle_order_items(
+                        conversation, context, understanding, correlation_id
+                    )
                 # Creating an order is an explicit request to enter BUY.  It
                 # cannot silently overwrite a foreground seller/driver task.
                 return self._select_journey(
@@ -709,6 +724,9 @@ class ConversationalOrchestrator:
         ):
             # A textual yes is meaningful only after this conversation presented a review.
             if context.flow != ConversationFlow.AWAITING_CONFIRMATION:
+                confirmed = self._confirmed_order_wait_outcome(conversation, context)
+                if confirmed is not None:
+                    return confirmed
                 return self._outcome(
                     ConversationalOutcomeStatus.PROCESSED,
                     "Je peux confirmer une commande après son récapitulatif. Que souhaitez-vous commander ?",
@@ -745,20 +763,23 @@ class ConversationalOrchestrator:
     @staticmethod
     def _is_location_edit_reply(context, text):
         pending = context.pending_clarification
-        if (
-            not text
-            or pending is None
-            or pending.metadata.get("operation") != OrderAction.MODIFY.value
-        ):
+        if not text or context.active_journey != ActiveJourney.BUY:
             return False
         normalized = re.sub(r"[^a-zà-ÿ\s]", " ", text.casefold())
-        return any(
+        mentions_location = any(
             phrase in " ".join(normalized.split())
             for phrase in (
                 "localisation",
                 "adresse",
                 "position",
                 "lieu de livraison",
+            )
+        )
+        return mentions_location and (
+            context.active_order_id is not None
+            or (
+                pending is not None
+                and pending.metadata.get("operation") == OrderAction.MODIFY.value
             )
         )
 
@@ -873,7 +894,16 @@ class ConversationalOrchestrator:
     ):
         """Ask before replacing foreground work; never suspend on mere intent."""
 
-        if context.active_journey is None or context.active_journey == target:
+        source = context.active_journey
+        if source is None:
+            source = {
+                ConversationTaskKind.ORDER: ActiveJourney.BUY,
+                ConversationTaskKind.DELIVERY_INSTRUCTIONS: ActiveJourney.BUY,
+                ConversationTaskKind.SELLER_ONBOARDING: ActiveJourney.SELL,
+                ConversationTaskKind.SELLER_CATALOG: ActiveJourney.SELL,
+                ConversationTaskKind.DRIVER_ONBOARDING: ActiveJourney.DELIVER,
+            }.get(active_task_kind(context))
+        if source is None or source == target:
             return self._select_journey(conversation, context, target)
         mission = self._active_delivery_mission(conversation)
         if mission is not None and target != ActiveJourney.DELIVER:
@@ -894,8 +924,19 @@ class ConversationalOrchestrator:
                 ),
                 metadata={"journey_switch_blocked": "ACTIVE_DELIVERY"},
             )
+        if active_task_kind(context) is None and resume_task_kind is None:
+            availability_notice = self._set_driver_offline_on_journey_exit(
+                conversation, source, target
+            )
+            outcome = self._select_journey(
+                conversation, context, target, skip_switch=True
+            )
+            notice = f"Vous passez en mode {self._journey_label(target)}."
+            return self._with_journey_switch_notice(
+                outcome, notice + availability_notice
+            )
         pending = PendingJourneySwitch(
-            source=context.active_journey,
+            source=source,
             target=target,
             requested_at=timezone.now().isoformat(),
             resume_task_kind=resume_task_kind,
@@ -1024,17 +1065,21 @@ class ConversationalOrchestrator:
         if mission is not None and target != ActiveJourney.DELIVER:
             return self._request_journey_switch(conversation, context, target)
         source = pending.source
+        availability_notice = self._set_driver_offline_on_journey_exit(
+            conversation, source, target
+        )
         suspended, task = suspend_active_task(
             replace(context, pending_journey_switch=None), reason="journey_switch"
         )
-        if task is None:
+        if task is None and pending.resume_task_kind is None:
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
                 "Aucun parcours actif ne peut être mis en attente.",
                 context,
             )
-        updated = self.context_service.update_context(conversation, suspended)
-        conversation.context = updated.context
+        if task is not None:
+            updated = self.context_service.update_context(conversation, suspended)
+            conversation.context = updated.context
         if pending.resume_task_kind is not None:
             resumed = resume_last_task(
                 suspended, target=pending.resume_task_kind
@@ -1045,16 +1090,22 @@ class ConversationalOrchestrator:
                     "Le parcours demandé n'est plus disponible.",
                     suspended,
                 )
-            self.context_service.update_context(conversation, resumed.context)
+            updated = self.context_service.update_context(conversation, resumed.context)
+            conversation.context = updated.context
+            outcome = self._present_restored_task(
+                conversation, resumed.context, resumed.task, correlation_id
+            )
+            if task is None:
+                return outcome
             return self._with_journey_switch_notice(
-                self._present_restored_task(
-                    conversation, resumed.context, resumed.task, correlation_id
-                ),
-                f"Le parcours {self._journey_label(source)} a été mis en attente.",
+                outcome,
+                f"Le parcours {self._journey_label(source)} a été mis en attente."
+                f"{availability_notice}",
             )
         return self._with_journey_switch_notice(
             self._select_journey(conversation, suspended, target),
-            f"Le parcours {self._journey_label(source)} a été mis en attente.",
+            f"Le parcours {self._journey_label(source)} a été mis en attente."
+            f"{availability_notice}",
         )
 
     def _active_delivery_mission(self, conversation):
@@ -1068,6 +1119,23 @@ class ConversationalOrchestrator:
             return DeliveryExecutionService().get_active_mission(conversation.user)
         except (DeliveryMissionAuthorizationError, DeliveryMissionNotFound):
             return None
+
+    @staticmethod
+    def _set_driver_offline_on_journey_exit(conversation, source, target):
+        if source != ActiveJourney.DELIVER or target == ActiveJourney.DELIVER:
+            return ""
+        from apps.drivers.application.availability import DriverAvailabilityService
+        from apps.drivers.domain.enums import DriverAvailability
+        from apps.drivers.infrastructure.models import DriverProfile
+
+        driver = DriverProfile.objects.filter(user=conversation.user).first()
+        if driver is None or driver.availability_status != DriverAvailability.AVAILABLE:
+            return ""
+        DriverAvailabilityService().set_offline(driver, conversation.user)
+        return (
+            " Votre profil livreur est conservé, mais vous êtes maintenant "
+            "indisponible pour de nouvelles courses."
+        )
 
     def _present_active_journey(self, conversation, context, correlation_id):
         kind = active_task_kind(context)
@@ -1118,8 +1186,8 @@ class ConversationalOrchestrator:
             ActiveJourney.DELIVER: "livreur",
         }.get(journey, "demandé")
 
-    def _select_journey(self, conversation, context, journey):
-        if context.active_journey not in {None, journey}:
+    def _select_journey(self, conversation, context, journey, *, skip_switch=False):
+        if not skip_switch and context.active_journey not in {None, journey}:
             return self._request_journey_switch(conversation, context, journey)
         decision = self.journey_routing_service.select(conversation, journey)
         metadata = {**context.metadata}
@@ -1845,18 +1913,35 @@ class ConversationalOrchestrator:
         )
         order = decision.order
         if order is None:
+            if decision.requires_user_choice:
+                return self._request_journey_switch(
+                    conversation, context, ActiveJourney.BUY
+                )
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
                 "Cette conversation est fermée; démarrez une nouvelle conversation pour commander.",
                 context,
             )
         if decision.status.value == "CREATED":
+            metadata = dict(context.metadata)
+            metadata.pop("awaiting_delivery_instructions", None)
+            metadata.pop("delivery_instructions_decided", None)
+            metadata.pop("last_confirmed_order_id", None)
             context = replace(
                 context,
                 active_order_id=str(order.id),
                 flow=ConversationFlow.ORDER_BUILDING,
+                metadata=metadata,
             )
             self.context_service.update_context(conversation, context)
+            logger.info(
+                "customer_order_draft_created",
+                extra={
+                    "order_id": str(order.id),
+                    "conversation_id": str(conversation.id),
+                    "correlation_id": correlation_id,
+                },
+            )
         unresolved = []
         for item, resolution in zip(understanding.items, resolutions, strict=True):
             if item.quantity is None or item.unit is None:
@@ -1870,6 +1955,14 @@ class ConversationalOrchestrator:
                     resolution,
                     actor=conversation.user,
                     correlation_id=correlation_id,
+                )
+                logger.info(
+                    "customer_order_item_added",
+                    extra={
+                        "order_id": str(order.id),
+                        "conversation_id": str(conversation.id),
+                        "correlation_id": correlation_id,
+                    },
                 )
         if unresolved:
             item, resolution, reason = unresolved[0]
@@ -1950,22 +2043,12 @@ class ConversationalOrchestrator:
             return self._ask_for_item_slots(
                 context, pending, actions=("order_draft_updated",)
             )
-        unmatched = self._unmatched_outcome(conversation, context, order)
-        if unmatched is not None:
-            return unmatched
-        mark_awaiting_location(
-            order, actor=conversation.user, correlation_id=correlation_id
-        )
-        location_decision = self.clarification_engine.decide(
-            context=context, requires_location=True
-        )
-        self.context_service.set_pending_clarification(
+        return self._advance_order_after_items(
             conversation,
-            location_decision.pending_clarification,
-            flow=location_decision.next_flow,
-        )
-        return self._from_clarification(
-            location_decision, context, actions=("order_draft_updated",)
+            context,
+            order,
+            correlation_id,
+            action="order_draft_updated",
         )
 
     def _handle_modify(
@@ -2233,6 +2316,9 @@ class ConversationalOrchestrator:
             self.order_building_service.remove(
                 target.item, actor=conversation.user, correlation_id=correlation_id
             )
+            self.context_service.clear_pending_clarification(
+                conversation, flow=ConversationFlow.ORDER_BUILDING
+            )
             return self._modified_outcome(conversation, order, "unmatched_item_removed")
         if pending.metadata.get("operation") == "UNMATCHED_ITEM_REPLACE":
             return self._outcome(
@@ -2265,9 +2351,22 @@ class ConversationalOrchestrator:
         )
 
     def _modified_outcome(self, conversation, order, action):
+        return self._advance_order_after_items(
+            conversation,
+            self.context_service.get_context(conversation),
+            order,
+            correlation_id=None,
+            action=action,
+        )
+
+    def _advance_order_after_items(
+        self, conversation, context, order, correlation_id, *, action
+    ):
+        """Move a persisted editable basket to its next real customer step."""
+
         order.refresh_from_db()
         unmatched = self._unmatched_outcome(
-            conversation, self.context_service.get_context(conversation), order
+            conversation, self.context_service.get_context(conversation), order, action
         )
         if unmatched is not None:
             return unmatched
@@ -2287,12 +2386,62 @@ class ConversationalOrchestrator:
                 actions_performed=(action,),
                 active_order_id=str(order.id),
             )
+        latest_context = self.context_service.get_context(conversation)
+        if order.delivery_location is None:
+            mark_awaiting_location(
+                order, actor=conversation.user, correlation_id=correlation_id
+            )
+            location_decision = self.clarification_engine.decide(
+                context=latest_context, requires_location=True
+            )
+            self.context_service.set_pending_clarification(
+                conversation,
+                location_decision.pending_clarification,
+                flow=location_decision.next_flow,
+            )
+            return self._from_clarification(
+                location_decision, latest_context, actions=(action,)
+            )
+        if latest_context.metadata.get("awaiting_delivery_instructions"):
+            return self._delivery_instructions_prompt(order, action=action)
+        if not latest_context.metadata.get("delivery_instructions_decided"):
+            requested = replace(
+                latest_context,
+                flow=ConversationFlow.ORDER_BUILDING,
+                pending_clarification=None,
+                metadata={
+                    **latest_context.metadata,
+                    "awaiting_delivery_instructions": True,
+                },
+            )
+            self.context_service.update_context(conversation, requested)
+            return self._delivery_instructions_prompt(order, action=action)
         self.context_service.clear_pending_clarification(
             conversation, flow=ConversationFlow.AWAITING_CONFIRMATION
         )
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
             response=self._recap(order),
+            actions_performed=(action,),
+            active_order_id=str(order.id),
+            requires_followup=True,
+        )
+
+    def _delivery_instructions_prompt(self, order, *, action):
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=ResponsePlan(
+                text=(
+                    "Position enregistrée. Souhaitez-vous ajouter une indication "
+                    "pour le livreur ?"
+                ),
+                actions=(
+                    ResponseAction(
+                        action_id="order.skip_delivery_instructions",
+                        label="Non, continuer",
+                    ),
+                ),
+            ),
             actions_performed=(action,),
             active_order_id=str(order.id),
             requires_followup=True,
@@ -2331,31 +2480,37 @@ class ConversationalOrchestrator:
                 "order_status": order.status,
             },
         )
+        metadata = {
+            **context.metadata,
+            "awaiting_delivery_instructions": True,
+        }
+        if metadata.get("delivery_instructions_decided"):
+            metadata["awaiting_delivery_instructions"] = False
+            context = replace(
+                context,
+                flow=ConversationFlow.AWAITING_CONFIRMATION,
+                active_order_id=str(order.id),
+                pending_clarification=None,
+                metadata=metadata,
+            )
+            self.context_service.update_context(conversation, context)
+            return ConversationalOutcome(
+                status=ConversationalOutcomeStatus.PROCESSED,
+                response=self._recap(order),
+                actions_performed=("delivery_location_set",),
+                active_order_id=str(order.id),
+                requires_followup=True,
+            )
         context = replace(
             context,
             flow=ConversationFlow.ORDER_BUILDING,
             active_order_id=str(order.id),
             pending_clarification=None,
-            metadata={
-                **context.metadata,
-                "awaiting_delivery_instructions": True,
-            },
+            metadata=metadata,
         )
         self.context_service.update_context(conversation, context)
-        return ConversationalOutcome(
-            status=ConversationalOutcomeStatus.PROCESSED,
-            response=ResponsePlan(
-                text="Position enregistrée. Souhaitez-vous ajouter une indication pour le livreur ?",
-                actions=(
-                    ResponseAction(
-                        action_id="order.skip_delivery_instructions",
-                        label="Non, continuer",
-                    ),
-                ),
-            ),
-            actions_performed=("delivery_location_set",),
-            active_order_id=str(order.id),
-            requires_followup=True,
+        return self._delivery_instructions_prompt(
+            order, action="delivery_location_set"
         )
 
     def _handle_driver_location(self, conversation, context, message):
@@ -2581,7 +2736,9 @@ class ConversationalOrchestrator:
                     actor=conversation.user, target=target
                 )
                 if len(orders) > 1:
-                    from apps.stores.application.preparation import encode_store_order_action
+                    from apps.stores.application.preparation import (
+                        encode_store_order_action,
+                    )
 
                     return self._outcome(
                         ConversationalOutcomeStatus.PROCESSED,
@@ -2643,6 +2800,9 @@ class ConversationalOrchestrator:
             )
         if action_id == "order.confirm":
             if context.flow != ConversationFlow.AWAITING_CONFIRMATION:
+                confirmed = self._confirmed_order_wait_outcome(conversation, context)
+                if confirmed is not None:
+                    return confirmed
                 return self._outcome(
                     ConversationalOutcomeStatus.REJECTED,
                     (
@@ -2704,6 +2864,7 @@ class ConversationalOrchestrator:
                 metadata={
                     **context.metadata,
                     "awaiting_delivery_instructions": False,
+                    "delivery_instructions_decided": True,
                 },
             )
             self.context_service.update_context(conversation, context)
@@ -2799,6 +2960,9 @@ class ConversationalOrchestrator:
     ):
         order = self._active_order(conversation, context)
         if order is None:
+            confirmed = self._confirmed_order_wait_outcome(conversation, context)
+            if confirmed is not None:
+                return confirmed
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
                 "Aucune commande active à confirmer.",
@@ -2828,6 +2992,8 @@ class ConversationalOrchestrator:
         latest_context = self.context_service.get_context(conversation)
         metadata = dict(latest_context.metadata)
         metadata.pop("awaiting_delivery_instructions", None)
+        metadata.pop("delivery_instructions_decided", None)
+        metadata["last_confirmed_order_id"] = str(order.id)
         self.context_service.update_context(
             conversation,
             replace(
@@ -2837,6 +3003,14 @@ class ConversationalOrchestrator:
                 pending_clarification=None,
                 metadata=metadata,
             ),
+        )
+        logger.info(
+            "customer_order_confirmed",
+            extra={
+                "order_id": str(order.id),
+                "conversation_id": str(conversation.id),
+                "correlation_id": correlation_id,
+            },
         )
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
@@ -2850,6 +3024,34 @@ class ConversationalOrchestrator:
                 next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
             ),
             actions_performed=("order_confirmed",),
+            active_order_id=str(order.id),
+        )
+
+    def _confirmed_order_wait_outcome(self, conversation, context):
+        """Make a delayed duplicate confirmation an idempotent status response."""
+
+        order_id = context.metadata.get("last_confirmed_order_id")
+        if not order_id:
+            return None
+        from apps.orders.infrastructure.models import Order
+
+        order = Order.objects.filter(pk=order_id, customer=conversation.user).first()
+        if order is None or order.status not in {
+            OrderStatus.CONFIRMED,
+            OrderStatus.MATCHING_STORES,
+            OrderStatus.STORE_OFFERED,
+        }:
+            return None
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=ResponsePlan(
+                text=(
+                    "Votre commande est déjà confirmée. Nous recherchons une "
+                    "boutique ; vous n'avez rien à faire pour l'instant."
+                ),
+                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
+            ),
+            actions_performed=("order_confirmation_replayed",),
             active_order_id=str(order.id),
         )
 
@@ -2880,6 +3082,7 @@ class ConversationalOrchestrator:
         building = self.active_order_service.get_active_order(
             conversation, correlation_id=correlation_id
         ).order
+        suspended_draft = self._suspended_buy_order(conversation, context)
         persisted = list(
             get_customer_orders(conversation.user)
             .exclude(status__in={OrderStatus.DRAFT, OrderStatus.AWAITING_LOCATION})
@@ -2916,6 +3119,10 @@ class ConversationalOrchestrator:
             )
         if building is not None:
             return self._cancel_active_order(conversation, context, correlation_id)
+        if suspended_draft is not None:
+            return self._cancel_suspended_order(
+                conversation, context, suspended_draft, correlation_id
+            )
         if not persisted:
             return self._outcome(
                 ConversationalOutcomeStatus.REJECTED,
@@ -2945,6 +3152,58 @@ class ConversationalOrchestrator:
             conversation, context, persisted[0], correlation_id
         )
 
+    @staticmethod
+    def _suspended_buy_order(conversation, context):
+        """Find the one resumable customer draft without foregrounding it."""
+
+        suspended_ids = [
+            task.active_order_id
+            for task in context.suspended_tasks
+            if task.journey == ActiveJourney.BUY and task.active_order_id
+        ]
+        if not suspended_ids:
+            return None
+        return (
+            get_customer_orders(conversation.user)
+            .filter(pk__in=suspended_ids)
+            .filter(status__in=ActiveCustomerOrderService.active_statuses)
+            .order_by("-created_at")
+            .first()
+        )
+
+    def _cancel_suspended_order(self, conversation, context, order, correlation_id):
+        try:
+            cancelled = cancel_order(
+                order,
+                OrderCancellationCode.CUSTOMER_REQUEST,
+                actor=conversation.user,
+                correlation_id=correlation_id,
+            )
+        except InvalidOrderTransition:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                f"La commande {order.reference} ne peut plus être annulée à cette étape.",
+                context,
+            )
+        self._discard_suspended_order(conversation, context, cancelled.id)
+        return self._outcome(
+            ConversationalOutcomeStatus.PROCESSED,
+            f"La commande {cancelled.reference} en attente est annulée.",
+            self.context_service.get_context(conversation),
+            metadata={"capability": "cancel_order", "order_id": str(cancelled.id)},
+        )
+
+    def _discard_suspended_order(self, conversation, context, order_id):
+        updated = replace(
+            context,
+            suspended_tasks=tuple(
+                task
+                for task in context.suspended_tasks
+                if task.active_order_id != str(order_id)
+            ),
+        )
+        self.context_service.update_context(conversation, updated)
+
     def _cancel_persisted_order(
         self, conversation, context, order, correlation_id
     ):
@@ -2967,10 +3226,11 @@ class ConversationalOrchestrator:
                     "order_status": order.status,
                 },
             )
+        self._discard_suspended_order(conversation, context, cancelled.id)
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
             f"La commande {cancelled.reference} est annulée.",
-            context,
+            self.context_service.get_context(conversation),
             metadata={
                 "capability": "cancel_order",
                 "order_id": str(cancelled.id),
@@ -3311,7 +3571,11 @@ class ConversationalOrchestrator:
         context = replace(
             context,
             flow=ConversationFlow.AWAITING_CONFIRMATION,
-            metadata={**context.metadata, "awaiting_delivery_instructions": False},
+            metadata={
+                **context.metadata,
+                "awaiting_delivery_instructions": False,
+                "delivery_instructions_decided": True,
+            },
         )
         self.context_service.update_context(conversation, context)
         return ConversationalOutcome(
@@ -4302,7 +4566,8 @@ class ConversationalOrchestrator:
         resumed = resume_last_task(context, target=target_kind)
         if resumed.task is not None:
             context = resumed.context
-            self.context_service.update_context(conversation, context)
+            updated = self.context_service.update_context(conversation, context)
+            conversation.context = updated.context
             kind = resumed.task.kind
             if kind == ConversationTaskKind.SELLER_ONBOARDING:
                 return self._present_restored_task(
@@ -4400,8 +4665,7 @@ class ConversationalOrchestrator:
             notes=values.get("notes"),
         )
 
-    @staticmethod
-    def _merge_item_draft(values, candidate):
+    def _merge_item_draft(self, values, candidate):
         merged = dict(values or {})
         if candidate is None:
             return merged
@@ -4701,6 +4965,9 @@ class ConversationalOrchestrator:
             resolution,
             actor=conversation.user,
             correlation_id=correlation_id,
+        )
+        self.context_service.clear_pending_clarification(
+            conversation, flow=ConversationFlow.ORDER_BUILDING
         )
         return self._modified_outcome(conversation, order, "unmatched_item_replaced")
 

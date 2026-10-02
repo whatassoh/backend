@@ -279,7 +279,7 @@ class DriverWorkspaceService:
         if matchability.status == DriverMatchability.MATCHABLE:
             return DriverWorkspaceOutcome(
                 text=(
-                    "Vous êtes disponible et votre position est à jour. "
+                    "Vous êtes prêt à recevoir des propositions : votre position est à jour. "
                     "Vous n'avez rien à faire pour l'instant ; je vous enverrai une "
                     "proposition de course dès qu'une livraison correspond."
                 ),

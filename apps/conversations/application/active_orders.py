@@ -88,7 +88,10 @@ class ActiveCustomerOrderService:
         self, conversation: Conversation, context: ConversationContext, order: Order
     ):
         conversation.context = replace(
-            context, flow=ConversationFlow.ORDER_BUILDING, active_order_id=str(order.id)
+            context,
+            flow=ConversationFlow.ORDER_BUILDING,
+            active_journey=ActiveJourney.BUY,
+            active_order_id=str(order.id),
         ).to_payload()
         conversation.save(update_fields=["context", "updated_at"])
 
@@ -100,6 +103,8 @@ class ActiveCustomerOrderService:
             conversation.context if isinstance(conversation.context, dict) else {}
         )
         active_order_id = raw_context.get("active_order_id", context.active_order_id)
+        if context.active_journey not in {None, ActiveJourney.BUY}:
+            return ActiveOrderDecision(status=ActiveOrderDecisionStatus.NO_ACTIVE_ORDER)
         order_id = self._valid_uuid(active_order_id)
         if order_id is None:
             if active_order_id:
@@ -138,6 +143,8 @@ class ActiveCustomerOrderService:
                 reason=reason,
                 stale_context_detected=True,
             )
+        if context.active_journey is None:
+            self._attach_locked(conversation, context, order)
         return ActiveOrderDecision(status=ActiveOrderDecisionStatus.ACTIVE, order=order)
 
     def _resolve_building_locked(
@@ -222,6 +229,13 @@ class ActiveCustomerOrderService:
                 status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION,
                 reason="conversation_closed",
             )
+        context = self._context(locked)
+        if context.active_journey not in {None, ActiveJourney.BUY}:
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.REQUIRES_USER_CHOICE,
+                reason="another_journey_active",
+                requires_user_choice=True,
+            )
         parsed_id = self._valid_uuid(order_id)
         order = (
             Order.objects.select_for_update()
@@ -239,13 +253,13 @@ class ActiveCustomerOrderService:
                 status=ActiveOrderDecisionStatus.NO_ACTIVE_ORDER,
                 reason="not_resumable",
             )
-        context = self._context(locked)
         # Attaching an existing domain order is a narrow context mutation.  Do
         # not rebuild the dataclass: suspended tasks, onboarding drafts and
         # future context fields must survive this operation.
         locked.context = replace(
             context,
             flow=ConversationFlow.ORDER_BUILDING,
+            active_journey=ActiveJourney.BUY,
             active_order_id=str(order.id),
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
@@ -268,6 +282,13 @@ class ActiveCustomerOrderService:
                 status=ActiveOrderDecisionStatus.CLOSED_CONVERSATION,
                 reason="conversation_closed",
             )
+        context = self._context(locked)
+        if context.active_journey not in {None, ActiveJourney.BUY}:
+            return ActiveOrderDecision(
+                status=ActiveOrderDecisionStatus.REQUIRES_USER_CHOICE,
+                reason="another_journey_active",
+                requires_user_choice=True,
+            )
         decision = self._resolve_building_locked(locked, correlation_id=correlation_id)
         if decision.order:
             self._trace("draft_resumed", locked, decision.order, correlation_id)
@@ -279,6 +300,7 @@ class ActiveCustomerOrderService:
         locked.context = replace(
             context,
             flow=ConversationFlow.ORDER_BUILDING,
+            active_journey=ActiveJourney.BUY,
             active_order_id=str(order.id),
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
@@ -327,6 +349,8 @@ class ActiveCustomerOrderService:
         context = self._context(locked)
         metadata = dict(context.metadata)
         metadata.pop("awaiting_delivery_instructions", None)
+        metadata.pop("delivery_instructions_decided", None)
+        metadata.pop("last_confirmed_order_id", None)
         locked.context = replace(
             context,
             flow=ConversationFlow.IDLE,

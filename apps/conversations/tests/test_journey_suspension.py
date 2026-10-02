@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from apps.ai.domain.understanding import MessageIntent, TaskTarget, UserMessageUnderstanding
+from apps.ai.domain.understanding import (
+    MessageIntent,
+    TaskTarget,
+    UserMessageUnderstanding,
+)
 from apps.conversations.application.active_orders import ActiveCustomerOrderService
 from apps.conversations.application.interruptions import (
     active_task_kind,
@@ -95,7 +99,7 @@ def test_attach_order_preserves_existing_conversation_context():
     convo = conversation()
     order = create_order_draft(customer=convo.user)
     original = ConversationContext(
-        active_journey=ActiveJourney.SELL,
+        active_journey=ActiveJourney.BUY,
         seller_onboarding=SellerOnboardingDraft(
             stage=SellerOnboardingStage.LOCATION,
             store_name="Chez Ada",
@@ -110,7 +114,7 @@ def test_attach_order_preserves_existing_conversation_context():
     convo.refresh_from_db()
     restored = ConversationContext.from_payload(convo.context)
     assert restored.active_order_id == str(order.id)
-    assert restored.active_journey == ActiveJourney.SELL
+    assert restored.active_journey == ActiveJourney.BUY
     assert restored.seller_onboarding == original.seller_onboarding
     assert restored.processed_message_ids == ("kept",)
 
@@ -119,7 +123,7 @@ def test_attach_order_preserves_existing_conversation_context():
 def test_get_or_create_draft_preserves_existing_context():
     convo = conversation()
     original = ConversationContext(
-        active_journey=ActiveJourney.SELL,
+        active_journey=ActiveJourney.BUY,
         seller_onboarding=SellerOnboardingDraft(
             stage=SellerOnboardingStage.NAME,
         ),
@@ -133,6 +137,7 @@ def test_get_or_create_draft_preserves_existing_context():
     convo.refresh_from_db()
     restored = ConversationContext.from_payload(convo.context)
     assert decision.order is not None
+    assert restored.active_journey == ActiveJourney.BUY
     assert restored.active_order_id == str(decision.order.id)
     assert restored.seller_onboarding == original.seller_onboarding
     assert restored.processed_message_ids == ("kept",)
@@ -146,6 +151,8 @@ def test_only_one_journey_is_active_at_a_time():
     assert suspended.active_order_id is None
     assert suspended.pending_clarification is None
     assert len(suspended.suspended_tasks) == 1
+    assert suspended.suspended_tasks[0].pending_clarification == buy_context().pending_clarification
+    assert suspended.suspended_tasks[0].metadata["marker"] == "buy"
 
 
 @pytest.mark.django_db
@@ -196,6 +203,57 @@ def test_confirmed_switch_suspends_buy_and_activates_deliver():
 
 
 @pytest.mark.django_db
+def test_buy_location_can_switch_to_deliver_and_resume_exactly():
+    convo = conversation()
+    order = create_order_draft(customer=convo.user)
+    persist(convo, buy_context(str(order.id), ConversationFlow.AWAITING_LOCATION))
+    app = ConversationalOrchestrator(
+        understanding_service=UnderstandingQueue(understanding(MessageIntent.DELIVER))
+    )
+
+    proposal = app.process_message(convo, inbound("Je veux livrer"))
+    assert proposal.metadata["journey_switch_confirmation"] is True
+    app.process_message(
+        convo,
+        inbound(
+            action_id="journey.switch.confirm.deliver",
+            message_id="confirm-deliver-location",
+        ),
+    )
+    convo.refresh_from_db()
+    switched = ConversationContext.from_payload(convo.context)
+    assert switched.active_journey == ActiveJourney.DELIVER
+    assert switched.active_order_id is None
+    assert switched.suspended_tasks[-1].active_order_id == str(order.id)
+    assert switched.suspended_tasks[-1].flow == ConversationFlow.AWAITING_LOCATION
+
+    resume_app = ConversationalOrchestrator(
+        understanding_service=UnderstandingQueue(
+            understanding(MessageIntent.ORDER_RESUME, task_target=TaskTarget.ORDER)
+        )
+    )
+    resume = resume_app.process_message(
+        convo, inbound("reprendre ma commande", message_id="resume-buy")
+    )
+    assert resume.metadata["journey_switch_confirmation"] is True
+    resume_app.process_message(
+        convo,
+        inbound(
+            action_id="journey.switch.confirm.buy",
+            message_id="confirm-resume-buy",
+        ),
+    )
+
+    convo.refresh_from_db()
+    restored = ConversationContext.from_payload(convo.context)
+    order.refresh_from_db()
+    assert restored.active_journey == ActiveJourney.BUY
+    assert restored.active_order_id == str(order.id)
+    assert restored.flow == ConversationFlow.AWAITING_LOCATION
+    assert order.items.count() == 0
+
+
+@pytest.mark.django_db
 def test_declined_switch_keeps_buy_active():
     convo = conversation()
     order = create_order_draft(customer=convo.user)
@@ -225,7 +283,8 @@ def test_suspended_buy_does_not_consume_driver_messages():
         metadata={},
     )
 
-    assert active_task_kind(driver).value == "JOURNEY"
+    assert active_task_kind(driver) is None
+    assert driver.active_journey == ActiveJourney.DELIVER
     assert driver.pending_clarification is None
     assert driver.suspended_tasks[-1].pending_clarification.item_reference == "huile"
 
@@ -275,18 +334,24 @@ def test_cancelled_suspended_order_is_removed_from_resume_state():
     convo = conversation()
     order = create_order_draft(customer=convo.user)
     paused, _ = suspend_active_task(buy_context(str(order.id)), reason="switch")
-    persist(convo, paused)
-    order.status = OrderStatus.CANCELLED
-    order.save(update_fields=["status", "updated_at"])
+    driver_context = replace(
+        paused,
+        active_journey=ActiveJourney.DELIVER,
+        metadata={},
+    )
+    persist(convo, driver_context)
 
-    restored = resume_last_task(ConversationContext.from_payload(convo.context))
-    persist(convo, restored.context)
-    ActiveCustomerOrderService().get_active_order(convo)
+    ConversationalOrchestrator(understanding_service=UnderstandingQueue())._cancel_suspended_order(
+        convo, driver_context, order, "lot5-cancel-suspended"
+    )
+
     convo.refresh_from_db()
     context = ConversationContext.from_payload(convo.context)
+    order.refresh_from_db()
 
     assert not context.suspended_tasks
-    assert context.active_order_id is None
+    assert context.active_journey == ActiveJourney.DELIVER
+    assert order.status == OrderStatus.CANCELLED
 
 
 @pytest.mark.django_db
@@ -321,6 +386,55 @@ def test_switch_preserves_processed_message_ids_and_other_context_fields():
 
     assert restored.context.processed_message_ids == ("already-processed",)
     assert restored.context.metadata["marker"] == "buy"
+
+
+@pytest.mark.django_db
+def test_legacy_buy_work_is_not_overwritten_by_an_explicit_journey_switch():
+    convo = conversation()
+    order = create_order_draft(customer=convo.user)
+    legacy = replace(
+        buy_context(str(order.id)),
+        active_journey=None,
+    )
+    persist(convo, legacy)
+    app = ConversationalOrchestrator(understanding_service=UnderstandingQueue())
+
+    outcome = app._request_journey_switch(convo, legacy, ActiveJourney.DELIVER)
+
+    convo.refresh_from_db()
+    context = ConversationContext.from_payload(convo.context)
+    assert outcome.metadata["journey_switch_confirmation"] is True
+    assert context.pending_journey_switch.source == ActiveJourney.BUY
+    assert context.active_journey is None
+    assert context.active_order_id == str(order.id)
+
+
+@pytest.mark.django_db
+def test_driver_workspace_switch_to_buy_sets_available_profile_offline(monkeypatch):
+    from apps.drivers.application.availability import DriverAvailabilityService
+    from apps.drivers.application.services import activate_driver, create_driver_profile
+    from apps.drivers.domain.enums import DriverAvailability
+
+    convo = conversation()
+    driver = activate_driver(create_driver_profile(convo.user))
+    DriverAvailabilityService().set_available(driver, convo.user)
+    persist(convo, ConversationContext(active_journey=ActiveJourney.DELIVER))
+    app = ConversationalOrchestrator(
+        understanding_service=UnderstandingQueue(understanding(MessageIntent.CREATE_OR_UPDATE_ORDER))
+    )
+    monkeypatch.setattr(app, "_active_delivery_mission", lambda _conversation: None)
+
+    outcome = app.process_message(
+        convo, inbound("Je veux acheter", message_id="switch-driver-buy")
+    )
+
+    driver.refresh_from_db()
+    convo.refresh_from_db()
+    context = ConversationContext.from_payload(convo.context)
+    assert driver.availability_status == DriverAvailability.OFFLINE
+    assert "profil livreur est conservé" in outcome.response.text
+    assert context.active_journey == ActiveJourney.BUY
+    assert not context.suspended_tasks
 
 
 def test_resume_exposes_next_step():

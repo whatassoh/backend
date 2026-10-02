@@ -116,20 +116,34 @@ def active_task_kind(context: ConversationContext) -> ConversationTaskKind | Non
             or context.pending_seller_catalog_mutation is not None
         ):
             return ConversationTaskKind.SELLER_CATALOG
-        return ConversationTaskKind.JOURNEY
+        return None
     if context.active_journey == ActiveJourney.DELIVER:
         if (
             context.driver_onboarding is not None
             and context.driver_onboarding.stage != DriverOnboardingStage.COMPLETED
         ):
             return ConversationTaskKind.DRIVER_ONBOARDING
-        return ConversationTaskKind.JOURNEY
+        return None
+    if context.active_journey is None:
+        if (
+            context.seller_onboarding is not None
+            and context.seller_onboarding.stage != SellerOnboardingStage.COMPLETED
+        ):
+            return ConversationTaskKind.SELLER_ONBOARDING
+        if (
+            context.metadata.get("seller_catalog_active") is True
+            or context.pending_seller_catalog_mutation is not None
+        ):
+            return ConversationTaskKind.SELLER_CATALOG
+        if (
+            context.driver_onboarding is not None
+            and context.driver_onboarding.stage != DriverOnboardingStage.COMPLETED
+        ):
+            return ConversationTaskKind.DRIVER_ONBOARDING
     if context.metadata.get("awaiting_delivery_instructions"):
         return ConversationTaskKind.DELIVERY_INSTRUCTIONS
     if context.active_order_id or context.pending_clarification:
         return ConversationTaskKind.ORDER
-    if context.active_journey is not None:
-        return ConversationTaskKind.JOURNEY
     return None
 
 
@@ -232,7 +246,7 @@ def resume_last_task(
         remaining = tuple(
             item
             for item in remaining
-            if item.kind != current_kind and item.journey != context.active_journey
+            if item.kind != current_kind
         )
         remaining = (*remaining, current)[-5:]
     metadata = dict(task.metadata) if task.snapshot_version else {**context.metadata}

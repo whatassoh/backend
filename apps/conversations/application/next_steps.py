@@ -1,5 +1,6 @@
 """Structural next-step contract for active conversational journeys."""
 
+import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -162,6 +163,10 @@ def _is_terminal(outcome):
 
 
 def _must_render_instruction(response):
+    # Waiting is user-facing information, not an implicit consequence of an
+    # optional workspace button.  Always render it, even when controls exist.
+    if response.next_step.kind == NextStepKind.SYSTEM_WAIT:
+        return True
     if response.actions:
         return False
     return response.next_step.kind in {
@@ -180,4 +185,9 @@ def _append_instruction(text, instruction):
 
 
 def _contains_instruction(text, instruction):
-    return " ".join(instruction.casefold().split()) in " ".join(text.casefold().split())
+    # Visible guidance can legitimately end with a comma or semicolon before
+    # a second sentence.  Compare normalised words, not typography.
+    def normalise(value):
+        return " ".join(re.sub(r"[^\w\s]", " ", value.casefold()).split())
+
+    return normalise(instruction) in normalise(text)

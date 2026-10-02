@@ -43,6 +43,14 @@ class ConversationContextService:
             ConversationContext.from_payload(locked.context)
         ).to_payload()
         locked.save(update_fields=["context", "updated_at"])
+        # Callers commonly continue their work with the same in-memory
+        # Conversation instance (for example, clearing a pending replacement
+        # before advancing the order).  Keep that instance in sync with the
+        # locked write: otherwise a subsequent get_context(conversation)
+        # observes the stale JSON payload and can revive a completed pending
+        # state.
+        conversation.context = locked.context
+        conversation.updated_at = locked.updated_at
         return locked
 
     def clear_context(self, conversation: Conversation) -> Conversation:

@@ -166,8 +166,8 @@ def test_duplicate_callback_is_idempotent_and_switching_preserves_roles():
     conversation = make_conversation()
     user = conversation.user
     # A user may independently have multiple durable roles; route changes do not edit them.
-    from apps.identity.infrastructure.models import UserRole
     from apps.identity.domain.enums import UserRoleType
+    from apps.identity.infrastructure.models import UserRole
 
     UserRole.objects.create(user=user, role=UserRoleType.CLIENT)
     UserRole.objects.create(user=user, role=UserRoleType.DRIVER)
@@ -179,12 +179,20 @@ def test_duplicate_callback_is_idempotent_and_switching_preserves_roles():
     duplicate = app.process_message(
         conversation, inbound(action_id="journey.select.sell", message_id="cb-1")
     )
-    app.process_message(
+    switch = app.process_message(
         conversation, inbound(action_id="journey.select.buy", message_id="cb-2")
     )
     assert first.metadata["journey"] == "SELL"
     assert duplicate.status.value == "DUPLICATE"
+    assert switch.metadata["journey_switch_confirmation"] is True
     assert set(user.roles.values_list("role", flat=True)) == {"CLIENT", "DRIVER"}
+    app.process_message(
+        conversation,
+        inbound(
+            action_id="journey.switch.confirm.buy",
+            message_id="confirm-buy",
+        ),
+    )
     conversation.refresh_from_db()
     assert (
         ConversationContext.from_payload(conversation.context).active_journey
@@ -515,10 +523,9 @@ def test_valid_replacement_choice_replaces_without_adding():
     assert old.product_id == product.id and old.requested_name == "Coca"
     assert old.quantity == 2
     assert old.order.items.count() == 1
-    assert (
-        ConversationContext.from_payload(conversation.context).pending_clarification
-        is None
-    )
+    resumed_context = ConversationContext.from_payload(conversation.context)
+    assert resumed_context.flow == ConversationFlow.AWAITING_LOCATION
+    assert resumed_context.pending_clarification.kind == ClarificationKind.MISSING_LOCATION
     assert result.actions_performed == ("order_item_replaced",)
 
 
@@ -552,7 +559,6 @@ def test_variant_callback_uses_variant_identity_and_preserves_quantity():
         create_product,
         create_product_variant,
     )
-    from apps.catalog.domain.enums import ProductUnit
     from apps.conversations.domain.context import (
         ClarificationKind,
         PendingClarification,
@@ -594,8 +600,15 @@ def test_variant_callback_uses_variant_identity_and_preserves_quantity():
 
 @pytest.mark.django_db
 def test_variant_replacement_callback_is_idempotent_and_keeps_original_target():
-    from apps.catalog.application.services import create_category, create_product, create_product_variant
-    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.catalog.application.services import (
+        create_category,
+        create_product,
+        create_product_variant,
+    )
+    from apps.conversations.domain.context import (
+        ClarificationKind,
+        PendingClarification,
+    )
     from apps.orders.application.services import add_order_item, create_order_draft
 
     conversation = make_conversation()
@@ -643,8 +656,11 @@ def test_conversation_persists_each_product_variant_in_a_complete_multi_item_req
     rice = create_product(name="Riz", category=category, default_unit=ProductUnit.BAG)
     rice_five_kg = create_product_variant(product=rice, name="Sac 5 kg")
     create_product_variant(product=rice, name="Sac 25 kg")
-    from apps.catalog.application.grounding import CatalogGroundingService
-    from apps.catalog.application.grounding import _normalize_variant_hint, _variant_hint_matches
+    from apps.catalog.application.grounding import (
+        CatalogGroundingService,
+        _normalize_variant_hint,
+        _variant_hint_matches,
+    )
     assert _variant_hint_matches(_normalize_variant_hint("5kg"), _normalize_variant_hint("Sac 5 kg"))
     assert CatalogGroundingService().ground_item(
         ExtractedItem(requested_name="Riz", quantity=Decimal("1"), unit=ExtractedUnit.BAG, variant_hint="5kg")
@@ -728,7 +744,10 @@ def test_unmatched_replacement_keeps_target_and_merges_slots_progressively():
         CatalogResolution,
         CatalogResolutionReason,
     )
-    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.conversations.domain.context import (
+        ClarificationKind,
+        PendingClarification,
+    )
     from apps.orders.application.services import add_order_item, create_order_draft
     from apps.orders.domain.enums import OrderItemResolutionStatus
 
@@ -816,14 +835,19 @@ def test_unmatched_replacement_keeps_target_and_merges_slots_progressively():
     assert rice.product_id == diapers.id
     assert rice.requested_name == "couches taille M"
     assert rice.quantity == Decimal("2") and rice.unit == "PACK"
-    assert ConversationContext.from_payload(conversation.context).pending_clarification is None
+    resumed_context = ConversationContext.from_payload(conversation.context)
+    assert resumed_context.flow == ConversationFlow.AWAITING_LOCATION
+    assert resumed_context.pending_clarification.kind == ClarificationKind.MISSING_LOCATION
 
 
 @pytest.mark.django_db
 def test_pending_replacement_is_handled_before_generic_order_intent():
     """A complete replacement answer must not start a second order flow."""
     from apps.catalog.application.services import create_category, create_product
-    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.conversations.domain.context import (
+        ClarificationKind,
+        PendingClarification,
+    )
     from apps.orders.application.services import add_order_item, create_order_draft
     from apps.orders.domain.enums import OrderItemResolutionStatus
 
@@ -898,7 +922,8 @@ def test_pending_replacement_is_handled_before_generic_order_intent():
     assert len(items) == 1
     assert items[0].product_id == rice_product.id
     assert items[0].quantity == Decimal("3")
-    assert context.pending_clarification is None
+    assert context.flow == ConversationFlow.AWAITING_LOCATION
+    assert context.pending_clarification.kind == ClarificationKind.MISSING_LOCATION
     assert context.active_order_id == str(order.id)
     assert context.active_journey == ActiveJourney.BUY
     assert context.metadata["unrelated_context"] == "preserved"
@@ -906,7 +931,10 @@ def test_pending_replacement_is_handled_before_generic_order_intent():
 
 @pytest.mark.django_db
 def test_invalid_replacement_reply_requests_clarification_without_mutation():
-    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.conversations.domain.context import (
+        ClarificationKind,
+        PendingClarification,
+    )
     from apps.orders.application.services import add_order_item, create_order_draft
     from apps.orders.domain.enums import OrderItemResolutionStatus
 
@@ -958,7 +986,10 @@ def test_invalid_replacement_reply_requests_clarification_without_mutation():
 
 @pytest.mark.django_db
 def test_hard_interrupt_still_preempts_pending_replacement():
-    from apps.conversations.domain.context import ClarificationKind, PendingClarification
+    from apps.conversations.domain.context import (
+        ClarificationKind,
+        PendingClarification,
+    )
     from apps.orders.application.services import add_order_item, create_order_draft
 
     conversation = make_conversation()
