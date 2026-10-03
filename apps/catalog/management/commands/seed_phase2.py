@@ -36,6 +36,7 @@ from apps.drivers.domain.enums import DriverAvailability, VehicleType
 from apps.drivers.infrastructure.models import DriverProfile
 from apps.identity.application.services import (
     assign_role,
+    create_user_for_telegram,
     get_or_create_user_by_whatsapp,
 )
 from apps.identity.domain.enums import UserRoleType
@@ -43,6 +44,14 @@ from apps.stores.application.services import add_store_member, create_store
 from apps.stores.domain.enums import StoreMembershipRole
 from apps.stores.domain.services import make_store_point
 from apps.stores.infrastructure.models import Store
+
+
+from apps.messaging.application.services import (
+    get_or_create_channel_identity,
+)
+
+from apps.messaging.domain.enums import MessagingChannel
+from apps.messaging.infrastructure.models import ChannelIdentity
 
 
 class Command(BaseCommand):
