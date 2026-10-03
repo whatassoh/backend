@@ -24,6 +24,7 @@ from apps.telegram.exceptions import (
 )
 from apps.whatsapp.domain.exceptions import (
     WhatsAppTemplateConfigurationError,
+    WhatsAppTemplateRequired,
     WhatsAppTemplateValidationError,
 )
 from apps.whatsapp.exceptions import (
@@ -61,6 +62,7 @@ class FailureClassifier:
         if isinstance(
             exc,
             (
+                WhatsAppTemplateRequired,
                 WhatsAppTemplateValidationError,
                 WhatsAppInvalidPayloadError,
                 TelegramInvalidPayloadError,

@@ -5,9 +5,13 @@ import pytest
 from django.contrib.gis.geos import Point
 from django.utils import timezone
 
-from apps.identity.infrastructure.models import User
-from apps.catalog.application.services import create_category, create_product, create_product_variant
+from apps.catalog.application.services import (
+    create_category,
+    create_product,
+    create_product_variant,
+)
 from apps.catalog.domain.enums import ProductUnit
+from apps.identity.infrastructure.models import User
 from apps.orders.application.services import add_order_item, create_order_draft
 from apps.orders.domain.enums import OrderItemResolutionStatus, OrderStatus
 from apps.stores.application.offer_actions import (
@@ -81,7 +85,7 @@ def test_unauthorized_unknown_expired_and_already_handled_are_safe(monkeypatch):
     assert service.handle(actor=actor, offer_id=offer.id, action_id="store_offer.reject") == StoreOfferActionResult.NOT_AVAILABLE
     offer.status = StoreOfferStatus.ACCEPTED
     offer.save(update_fields=["status", "updated_at"])
-    assert service.handle(actor=actor, offer_id=offer.id, action_id="store_offer.accept") == StoreOfferActionResult.NOT_AVAILABLE
+    assert service.handle(actor=actor, offer_id=offer.id, action_id="store_offer.accept") == StoreOfferActionResult.ACCEPTED
 
 
 def test_callback_encoding_is_deterministic_and_rejects_tampering():

@@ -64,8 +64,8 @@ class Command(BaseCommand):
 
     def _seed_users(self) -> dict[str, object]:
         specs = [
-            ("owner_a", "+237674242450", "Alice", "Mbarga"),
-            ("owner_b", "+237696767542", "Bruno", "Nana"),
+            ("owner_a", "+237674242450", "Louis", "David"),
+            ("owner_b", "+237696767542", "Jacob", "Brayan"),
             ("manager_a", "+237699000003", "Carine", "Manager"),
             ("agent_a", "+237699000004", "David", "Agent"),
             ("driver_a", "+237699000005", "Estelle", "Driver"),
