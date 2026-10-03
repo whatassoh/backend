@@ -31,6 +31,32 @@ def notify_store_accepted(*, order_id, correlation_id=None):
     )
 
 
+def notify_store_preparation_started(*, order_id, correlation_id=None):
+    return _intent(
+        order_id=order_id,
+        kind=NotificationKind.STORE_PREPARATION_STARTED,
+        key=f"order:{order_id}:preparation-started",
+        text=(
+            "La boutique prépare votre commande. Vous n'avez rien à faire pour "
+            "l'instant ; je vous préviendrai lorsqu'elle sera prête."
+        ),
+        correlation_id=correlation_id,
+    )
+
+
+def notify_order_ready(event):
+    return _intent(
+        order_id=event.order_id,
+        kind=NotificationKind.ORDER_READY_FOR_PICKUP,
+        key=f"order:{event.order_id}:ready-for-pickup",
+        text=(
+            "Votre commande est prête. Nous recherchons maintenant un livreur ; "
+            "vous n'avez rien à faire pour l'instant."
+        ),
+        correlation_id=event.correlation_id,
+    )
+
+
 def notify_order_failed(event):
     if event.failure_code != OrderFailureCode.NO_STORE_AVAILABLE:
         return None

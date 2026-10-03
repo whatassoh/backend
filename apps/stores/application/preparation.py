@@ -110,7 +110,16 @@ class StorePreparationService:
             try:
                 if target == OrderStatus.PREPARING:
                     mark_preparing(order, actor=actor, actor_type=AuditActorType.USER, correlation_id=correlation_id)
-                    logger.info("store_preparation_started", extra={"order_id": str(order.id), "store_id": str(offer.store_id), "correlation_id": correlation_id})
+                    from apps.orders.application.customer_notifications import (
+                        notify_store_preparation_started,
+                    )
+
+                    transaction.on_commit(
+                        lambda: notify_store_preparation_started(
+                            order_id=order.id, correlation_id=correlation_id
+                        )
+                    )
+                    logger.info("store_order_preparing", extra={"order_id": str(order.id), "store_id": str(offer.store_id), "correlation_id": correlation_id})
                     return StorePreparationResult.STARTED
                 mark_ready_for_pickup(order, actor=actor, actor_type=AuditActorType.USER, correlation_id=correlation_id)
             except InvalidOrderTransition:
@@ -120,5 +129,5 @@ class StorePreparationService:
                 order_id=order.id, store_id=offer.store_id, customer_id=order.customer_id,
                 correlation_id=correlation_id,
             )))
-            logger.info("order_ready_for_pickup", extra={"order_id": str(order.id), "store_id": str(offer.store_id), "correlation_id": correlation_id})
+            logger.info("store_order_ready", extra={"order_id": str(order.id), "store_id": str(offer.store_id), "correlation_id": correlation_id})
             return StorePreparationResult.READY

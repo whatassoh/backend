@@ -232,6 +232,8 @@ class NotificationService:
                 NotificationKind.ORDER_STORE_ACCEPTED: WhatsAppTemplateKey.ORDER_ACTION_REQUIRED,
                 NotificationKind.ORDER_NO_STORE_AVAILABLE: WhatsAppTemplateKey.ORDER_ACTION_REQUIRED,
                 NotificationKind.ORDER_CANCELLED: WhatsAppTemplateKey.ORDER_ACTION_REQUIRED,
+                NotificationKind.STORE_PREPARATION_STARTED: WhatsAppTemplateKey.ORDER_ACTION_REQUIRED,
+                NotificationKind.ORDER_READY_FOR_PICKUP: WhatsAppTemplateKey.ORDER_ACTION_REQUIRED,
             }.get(notification.kind)
             if template_key is None:
                 raise MessagingPermanentError("No WhatsApp template is mapped to notification kind.")

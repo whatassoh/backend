@@ -2,9 +2,14 @@ from types import SimpleNamespace
 
 from django.test import SimpleTestCase, override_settings
 
-from apps.messaging.domain.exceptions import MessagingRateLimitError, MessagingTemporaryError
+from apps.messaging.application.failures import FailureClassifier
+from apps.messaging.domain.exceptions import (
+    MessagingRateLimitError,
+    MessagingTemporaryError,
+)
 from apps.stores.application.offer_notifications import (
-    OutboundInstruction, ProviderErrorCategory, StoreOfferNotificationRenderer, classify_provider_error,
+    OutboundInstruction,
+    StoreOfferNotificationRenderer,
     retry_delay_seconds,
 )
 from apps.stores.tasks import _dispatch
@@ -15,11 +20,15 @@ from apps.whatsapp.domain.templates import validate_template_parameters
 
 class StoreOfferNotificationBoundaryTests(SimpleTestCase):
     def test_retryable_errors_are_not_business_rejections(self):
-        result = classify_provider_error(MessagingRateLimitError("slow", retry_after=12))
-        self.assertEqual(result.category, ProviderErrorCategory.RATE_LIMIT)
+        result = FailureClassifier.classify(
+            MessagingRateLimitError("slow", retry_after=12)
+        )
+        self.assertEqual(result.category, "RATE_LIMIT")
         self.assertTrue(result.retryable)
         self.assertEqual(result.retry_after, 12)
-        self.assertTrue(classify_provider_error(MessagingTemporaryError("timeout")).retryable)
+        self.assertTrue(
+            FailureClassifier.classify(MessagingTemporaryError("timeout")).retryable
+        )
 
     def test_telegram_renderer_keeps_stable_business_actions(self):
         notification = SimpleNamespace(

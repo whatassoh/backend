@@ -1493,6 +1493,7 @@ class ConversationalOrchestrator:
             actor=conversation.user,
             offer_id=offer_id,
             action_id=action_id,
+            correlation_id=correlation_id,
         )
         if result == StoreOfferActionResult.ACCEPTED:
             from apps.stores.application.offer_actions import present_offer
