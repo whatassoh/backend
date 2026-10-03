@@ -84,6 +84,7 @@ class Command(BaseCommand):
             ("driver_e", "+237699000009", "Ines", "Driver"),
             ("client_a", "+237699000010", "Joelle", "Client"),
         ]
+
         users = {}
 
         for key, phone, first_name, last_name in specs:
@@ -99,6 +100,63 @@ class Command(BaseCommand):
         assign_role(users["manager_a"], UserRoleType.STORE_MANAGER)
         assign_role(users["agent_a"], UserRoleType.STORE_AGENT)
         assign_role(users["client_a"], UserRoleType.CLIENT)
+
+        # --------------------------------------------------------
+        # Telegram demo store owner
+        # --------------------------------------------------------
+
+        telegram_external_user_id = "5605841092"
+        telegram_username = "Jacobrayan"
+
+        telegram_identity = (
+            ChannelIdentity.objects
+            .select_related("user")
+            .filter(
+                channel=MessagingChannel.TELEGRAM,
+                external_user_id=telegram_external_user_id,
+            )
+            .first()
+        )
+
+        if telegram_identity is not None:
+            telegram_owner = telegram_identity.user
+        else:
+            telegram_owner = create_user_for_telegram(
+                first_name="Jacob",
+                last_name="Brayan",
+            )
+
+            telegram_identity, _ = get_or_create_channel_identity(
+                user=telegram_owner,
+                channel=MessagingChannel.TELEGRAM,
+                external_user_id=telegram_external_user_id,
+                defaults={
+                    "external_username": telegram_username,
+                    "is_active": True,
+                },
+            )
+
+        # Make sure an existing Telegram identity is usable.
+        changed_fields = []
+
+        if telegram_identity.external_username != telegram_username:
+            telegram_identity.external_username = telegram_username
+            changed_fields.append("external_username")
+
+        if not telegram_identity.is_active:
+            telegram_identity.is_active = True
+            changed_fields.append("is_active")
+
+        if changed_fields:
+            changed_fields.append("updated_at")
+            telegram_identity.save(update_fields=changed_fields)
+
+        assign_role(
+            telegram_owner,
+            UserRoleType.STORE_OWNER,
+        )
+
+        users["telegram_owner"] = telegram_owner
 
         return users
 
@@ -260,6 +318,11 @@ class Command(BaseCommand):
             StoreMembershipRole.AGENT,
         )
         add_store_member(stores["akwa"], users["owner_b"], StoreMembershipRole.OWNER)
+        add_store_member(
+            stores["akwa"],
+            users["telegram_owner"],
+            StoreMembershipRole.OWNER,
+        )
 
         return stores
 
