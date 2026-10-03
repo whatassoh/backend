@@ -10,7 +10,6 @@ from django.utils import timezone
 from apps.messaging.application.failures import FailureClassifier
 from apps.messaging.application.orchestration import (
     send_conversation_interactive,
-    send_conversation_text,
 )
 from apps.orders.domain.enums import OrderStatus
 from apps.orders.infrastructure.models import Order
@@ -18,6 +17,10 @@ from apps.stores.application.offer_notifications import (
     StoreOfferNotificationRenderer,
     StoreOfferNotificationService,
     retry_delay_seconds,
+)
+from apps.stores.application.partial_coverage_actions import (
+    partial_coverage_actions,
+    partial_coverage_text,
 )
 from apps.stores.domain.enums import StoreOfferNotificationStatus, StoreOfferStatus
 from apps.stores.infrastructure.models import StoreOffer, StoreOfferNotification
@@ -87,21 +90,10 @@ def deliver_partial_coverage_proposal(self, order_id, correlation_id=None):
     )
     if conversation is None:
         return {"status": "NOOP", "reason": "NO_ACTIVE_CONVERSATION"}
-    snapshot = proposal.proposal_snapshot
-    covered = "\n".join(
-        "✓ " + row["requested_name"] for row in snapshot.get("covered_items", [])
-    )
-    uncovered = "\n".join(
-        "✗ " + row["requested_name"] for row in snapshot.get("uncovered_items", [])
-    )
-    text = f"Aucune boutique ne peut fournir toute votre commande. {proposal.store.name} peut fournir :\n{covered}\n\nElle ne propose pas :\n{uncovered}\n\nVoulez-vous continuer sans ces produits ?"
+    text = partial_coverage_text(proposal)
     metadata = {
         "partial_coverage_proposal_id": str(proposal.id),
-        "actions": [
-            {"id": "order.accept_partial_store_coverage", "label": "Continuer"},
-            {"id": "order.modify", "label": "Modifier ma commande"},
-            {"id": "order.cancel", "label": "Annuler"},
-        ],
+        "actions": partial_coverage_actions(proposal),
     }
     if conversation.channel == "WHATSAPP":
         from apps.whatsapp.application.outbound import (
@@ -109,7 +101,7 @@ def deliver_partial_coverage_proposal(self, order_id, correlation_id=None):
         )
         from apps.whatsapp.domain.dtos import WhatsAppReplyButton
 
-        return send_whatsapp_interactive_reply_buttons(
+        result = send_whatsapp_interactive_reply_buttons(
             conversation=conversation,
             body=text,
             buttons=[
@@ -118,12 +110,17 @@ def deliver_partial_coverage_proposal(self, order_id, correlation_id=None):
             ],
             metadata=metadata,
         )
-    return send_conversation_text(
-        conversation=conversation,
-        text=text,
-        metadata=metadata,
-        correlation_id=correlation_id,
-    )
+    else:
+        # Telegram builds its inline keyboard only for INTERACTIVE messages.
+        result = send_conversation_interactive(
+            conversation=conversation,
+            text=text,
+            actions=metadata["actions"],
+            metadata=metadata,
+            correlation_id=correlation_id,
+        )
+    # Celery uses JSON serialization; ProviderSendResult contains a MessageEvent.
+    return {"status": "SENT", "external_message_id": result.external_message_id}
 
 
 def _dispatch(notification, instruction, correlation_id):

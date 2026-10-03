@@ -413,6 +413,13 @@ class ConversationalOrchestrator:
             return self._from_seller_workspace(workspace, context)
         if self._is_location_edit_reply(context, message.text):
             return self._start_location_change(conversation, context)
+        # A live partial proposal owns an explicit affirmative before generic
+        # navigation (notably RESUME/CONTINUE) gets a chance to reinterpret it.
+        partial_coverage = self._partial_coverage_text_action(
+            conversation, context, message.text, correlation_id
+        )
+        if partial_coverage is not None:
+            return partial_coverage
         universal = self._try_universal_interrupt(
             conversation,
             context,
@@ -528,6 +535,11 @@ class ConversationalOrchestrator:
             )
             if choice is not None:
                 return choice
+            partial_coverage = self._partial_coverage_action(
+                conversation, context, action_id, correlation_id
+            )
+            if partial_coverage is not None:
+                return partial_coverage
             store_offer = self._store_offer_action(
                 conversation, context, action_id, correlation_id
             )
@@ -1470,6 +1482,162 @@ class ConversationalOrchestrator:
                 "Cette proposition n'est plus disponible.",
                 context,
             )
+
+    def _partial_coverage_action(self, conversation, context, callback_id, correlation_id):
+        """Route a provider callback to the existing consent transaction."""
+        from apps.stores.application.partial_coverage_actions import (
+            decode_partial_coverage_action,
+        )
+
+        decoded = decode_partial_coverage_action(callback_id)
+        if decoded is None:
+            if callback_id.startswith("partial_coverage."):
+                return self._outcome(
+                    ConversationalOutcomeStatus.REJECTED,
+                    "Cette proposition n'est plus disponible.",
+                    context,
+                )
+            return None
+        action_id, proposal_id = decoded
+        from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+
+        proposal = (
+            PartialStoreCoverageProposal.objects.select_related("order", "store")
+            .filter(pk=proposal_id, order__customer=conversation.user)
+            .first()
+        )
+        if proposal is None:
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette proposition n'est plus disponible.",
+                context,
+            )
+
+        from apps.stores.application.partial_coverage import (
+            PartialCoverageConsentService,
+        )
+
+        try:
+            if action_id == "partial_coverage.accept":
+                order, replay = PartialCoverageConsentService().accept(
+                    order_id=proposal.order_id,
+                    customer=conversation.user,
+                    correlation_id=correlation_id,
+                )
+                text = (
+                    "Cette décision a déjà été prise. Nous poursuivons la recherche "
+                    "de boutique."
+                    if replay
+                    else "Votre commande a été ajustée et nous recherchons à nouveau "
+                    "une boutique. Je vous indique ici la prochaine étape."
+                )
+                return ConversationalOutcome(
+                    status=ConversationalOutcomeStatus.PROCESSED,
+                    response=ResponsePlan(
+                        text=text,
+                        next_step=system_wait("Recherche de boutique en cours."),
+                    ),
+                    active_order_id=str(order.id),
+                    metadata={
+                        "partial_coverage": "ACCEPTED",
+                        "proposal_id": str(proposal_id),
+                        "replay": replay,
+                    },
+                )
+            if action_id == "partial_coverage.modify":
+                order = PartialCoverageConsentService().return_to_editing(
+                    order_id=proposal.order_id,
+                    customer=conversation.user,
+                    correlation_id=correlation_id,
+                )
+                attached = self.active_order_service.attach_order(
+                    conversation, str(order.id), correlation_id=correlation_id
+                )
+                return ConversationalOutcome(
+                    status=ConversationalOutcomeStatus.PROCESSED,
+                    response=ResponsePlan(
+                        text="Que souhaitez-vous modifier ?",
+                        actions=(
+                            ResponseAction(
+                                action_id="order.modify.products", label="Produits"
+                            ),
+                            ResponseAction(
+                                action_id="order.change_location", label="Adresse"
+                            ),
+                            ResponseAction(action_id="order.modify.back", label="Retour"),
+                        ),
+                    ),
+                    active_order_id=str(attached.order.id) if attached.order else str(order.id),
+                    metadata={
+                        "partial_coverage": "MODIFY",
+                        "proposal_id": str(proposal_id),
+                    },
+                )
+            PartialCoverageConsentService().cancel(
+                order_id=proposal.order_id,
+                customer=conversation.user,
+                correlation_id=correlation_id,
+            )
+        except (ValueError, PermissionError):
+            return self._outcome(
+                ConversationalOutcomeStatus.REJECTED,
+                "Cette proposition n'est plus disponible.",
+                context,
+            )
+        return ConversationalOutcome(
+            status=ConversationalOutcomeStatus.PROCESSED,
+            response=ResponsePlan(
+                text="Votre commande est annulée.",
+                next_step=workflow_complete("Cette commande est terminée."),
+            ),
+            active_order_id=str(proposal.order_id),
+            metadata={"partial_coverage": "CANCELLED", "proposal_id": str(proposal_id)},
+        )
+
+    def _partial_coverage_text_action(
+        self, conversation, context, text, correlation_id
+    ):
+        """Accept only an explicit free-text affirmative for one live proposal."""
+        if not text:
+            return None
+        import unicodedata
+
+        normalized = unicodedata.normalize("NFKD", text).encode(
+            "ascii", "ignore"
+        ).decode().casefold()
+        normalized = " ".join(re.sub(r"[^a-z]+", " ", normalized).split())
+        affirmative = {
+            "continuer sans les produits",
+            "continuer sans",
+            "continue sans",
+            "garder seulement les produits disponibles",
+        }
+        if normalized not in affirmative:
+            return None
+        from apps.stores.domain.enums import PartialStoreCoverageProposalStatus
+        from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+
+        proposals = list(
+            PartialStoreCoverageProposal.objects.select_related("order")
+            .filter(
+                order__customer=conversation.user,
+                order__status=OrderStatus.AWAITING_PARTIAL_COVERAGE,
+                status=PartialStoreCoverageProposalStatus.PENDING,
+            )[:2]
+        )
+        if len(proposals) != 1:
+            # Never turn a vague text into a purchase-affecting choice.
+            return None
+        from apps.stores.application.partial_coverage_actions import (
+            encode_partial_coverage_action,
+        )
+
+        return self._partial_coverage_action(
+            conversation,
+            context,
+            encode_partial_coverage_action("partial_coverage.accept", proposals[0].id),
+            correlation_id,
+        )
 
     def _store_offer_action(self, conversation, context, callback_id, correlation_id):
         from apps.stores.application.offer_actions import (
@@ -2565,41 +2733,6 @@ class ConversationalOrchestrator:
         )
         if unmatched is not None:
             return unmatched
-        if action_id == "order.accept_partial_store_coverage":
-            from apps.stores.application.partial_coverage import (
-                PartialCoverageConsentService,
-            )
-
-            proposal_id = metadata.get("partial_coverage_proposal_id")
-            try:
-                from apps.stores.infrastructure.models import (
-                    PartialStoreCoverageProposal,
-                )
-
-                proposal = PartialStoreCoverageProposal.objects.filter(
-                    pk=proposal_id
-                ).first()
-                if proposal is None:
-                    raise ValueError("stale")
-                order, replay = PartialCoverageConsentService().accept(
-                    order_id=proposal.order_id,
-                    customer=conversation.user,
-                    correlation_id=correlation_id,
-                )
-            except (ValueError, PermissionError):
-                return self._outcome(
-                    ConversationalOutcomeStatus.REJECTED,
-                    "Cette proposition n'est plus disponible.",
-                    context,
-                )
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                "Votre commande a été ajustée et nous recherchons à nouveau une boutique. "
-                "Vous n'avez rien à faire pour l'instant ; je vous préviendrai dès qu'une boutique répond.",
-                context,
-                metadata={"order_waiting": "MATCHING_STORES"},
-                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
-            )
         if action_id == "order.status":
             from apps.orders.domain.enums import OrderStatus
             from apps.orders.infrastructure.models import Order
@@ -3016,13 +3149,18 @@ class ConversationalOrchestrator:
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
             response=ResponsePlan(
-                text="Demande confirmée ✅\nNous recherchons maintenant une boutique capable de fournir votre commande. Vous n'avez rien à faire pour l'instant ; je vous préviendrai ici dès qu'une boutique répond.",
+                text=(
+                    "Demande enregistrée ✅\nJe vérifie maintenant les boutiques "
+                    "disponibles et je vous indique ici la prochaine étape."
+                ),
                 actions=(
                     ResponseAction(
                         action_id="order.status", label="Suivre ma commande"
                     ),
                 ),
-                next_step=system_wait("Vous n'avez rien à faire pour l'instant."),
+                next_step=system_wait(
+                    "Je vérifie les boutiques et vous indique la prochaine étape."
+                ),
             ),
             actions_performed=("order_confirmed",),
             active_order_id=str(order.id),
@@ -3041,8 +3179,46 @@ class ConversationalOrchestrator:
             OrderStatus.CONFIRMED,
             OrderStatus.MATCHING_STORES,
             OrderStatus.STORE_OFFERED,
+            OrderStatus.AWAITING_PARTIAL_COVERAGE,
         }:
             return None
+        if order.status == OrderStatus.AWAITING_PARTIAL_COVERAGE:
+            from apps.stores.application.partial_coverage_actions import (
+                partial_coverage_actions,
+                partial_coverage_text,
+            )
+            from apps.stores.domain.enums import PartialStoreCoverageProposalStatus
+            from apps.stores.infrastructure.models import PartialStoreCoverageProposal
+
+            proposal = (
+                PartialStoreCoverageProposal.objects.select_related("store")
+                .filter(
+                    order=order, status=PartialStoreCoverageProposalStatus.PENDING
+                )
+                .first()
+            )
+            if proposal is not None:
+                return ConversationalOutcome(
+                    status=ConversationalOutcomeStatus.PROCESSED,
+                    response=ResponsePlan(
+                        text=(
+                            "Votre commande est déjà validée. J'attends votre "
+                            "décision concernant les produits indisponibles.\n\n"
+                            f"{partial_coverage_text(proposal)}"
+                        ),
+                        actions=tuple(
+                            ResponseAction(action_id=item["id"], label=item["label"])
+                            for item in partial_coverage_actions(proposal)
+                        ),
+                        next_step=NextStep(
+                            kind=NextStepKind.USER_ACTION,
+                            instruction="Choisissez une option pour continuer.",
+                        ),
+                    ),
+                    actions_performed=("order_confirmation_replayed",),
+                    active_order_id=str(order.id),
+                    metadata={"partial_coverage_proposal_id": str(proposal.id)},
+                )
         return ConversationalOutcome(
             status=ConversationalOutcomeStatus.PROCESSED,
             response=ResponsePlan(
@@ -3862,16 +4038,9 @@ class ConversationalOrchestrator:
         if result is None:
             return None
         if result.status != "OK":
-            return self._outcome(
-                ConversationalOutcomeStatus.PROCESSED,
-                "Vous n'avez aucune commande active à suivre pour le moment.",
-                context,
-                metadata={
-                    "capability": "order_status",
-                    "authoritative": True,
-                    "agent_read": True,
-                },
-            )
+            # ``active_order_id`` intentionally disappears after confirmation;
+            # defer to the lifecycle-order DB fallback instead of claiming none.
+            return None
         return self._outcome(
             ConversationalOutcomeStatus.PROCESSED,
             f"La commande {result.data['reference']} est actuellement au statut "
@@ -3910,6 +4079,20 @@ class ConversationalOrchestrator:
                     "capability": "order_status",
                     "authoritative": True,
                     "agent_read": False,
+                },
+            )
+        if order.status == OrderStatus.AWAITING_PARTIAL_COVERAGE:
+            return self._outcome(
+                ConversationalOutcomeStatus.PROCESSED,
+                f"La commande {order.reference} attend votre décision concernant "
+                "les produits indisponibles.",
+                context,
+                metadata={
+                    "capability": "order_status",
+                    "authoritative": True,
+                    "agent_read": False,
+                    "order_status": order.status,
+                    "order_id": str(order.id),
                 },
             )
         return self._outcome(

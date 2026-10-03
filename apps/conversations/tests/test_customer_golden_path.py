@@ -511,7 +511,7 @@ def test_confirmation_sets_customer_to_system_wait(monkeypatch):
     ).process_message(convo, inbound(action_id="order.confirm"))
 
     assert outcome.response.next_step.kind == "SYSTEM_WAIT"
-    assert "rien à faire" in outcome.response.text
+    assert "prochaine étape" in outcome.response.text
 
 
 @pytest.mark.django_db
