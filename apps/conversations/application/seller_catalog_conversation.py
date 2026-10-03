@@ -50,6 +50,17 @@ class SellerCatalogConversationService:
     cancel_action = "seller.catalog.cancel"
     confidence_threshold = Decimal("0.60")
 
+    @classmethod
+    def handles_action(cls, action_id: str | None) -> bool:
+        """Only catalogue-owned callbacks may be consumed by this flow."""
+        return bool(
+            action_id
+            and (
+                action_id.startswith("seller.catalog.")
+                or action_id == "seller.dashboard.open"
+            )
+        )
+
     def __init__(
         self,
         *,
@@ -95,6 +106,8 @@ class SellerCatalogConversationService:
             return None
         action_id = message.metadata.get("action_id")
         if action_id:
+            if not self.handles_action(action_id):
+                return None
             return self._action(conversation, context, action_id, correlation_id)
         if message.text and (
             "espace vendeur" in message.text.lower()
@@ -187,8 +200,6 @@ class SellerCatalogConversationService:
         return self._propose(conversation, context, pending, correlation_id)
 
     def _action(self, conversation, context, action_id, correlation_id):
-        if action_id.startswith("store_order."):
-            return None
         if action_id == "seller.dashboard.open":
             return self._dashboard_link(conversation, correlation_id)
         pending = context.pending_seller_catalog_mutation

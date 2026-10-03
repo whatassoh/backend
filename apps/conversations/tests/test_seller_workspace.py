@@ -27,6 +27,7 @@ from apps.messaging.domain.dtos import NormalizedInboundMessage
 from apps.messaging.domain.enums import MessageType, MessagingChannel
 from apps.orders.domain.enums import OrderStatus
 from apps.orders.infrastructure.models import Order
+from apps.stores.application.offer_actions import encode_store_offer_action
 from apps.stores.domain.enums import StoreMembershipRole, StoreOfferStatus
 from apps.stores.infrastructure.models import Store, StoreMembership, StoreOffer
 from apps.telegram.adapters.inbound import parse_telegram_update
@@ -89,6 +90,39 @@ def orchestrator(*understandings, catalog_understanding=None):
     )
 
 
+def catalog_context(conversation, store):
+    context = ConversationContext(
+        active_journey=ActiveJourney.SELL,
+        metadata={
+            "seller_catalog_active": True,
+            "seller_store_id": str(store.id),
+        },
+    )
+    conversation.context = context.to_payload()
+    conversation.save(update_fields=["context", "updated_at"])
+    return context
+
+
+def pending_offer(store):
+    customer = User.objects.create_user(
+        whatsapp_phone=f"+23766{User.objects.count():07d}"
+    )
+    order = Order.objects.create(
+        reference=f"ORD-{Order.objects.count():010d}",
+        customer=customer,
+        status=OrderStatus.STORE_OFFERED,
+    )
+    offer = StoreOffer.objects.create(
+        order=order,
+        store=store,
+        status=StoreOfferStatus.PENDING,
+        rank=1,
+        strategy_version="test",
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+    return order, offer
+
+
 @pytest.mark.django_db
 def test_existing_seller_opens_workspace_without_restarting_onboarding():
     conversation, store = seller_conversation()
@@ -132,6 +166,160 @@ def test_workspace_catalog_action_hands_control_to_existing_catalog_flow():
     )
     assert listed.response.text.startswith("Votre catalogue est vide.")
     assert "Décrivez le produit" in listed.response.text
+    assert context.metadata["seller_store_id"] == str(store.id)
+
+
+@pytest.mark.django_db
+def test_store_offer_accept_preempts_active_seller_catalog():
+    conversation, store = seller_conversation()
+    order, offer = pending_offer(store)
+    catalog_context(conversation, store)
+    app = orchestrator()
+
+    outcome = app.process_message(
+        conversation,
+        inbound(
+            "catalog-offer-accept",
+            action_id=encode_store_offer_action("store_offer.accept", offer.id),
+        ),
+    )
+
+    offer.refresh_from_db()
+    order.refresh_from_db()
+    conversation.refresh_from_db()
+    context = ConversationContext.from_payload(conversation.context)
+    assert outcome.metadata["store_offer"] == "ACCEPTED"
+    assert offer.status == StoreOfferStatus.ACCEPTED
+    assert offer.accepted_at is not None
+    assert order.status == OrderStatus.STORE_ACCEPTED
+    assert context.active_journey == ActiveJourney.SELL
+    assert context.metadata["seller_catalog_active"] is True
+    assert "acceptée" in outcome.response.text
+    assert "action catalogue n'est pas disponible" not in outcome.response.text
+    assert [action.label for action in outcome.response.actions] == [
+        "Démarrer la préparation"
+    ]
+
+
+@pytest.mark.django_db
+def test_store_offer_reject_preempts_active_seller_catalog():
+    conversation, store = seller_conversation()
+    _order, offer = pending_offer(store)
+    catalog_context(conversation, store)
+
+    outcome = orchestrator().process_message(
+        conversation,
+        inbound(
+            "catalog-offer-reject",
+            action_id=encode_store_offer_action("store_offer.reject", offer.id),
+        ),
+    )
+
+    offer.refresh_from_db()
+    assert outcome.metadata["store_offer"] == "REJECTED"
+    assert offer.status == StoreOfferStatus.REJECTED
+    assert offer.rejected_at is not None
+
+
+@pytest.mark.django_db
+def test_unknown_non_catalog_action_is_not_consumed_by_catalog():
+    conversation, store = seller_conversation()
+    context = catalog_context(conversation, store)
+    service = SellerCatalogConversationService(
+        understanding_service=CatalogUnderstanding()
+    )
+
+    outcome = service.process(
+        conversation,
+        context,
+        inbound("catalog-foreign", action_id="store_offer.accept:not-a-uuid"),
+    )
+
+    assert outcome is None
+
+
+@pytest.mark.django_db
+def test_catalog_action_still_works():
+    conversation, store = seller_conversation()
+    catalog_context(conversation, store)
+
+    outcome = orchestrator().process_message(
+        conversation,
+        inbound("catalog-modify", action_id="seller.catalog.modify"),
+    )
+
+    assert "Décrivez la modification" in outcome.response.text
+
+
+@pytest.mark.django_db
+def test_store_offer_accept_from_telegram_callback():
+    conversation, store = seller_conversation(MessagingChannel.TELEGRAM, "catalog-tg")
+    order, offer = pending_offer(store)
+    catalog_context(conversation, store)
+    action_id = encode_store_offer_action("store_offer.accept", offer.id)
+    callback = parse_telegram_update(
+        {
+            "update_id": 9101,
+            "callback_query": {
+                "id": "catalog-offer-callback",
+                "from": {"id": "catalog-tg"},
+                "message": {"message_id": 1, "chat": {"id": "catalog-tg"}},
+                "data": action_id,
+            },
+        }
+    )[0]
+    app = orchestrator()
+
+    accepted = app.process_message(conversation, callback)
+
+    offer.refresh_from_db()
+    order.refresh_from_db()
+    assert accepted.metadata["store_offer"] == "ACCEPTED"
+    assert offer.status == StoreOfferStatus.ACCEPTED
+    assert order.status == OrderStatus.STORE_ACCEPTED
+
+
+@pytest.mark.django_db
+def test_store_offer_accept_is_idempotent():
+    conversation, store = seller_conversation()
+    order, offer = pending_offer(store)
+    catalog_context(conversation, store)
+    action_id = encode_store_offer_action("store_offer.accept", offer.id)
+    app = orchestrator()
+
+    accepted = app.process_message(
+        conversation, inbound("catalog-offer-accept", action_id=action_id)
+    )
+    replay = app.process_message(
+        conversation, inbound("catalog-offer-replay", action_id=action_id)
+    )
+
+    offer.refresh_from_db()
+    order.refresh_from_db()
+    assert accepted.metadata["store_offer"] == "ACCEPTED"
+    assert replay.metadata["store_offer"] == "ACCEPTED"
+    assert offer.status == StoreOfferStatus.ACCEPTED
+    assert order.status == OrderStatus.STORE_ACCEPTED
+
+
+@pytest.mark.django_db
+def test_store_offer_accept_does_not_destroy_catalog_context():
+    conversation, store = seller_conversation()
+    _order, offer = pending_offer(store)
+    catalog_context(conversation, store)
+
+    orchestrator().process_message(
+        conversation,
+        inbound(
+            "catalog-offer-context",
+            action_id=encode_store_offer_action("store_offer.accept", offer.id),
+        ),
+    )
+
+    conversation.refresh_from_db()
+    context = ConversationContext.from_payload(conversation.context)
+    assert context.active_journey == ActiveJourney.SELL
+    assert context.metadata["seller_catalog_active"] is True
     assert context.metadata["seller_store_id"] == str(store.id)
 
 

@@ -332,6 +332,11 @@ class ConversationalOrchestrator:
             if resumed_driver_offer is not None:
                 return resumed_driver_offer
         action_id = message.metadata.get("action_id")
+        structured = self._structured_business_action(
+            conversation, context, action_id, correlation_id
+        )
+        if structured is not None:
+            return structured
         switch_action = self._handle_journey_switch_action(
             conversation, context, action_id, correlation_id
         )
@@ -1482,6 +1487,36 @@ class ConversationalOrchestrator:
                 "Cette proposition n'est plus disponible.",
                 context,
             )
+
+    def _structured_business_action(
+        self, conversation, context, action_id, correlation_id
+    ):
+        """Give provider callbacks their business route before contextual flows."""
+        if not action_id:
+            return None
+        from apps.drivers.application.delivery_execution import decode_delivery_action
+        from apps.drivers.application.offers import decode_driver_offer_action
+        from apps.stores.application.offer_actions import decode_store_offer_action
+        from apps.stores.application.partial_coverage_actions import (
+            decode_partial_coverage_action,
+        )
+        from apps.stores.application.preparation import decode_store_order_action
+
+        routes = (
+            (decode_store_offer_action, "store_offer.", self._store_offer_action),
+            (decode_driver_offer_action, "driver_offer.", self._driver_offer_action),
+            (
+                decode_partial_coverage_action,
+                "partial_coverage.",
+                self._partial_coverage_action,
+            ),
+            (decode_store_order_action, "store_order.", self._store_order_action),
+            (decode_delivery_action, "delivery.", self._delivery_action),
+        )
+        for decoder, namespace, handler in routes:
+            if decoder(action_id) is not None or action_id.startswith(namespace):
+                return handler(conversation, context, action_id, correlation_id)
+        return None
 
     def _partial_coverage_action(self, conversation, context, callback_id, correlation_id):
         """Route a provider callback to the existing consent transaction."""
